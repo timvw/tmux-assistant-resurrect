@@ -126,15 +126,17 @@ just clean
 ## Repository structure
 
 ```
+AGENTS.md                         # Guidelines for AI coding agents
 config/
-  resurrect-assistants.conf     # tmux config: TPM + resurrect + continuum + hooks
+  resurrect-assistants.conf       # tmux config: TPM + resurrect + continuum + hooks
 hooks/
-  claude-session-track.sh       # Claude SessionStart hook script
-  opencode-session-track.js     # OpenCode session-tracker plugin
+  claude-session-track.sh         # Claude SessionStart hook (writes session ID)
+  claude-session-cleanup.sh       # Claude SessionEnd hook (removes state file)
+  opencode-session-track.js       # OpenCode plugin (tracks session ID + cleanup)
 scripts/
-  save-assistant-sessions.sh    # Resurrect post-save hook
-  restore-assistant-sessions.sh # Resurrect post-restore hook
-justfile                        # Install/uninstall/status/save/restore recipes
+  save-assistant-sessions.sh      # Resurrect post-save hook (collects session IDs)
+  restore-assistant-sessions.sh   # Resurrect post-restore hook (resumes assistants)
+justfile                          # Install/uninstall/status/save/restore recipes
 ```
 
 ## Configuration
@@ -170,19 +172,23 @@ To add a new AI coding assistant:
 
 ## How each component works
 
-### Claude Code hook (`hooks/claude-session-track.sh`)
+### Claude Code hooks (`hooks/claude-session-track.sh`, `hooks/claude-session-cleanup.sh`)
 
-Configured as a `SessionStart` hook in `~/.claude/settings.json`. Claude Code
-passes JSON on stdin to all hooks, including the `session_id` field. The script
-writes this to `/tmp/tmux-assistant-resurrect/claude-<PPID>.json`, where PPID is
-the parent shell process in the tmux pane.
+Two hooks configured in `~/.claude/settings.json`:
+
+- **`SessionStart`**: Claude Code passes JSON on stdin (including `session_id`).
+  The hook writes this to `/tmp/tmux-assistant-resurrect/claude-<PPID>.json`,
+  where PPID is the parent shell process in the tmux pane.
+- **`SessionEnd`**: Removes the state file when the Claude session exits,
+  preventing stale entries.
 
 ### OpenCode plugin (`hooks/opencode-session-track.js`)
 
 An OpenCode plugin that listens for `session.created`, `session.updated`, and
 `session.idle` events. On each event, it writes the current session ID to
 `/tmp/tmux-assistant-resurrect/opencode-<PID>.json`. This handles the case where
-a user switches sessions at runtime (via `/sessions` or `Ctrl+x l`).
+a user switches sessions at runtime (via `/sessions` or `Ctrl+x l`). The plugin
+also cleans up its state file on process exit (SIGINT, SIGTERM).
 
 ### Codex CLI
 

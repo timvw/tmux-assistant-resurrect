@@ -42,38 +42,55 @@ install-plugins:
 install-hooks: install-claude-hook install-opencode-plugin
     @echo "All assistant hooks installed"
 
-# Install Claude Code SessionStart hook into ~/.claude/settings.json
+# Install Claude Code hooks (SessionStart + SessionEnd) into ~/.claude/settings.json
 install-claude-hook:
     #!/usr/bin/env bash
     set -euo pipefail
     settings="$HOME/.claude/settings.json"
-    hook_cmd="bash {{repo_dir}}/hooks/claude-session-track.sh"
+    track_cmd="bash {{repo_dir}}/hooks/claude-session-track.sh"
+    cleanup_cmd="bash {{repo_dir}}/hooks/claude-session-cleanup.sh"
 
     if [ ! -f "$settings" ]; then
         echo '{}' > "$settings"
     fi
 
-    # Check if hook already exists
-    if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command == "'"$hook_cmd"'")' "$settings" >/dev/null 2>&1; then
+    # Install SessionStart hook (session tracking)
+    if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command == "'"$track_cmd"'")' "$settings" >/dev/null 2>&1; then
         echo "Claude SessionStart hook already configured"
-        exit 0
+    else
+        tmp=$(mktemp)
+        jq --arg cmd "$track_cmd" '
+            .hooks //= {} |
+            .hooks.SessionStart //= [] |
+            .hooks.SessionStart += [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": $cmd
+                }]
+            }]
+        ' "$settings" > "$tmp" && mv "$tmp" "$settings"
+        echo "Claude SessionStart hook installed in $settings"
     fi
 
-    # Add the hook using jq
-    tmp=$(mktemp)
-    jq --arg cmd "$hook_cmd" '
-        .hooks //= {} |
-        .hooks.SessionStart //= [] |
-        .hooks.SessionStart += [{
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": $cmd
+    # Install SessionEnd hook (state file cleanup)
+    if jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command == "'"$cleanup_cmd"'")' "$settings" >/dev/null 2>&1; then
+        echo "Claude SessionEnd hook already configured"
+    else
+        tmp=$(mktemp)
+        jq --arg cmd "$cleanup_cmd" '
+            .hooks //= {} |
+            .hooks.SessionEnd //= [] |
+            .hooks.SessionEnd += [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": $cmd
+                }]
             }]
-        }]
-    ' "$settings" > "$tmp" && mv "$tmp" "$settings"
-
-    echo "Claude SessionStart hook installed in $settings"
+        ' "$settings" > "$tmp" && mv "$tmp" "$settings"
+        echo "Claude SessionEnd hook installed in $settings"
+    fi
 
 # Install OpenCode session-tracker plugin
 install-opencode-plugin:
@@ -126,32 +143,45 @@ uninstall: uninstall-claude-hook uninstall-opencode-plugin unconfigure-tmux
     @echo "  - Remove TPM: rm -rf ~/.tmux/plugins/"
     @echo "  - Reload tmux: tmux source-file ~/.tmux.conf"
 
-# Remove Claude Code SessionStart hook
+# Remove Claude Code hooks (SessionStart + SessionEnd)
 uninstall-claude-hook:
     #!/usr/bin/env bash
     set -euo pipefail
     settings="$HOME/.claude/settings.json"
-    hook_cmd="bash {{repo_dir}}/hooks/claude-session-track.sh"
+    track_cmd="bash {{repo_dir}}/hooks/claude-session-track.sh"
+    cleanup_cmd="bash {{repo_dir}}/hooks/claude-session-cleanup.sh"
 
     if [ ! -f "$settings" ]; then
         echo "No Claude settings to modify"
         exit 0
     fi
 
+    # Remove both hooks in one pass
     tmp=$(mktemp)
-    jq --arg cmd "$hook_cmd" '
-        if .hooks.SessionStart then
+    jq --arg track "$track_cmd" --arg cleanup "$cleanup_cmd" '
+        # Remove SessionStart hook
+        (if .hooks.SessionStart then
             .hooks.SessionStart = [
                 .hooks.SessionStart[] |
-                .hooks = [.hooks[] | select(.command != $cmd)] |
+                .hooks = [.hooks[] | select(.command != $track)] |
                 select(.hooks | length > 0)
             ] |
-            if .hooks.SessionStart | length == 0 then del(.hooks.SessionStart) else . end |
-            if .hooks | length == 0 then del(.hooks) else . end
-        else . end
+            if .hooks.SessionStart | length == 0 then del(.hooks.SessionStart) else . end
+        else . end) |
+        # Remove SessionEnd hook
+        (if .hooks.SessionEnd then
+            .hooks.SessionEnd = [
+                .hooks.SessionEnd[] |
+                .hooks = [.hooks[] | select(.command != $cleanup)] |
+                select(.hooks | length > 0)
+            ] |
+            if .hooks.SessionEnd | length == 0 then del(.hooks.SessionEnd) else . end
+        else . end) |
+        # Clean up empty hooks object
+        if .hooks and (.hooks | length == 0) then del(.hooks) else . end
     ' "$settings" > "$tmp" && mv "$tmp" "$settings"
 
-    echo "Claude SessionStart hook removed"
+    echo "Claude hooks removed"
 
 # Remove OpenCode session-tracker plugin
 uninstall-opencode-plugin:
@@ -214,12 +244,18 @@ status:
         echo "[--] tmux.conf not configured"
     fi
 
-    # Claude hook
-    hook_cmd="bash {{repo_dir}}/hooks/claude-session-track.sh"
-    if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command == "'"$hook_cmd"'")' ~/.claude/settings.json >/dev/null 2>&1; then
+    # Claude hooks
+    track_cmd="bash {{repo_dir}}/hooks/claude-session-track.sh"
+    cleanup_cmd="bash {{repo_dir}}/hooks/claude-session-cleanup.sh"
+    if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command == "'"$track_cmd"'")' ~/.claude/settings.json >/dev/null 2>&1; then
         echo "[ok] Claude SessionStart hook installed"
     else
         echo "[--] Claude SessionStart hook not installed"
+    fi
+    if jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command == "'"$cleanup_cmd"'")' ~/.claude/settings.json >/dev/null 2>&1; then
+        echo "[ok] Claude SessionEnd hook installed"
+    else
+        echo "[--] Claude SessionEnd hook not installed"
     fi
 
     # OpenCode plugin

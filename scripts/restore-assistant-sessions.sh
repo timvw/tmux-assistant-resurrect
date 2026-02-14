@@ -9,9 +9,16 @@ set -euo pipefail
 
 RESURRECT_DIR="${HOME}/.tmux/resurrect"
 INPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
+LOG_FILE="${RESURRECT_DIR}/assistant-restore.log"
+
+log() {
+	local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+	echo "$msg"
+	echo "$msg" >>"$LOG_FILE"
+}
 
 if [ ! -f "$INPUT_FILE" ]; then
-	echo "tmux-assistant-resurrect: no saved sessions found at $INPUT_FILE"
+	log "no saved sessions found at $INPUT_FILE"
 	exit 0
 fi
 
@@ -20,24 +27,36 @@ sessions=$(jq -r '.sessions // []' "$INPUT_FILE")
 count=$(echo "$sessions" | jq 'length')
 
 if [ "$count" -eq 0 ]; then
-	echo "tmux-assistant-resurrect: no assistant sessions to restore"
+	log "no assistant sessions to restore"
 	exit 0
 fi
 
-# Wait briefly for panes to be fully initialized after resurrect restore
+# Wait for panes to be fully initialized after resurrect restore
 sleep 2
 
-# Restore each assistant
+log "restoring $count assistant session(s)..."
+
+# Use a temp file to avoid subshell variable scoping issues with pipes
+tmpfile=$(mktemp)
+echo "$sessions" | jq -c '.[]' >"$tmpfile"
+
 restored=0
-echo "$sessions" | jq -c '.[]' | while read -r entry; do
+while read -r entry; do
 	pane=$(echo "$entry" | jq -r '.pane')
 	tool=$(echo "$entry" | jq -r '.tool')
 	session_id=$(echo "$entry" | jq -r '.session_id')
 	cwd=$(echo "$entry" | jq -r '.cwd')
 
-	# Check if the target pane exists
-	if ! tmux has-session -t "${pane%%.*}" 2>/dev/null; then
-		echo "tmux-assistant-resurrect: pane $pane no longer exists, skipping"
+	# Check if the target pane's session exists
+	tmux_session="${pane%%:*}"
+	if ! tmux has-session -t "$tmux_session" 2>/dev/null; then
+		log "session '$tmux_session' does not exist, skipping pane $pane"
+		continue
+	fi
+
+	# Check if the specific pane exists
+	if ! tmux list-panes -t "$pane" >/dev/null 2>&1; then
+		log "pane $pane does not exist, skipping"
 		continue
 	fi
 
@@ -45,25 +64,29 @@ echo "$sessions" | jq -c '.[]' | while read -r entry; do
 	resume_cmd=""
 	case "$tool" in
 	claude)
-		resume_cmd="claude --resume ${session_id}"
+		resume_cmd="claude --resume '${session_id}'"
 		;;
 	opencode)
-		resume_cmd="opencode -s ${session_id}"
+		resume_cmd="opencode -s '${session_id}'"
 		;;
 	codex)
-		resume_cmd="codex resume ${session_id}"
+		resume_cmd="codex resume '${session_id}'"
 		;;
 	*)
-		echo "tmux-assistant-resurrect: unknown tool '$tool' for pane $pane, skipping"
+		log "unknown tool '$tool' for pane $pane, skipping"
 		continue
 		;;
 	esac
 
-	# First cd to the working directory, then launch the assistant
-	echo "tmux-assistant-resurrect: restoring $tool in $pane (session: $session_id)"
+	log "restoring $tool in $pane (session: $session_id)"
 	tmux send-keys -t "$pane" "cd '${cwd}' && ${resume_cmd}" Enter
 
 	restored=$((restored + 1))
-done
 
-echo "tmux-assistant-resurrect: restored $restored of $count assistant session(s)"
+	# Stagger launches to avoid overwhelming the system
+	sleep 1
+done <"$tmpfile"
+
+rm -f "$tmpfile"
+
+log "restored $restored of $count assistant session(s)"
