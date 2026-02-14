@@ -20,8 +20,7 @@ automatically save assistant session IDs and re-launch them with the correct
 ```
 SAVE (every 10 min + manual prefix+Ctrl-s)
   tmux-resurrect saves pane layouts
-    -> post-save hook iterates all panes
-    -> detects running assistants (claude, opencode, codex)
+    -> post-save hook calls pane-patrol scan (LLM classifies agents)
     -> extracts session IDs via native hooks/plugins/files
     -> writes ~/.tmux/resurrect/assistant-sessions.json
 
@@ -33,6 +32,22 @@ RESTORE (on tmux start or manual prefix+Ctrl-r)
          opencode -s <session-id>
          codex resume <session-id>
 ```
+
+## Design: ZFC compliance
+
+This project follows the **Zero False Commands** (ZFC) principle from
+[pane-patrol](https://github.com/timvw/pane-patrol): **"Scripts transport. AI
+decides."**
+
+Agent detection (determining which panes run coding assistants) is delegated
+entirely to [pane-patrol](https://github.com/timvw/pane-patrol), which uses an
+LLM to classify each pane. No hardcoded process name patterns or heuristics.
+
+Session ID extraction (reading state files, parsing process args) is
+infrastructure plumbing and stays in scripts.
+
+See [docs/design-principles.md](docs/design-principles.md) for the full
+specification.
 
 ## Session ID detection
 
@@ -51,8 +66,10 @@ user switches sessions at runtime via `/sessions`).
 ## Prerequisites
 
 - [tmux](https://github.com/tmux/tmux) (tested with 3.x)
+- [pane-patrol](https://github.com/timvw/pane-patrol) (agent detection via LLM)
 - [jq](https://jqlang.github.io/jq/) (used by save/restore scripts)
 - [just](https://just.systems/) (task runner)
+- An LLM API key configured for pane-patrol (Anthropic or OpenAI)
 - At least one of: Claude Code, OpenCode, Codex CLI
 
 ## Installation
@@ -133,15 +150,17 @@ just clean
 ## Repository structure
 
 ```
-AGENTS.md                         # Guidelines for AI coding agents
+AGENTS.md                         # Guidelines for AI coding agents (ZFC rules)
 config/
   resurrect-assistants.conf       # tmux config: TPM + resurrect + continuum + hooks
+docs/
+  design-principles.md            # ZFC specification
 hooks/
   claude-session-track.sh         # Claude SessionStart hook (writes session ID)
   claude-session-cleanup.sh       # Claude SessionEnd hook (removes state file)
   opencode-session-track.js       # OpenCode plugin (tracks session ID + cleanup)
 scripts/
-  save-assistant-sessions.sh      # Resurrect post-save hook (collects session IDs)
+  save-assistant-sessions.sh      # Resurrect post-save hook (pane-patrol + session IDs)
   restore-assistant-sessions.sh   # Resurrect post-restore hook (resumes assistants)
 justfile                          # Install/uninstall/status/save/restore recipes
 ```
@@ -169,11 +188,14 @@ set -g @continuum-save-interval '10'  # minutes
 
 To add a new AI coding assistant:
 
-1. **Detection**: Add a `case` branch in `scripts/save-assistant-sessions.sh`
-   that matches the process name and extracts the session ID
-2. **Restore command**: Add a `case` branch in
+1. **Detection**: No code changes needed -- pane-patrol's LLM handles it
+2. **Name normalization**: Add a case in `normalize_agent()` in
+   `scripts/save-assistant-sessions.sh` to map the LLM's agent name to a
+   canonical tool name
+3. **Session ID extraction**: Add a `get_<tool>_session()` function
+4. **Restore command**: Add a `case` branch in
    `scripts/restore-assistant-sessions.sh` with the tool's resume command
-3. **Session tracking** (optional): If the tool doesn't expose its session ID in
+5. **Session tracking** (optional): If the tool doesn't expose its session ID in
    process args or a known file, create a hook/plugin similar to the existing
    ones
 
@@ -205,9 +227,10 @@ additional hook is needed.
 
 ### Save hook (`scripts/save-assistant-sessions.sh`)
 
-Runs after each tmux-resurrect save. Iterates all tmux panes, finds child
-processes matching known assistants, extracts session IDs using the methods
-above, and writes `~/.tmux/resurrect/assistant-sessions.json`.
+Runs after each tmux-resurrect save. Calls `pane-patrol scan` to classify all
+panes (ZFC: LLM decides what's an agent), then extracts session IDs for detected
+agents using the tool-specific methods above. Writes the results to
+`~/.tmux/resurrect/assistant-sessions.json`.
 
 ### Restore hook (`scripts/restore-assistant-sessions.sh`)
 
@@ -216,12 +239,16 @@ appropriate resume command to each pane via `tmux send-keys`.
 
 ## Limitations
 
+- **pane-patrol required**: Agent detection requires
+  [pane-patrol](https://github.com/timvw/pane-patrol) and a configured LLM API
+  key. Each save triggers an LLM call per pane (~2-10s per pane, API costs
+  apply).
 - **Running state is not preserved**: Assistants restart with their conversation
   history loaded, but any in-flight tool calls or pending operations are lost.
 - **OpenCode without plugin**: If the OpenCode plugin isn't installed and the
   process was started without `-s`, the session ID cannot be detected. Install
   the plugin via `just install-opencode-plugin`.
-- **Process detection on macOS**: Uses `ps -eo pid=,ppid=` instead of `pgrep -P`
+- **Process inspection on macOS**: Uses `ps -eo pid=,ppid=` instead of `pgrep -P`
   due to reliability issues with `pgrep` on macOS.
 - **Pane matching after restore**: tmux-resurrect preserves pane indices, so the
   restore hook targets the same `session:window.pane` addresses. If you manually
