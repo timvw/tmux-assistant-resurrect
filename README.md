@@ -8,7 +8,9 @@
 Persist and restore AI coding assistant sessions across tmux restarts and reboots.
 
 When your computer shuts down, tmux sessions are lost -- including any running
-Claude Code, OpenCode, or Codex CLI instances. This project hooks into
+[Claude Code](https://github.com/anthropics/claude-code),
+[OpenCode](https://github.com/opencode-ai/opencode), or
+[Codex CLI](https://github.com/openai/codex) instances. This project hooks into
 [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) to
 automatically save assistant session IDs and re-launch them with the correct
 `--resume` flags after a restore.
