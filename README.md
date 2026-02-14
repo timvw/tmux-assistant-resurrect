@@ -1,5 +1,10 @@
 # tmux-assistant-resurrect
 
+> **Disclaimer**: This project was entirely vibecoded (designed and implemented
+> through conversation with an AI coding assistant). It has **not yet been tested
+> in real-world usage** beyond initial dry-runs against live tmux panes. Use at
+> your own risk, and expect rough edges. Contributions and bug reports welcome.
+
 Persist and restore AI coding assistant sessions across tmux restarts and reboots.
 
 When your computer shuts down, tmux sessions are lost -- including any running
