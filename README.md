@@ -18,7 +18,7 @@ automatically save assistant session IDs and re-launch them with the correct
 ## How it works
 
 ```
-SAVE (every 10 min + manual prefix+Ctrl-s)
+SAVE (every 5 min + manual prefix+Ctrl-s)
   tmux-resurrect saves pane layouts
     -> post-save hook inspects child processes of each pane
     -> detects assistants by binary name (claude, opencode, codex)
@@ -42,15 +42,15 @@ and matches known assistant binary names (`claude`, `opencode`, `codex`).
 
 Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 
-| Tool | Detection method | Reliability |
-|------|-----------------|-------------|
-| **Claude Code** | `SessionStart` hook writes session ID to state file | High -- native hook, event-driven |
-| **OpenCode** | `-s` flag in process args; plugin state file as fallback | High -- handles runtime session switches |
-| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | High -- Codex writes PID natively |
+| Tool | Primary method | Fallback | Notes |
+|------|---------------|----------|-------|
+| **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` in process args | Claude overwrites its process title, so args fallback only works if args are visible |
+| **OpenCode** | `-s` / `--session` in process args | Plugin state file | Plugin handles runtime session switches via `/sessions` |
+| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | Codex runs via Node.js, so args are always visible in `ps` |
 
-For OpenCode, the `-s <session-id>` flag in process args is checked first as a
-fast path. The plugin state file is the fallback (and handles the case where a
-user switches sessions at runtime via `/sessions`).
+Each tool has a primary and fallback extraction method. Fallbacks address the
+chicken-and-egg problem: after a restore, session IDs are in process args even
+before hooks/plugins have fired.
 
 ## Prerequisites
 
@@ -91,7 +91,7 @@ then press `prefix + alt + u` inside tmux.
 
 Once installed, everything runs automatically:
 
-- **tmux-continuum** saves your tmux layout every 10 minutes
+- **tmux-continuum** saves your tmux layout every 5 minutes
 - **Post-save hook** collects assistant session IDs at each save
 - **On tmux server start**, continuum auto-restores the layout
 - **Post-restore hook** resumes each assistant with its saved session ID
@@ -140,15 +140,16 @@ justfile                          # Install/uninstall/status/save/restore/test r
 
 ## Testing
 
-Integration tests run in Docker with mock assistant binaries:
+Integration tests run in Docker with real CLI binaries:
 
 ```bash
 just test
 ```
 
-This builds a Docker image with tmux, jq, just, and mock `claude`/`opencode`/`codex`
-binaries, then runs the full test suite covering install, save, restore, uninstall,
-hooks, cleanup, and TPM plugin installation.
+This builds a Docker image with tmux, jq, just, and the real
+`@anthropic-ai/claude-code`, `opencode-ai`, and `@openai/codex` npm packages,
+then runs 70 tests covering install, save, restore, uninstall, hooks, cleanup,
+TPM plugin installation, session ID extraction, and regression scenarios.
 
 ## Configuration
 
@@ -166,7 +167,7 @@ export TMUX_ASSISTANT_RESURRECT_DIR=/path/to/state
 Edit `config/resurrect-assistants.conf`:
 
 ```
-set -g @continuum-save-interval '10'  # minutes
+set -g @continuum-save-interval '5'  # minutes
 ```
 
 ### Adding support for a new assistant
@@ -190,10 +191,15 @@ To add a new AI coding assistant:
 Two hooks configured in `~/.claude/settings.json`:
 
 - **`SessionStart`**: Claude Code passes JSON on stdin (including `session_id`).
-  The hook writes this to `/tmp/tmux-assistant-resurrect/claude-<PPID>.json`,
-  where PPID is the parent shell process in the tmux pane.
+  The hook writes this to `/tmp/tmux-assistant-resurrect/claude-<PID>.json`,
+  where PID is Claude Code's process ID (the hook's `$PPID`, since Claude
+  spawns the hook as a subprocess).
 - **`SessionEnd`**: Removes the state file when the Claude session exits,
   preventing stale entries.
+
+**Note**: Claude Code overwrites its process title (`process.title = 'claude'`),
+so `--resume <session-id>` is not visible in `ps` output. The state file is the
+only reliable source of session IDs for Claude.
 
 ### OpenCode plugin (`hooks/opencode-session-track.js`)
 
@@ -226,9 +232,15 @@ appropriate resume command to each pane via `tmux send-keys`.
 
 - **Running state is not preserved**: Assistants restart with their conversation
   history loaded, but any in-flight tool calls or pending operations are lost.
+- **First save after install (chicken-and-egg)**: On initial install, no session
+  IDs exist yet. Assistants must complete at least one session (triggering the
+  hooks) before their IDs can be saved. For Codex and OpenCode with `-s`, this
+  is not an issue since session IDs are visible in process args.
+- **Claude process title**: Claude Code overwrites its process title, so
+  `--resume` flags are not visible in `ps`. The `SessionStart` hook is the only
+  reliable source of Claude session IDs.
 - **OpenCode without plugin**: If the OpenCode plugin isn't installed and the
-  process was started without `-s`, the session ID cannot be detected. Install
-  the plugin via `just install-opencode-plugin`.
+  process was started without `-s`, the session ID cannot be detected.
 - **Process inspection on macOS**: Uses `ps -eo pid=,ppid=` instead of `pgrep -P`
   due to reliability issues with `pgrep` on macOS.
 - **Pane matching after restore**: tmux-resurrect preserves pane indices, so the

@@ -25,12 +25,17 @@ latency per pane.
 ## Session ID extraction
 
 Session IDs are extracted through tool-native mechanisms -- infrastructure
-plumbing, not interpretation:
+plumbing, not interpretation. Each tool has a primary method and a fallback
+to address the chicken-and-egg problem (session IDs may be in process args
+before hooks/plugins have fired):
 
-- **Claude Code**: `SessionStart` hook writes session ID keyed by PPID
+- **Claude Code**: `SessionStart` hook state file keyed by Claude's PID
+  (primary); `--resume <id>` in process args (fallback -- note: Claude
+  overwrites its process title, so this only works if args are still visible)
 - **OpenCode**: `-s` / `--session` flag in process args (fast path); plugin
   state file (fallback for runtime session switches)
-- **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl`
+- **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary);
+  `resume <id>` in process args (fallback)
 
 ## Adding a new assistant
 
@@ -41,10 +46,21 @@ To add support for a new tool:
 3. Add a restore command in `restore-assistant-sessions.sh`
 4. Optionally add a hook/plugin if the tool doesn't expose session IDs externally
 
+## Process title behavior
+
+- **Claude Code** is a Node.js script that overwrites its process title via
+  `process.title = 'claude'`. This means `--resume <id>` is NOT visible in
+  `ps` output -- the state file from the `SessionStart` hook is the only
+  reliable source of session IDs for Claude.
+- **Codex CLI** runs via Node.js and preserves its full command line in `ps`,
+  so `codex resume <id>` is always visible.
+- **OpenCode** is a native binary on Linux (distributed via npm as `opencode-ai`
+  with a Node.js launcher that finds a platform-specific binary). The `-s` flag
+  may or may not be visible depending on the platform.
+
 ## macOS considerations
 
 - `pgrep -P` is unreliable on macOS (silently misses children). Always use
   `ps -eo pid=,ppid=` with awk filtering instead.
-- Claude Code is a native Mach-O binary (`/opt/homebrew/Caskroom/claude-code/...`),
-  not a Node process.
-- OpenCode runs under Node (`/opt/homebrew/opt/node/bin/node /opt/homebrew/bin/opencode`).
+- tmux 3.4 converts tab characters to underscores in `-F` format output. The
+  save script uses pipe `|` as the delimiter instead.
