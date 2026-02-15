@@ -31,19 +31,19 @@ log() {
 
 detect_tool() {
 	local args="$1"
-	# Match binary name at end of a path component or standalone.
-	# The patterns match: /path/to/claude, /path/to/opencode -s ..., etc.
+	# Match binary name with optional path prefix, standalone or with arguments.
+	# Handles: /path/to/claude, claude, claude --resume ..., opencode -s ..., etc.
 	# Excludes: opencode run ... (LSP subprocesses)
 	case "$args" in
-	*/claude | */claude\ *) echo "claude" ;;
-	*/opencode | */opencode\ *)
+	claude | claude\ * | */claude | */claude\ *) echo "claude" ;;
+	opencode | opencode\ * | */opencode | */opencode\ *)
 		# Exclude LSP/language server subprocesses
 		case "$args" in
 		*"opencode run "*) ;;
 		*) echo "opencode" ;;
 		esac
 		;;
-	*/codex | */codex\ *) echo "codex" ;;
+	codex | codex\ * | */codex | */codex\ *) echo "codex" ;;
 	esac
 }
 

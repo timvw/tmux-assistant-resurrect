@@ -272,6 +272,39 @@ assert_file_not_exists "SessionEnd hook removes state file" "$state_file"
 
 unset TMUX_ASSISTANT_RESURRECT_DIR
 
+# --- Test 5b: detect_tool() unit tests ---
+
+echo ""
+echo "=== Test 5b: detect_tool() pattern matching ==="
+echo ""
+
+# Source detect_tool from the save script (extract the function)
+eval "$(sed -n '/^detect_tool()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
+
+# Bare names (no path) — how native binaries appear on Linux
+assert_eq "detect bare 'claude'" "claude" "$(detect_tool "claude")"
+assert_eq "detect bare 'opencode'" "opencode" "$(detect_tool "opencode")"
+assert_eq "detect bare 'codex'" "codex" "$(detect_tool "codex")"
+
+# Bare names with arguments
+assert_eq "detect 'claude --resume ses_123'" "claude" "$(detect_tool "claude --resume ses_123")"
+assert_eq "detect 'opencode -s ses_456'" "opencode" "$(detect_tool "opencode -s ses_456")"
+assert_eq "detect 'codex resume ses_789'" "codex" "$(detect_tool "codex resume ses_789")"
+
+# Full paths (how they appear on macOS or via shebang)
+assert_eq "detect '/usr/local/bin/claude'" "claude" "$(detect_tool "/usr/local/bin/claude")"
+assert_eq "detect '/opt/homebrew/bin/opencode -s ses_456'" "opencode" "$(detect_tool "/opt/homebrew/bin/opencode -s ses_456")"
+assert_eq "detect '/bin/bash /usr/local/bin/opencode -s ses_456'" "opencode" "$(detect_tool "/bin/bash /usr/local/bin/opencode -s ses_456")"
+
+# LSP subprocess exclusion
+assert_eq "exclude 'opencode run pyright'" "" "$(detect_tool "opencode run pyright-langserver.js")"
+assert_eq "exclude '/usr/bin/opencode run pyright'" "" "$(detect_tool "/usr/bin/opencode run pyright-langserver.js")"
+
+# Non-matches
+assert_eq "ignore 'bash'" "" "$(detect_tool "bash")"
+assert_eq "ignore 'vim'" "" "$(detect_tool "vim")"
+assert_eq "ignore 'node server.js'" "" "$(detect_tool "node server.js")"
+
 # --- Test 6: Clean recipe ---
 
 echo ""
