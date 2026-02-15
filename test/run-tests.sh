@@ -602,7 +602,8 @@ echo ""
 echo "=== Test 5c2: Session ID extraction unit tests (chicken-and-egg) ==="
 echo ""
 
-# Source the extraction functions from the save script
+# Source the shared library and extraction functions from the save script
+source "$REPO_DIR/scripts/lib-detect.sh"
 eval "$(sed -n '/^get_claude_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
 eval "$(sed -n '/^get_codex_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
 eval "$(sed -n '/^get_opencode_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
@@ -765,8 +766,8 @@ echo ""
 echo "=== Test 5d: detect_tool() pattern matching ==="
 echo ""
 
-# Source detect_tool from the save script (extract the function)
-eval "$(sed -n '/^detect_tool()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
+# Source detect_tool from the shared library
+source "$REPO_DIR/scripts/lib-detect.sh"
 
 # Bare names (no path) — how native binaries appear on Linux
 assert_eq "detect bare 'claude'" "claude" "$(detect_tool "claude")"
@@ -791,6 +792,87 @@ assert_eq "exclude '/usr/bin/opencode run pyright'" "" "$(detect_tool "/usr/bin/
 assert_eq "ignore 'bash'" "" "$(detect_tool "bash")"
 assert_eq "ignore 'vim'" "" "$(detect_tool "vim")"
 assert_eq "ignore 'node server.js'" "" "$(detect_tool "node server.js")"
+
+# --- Test 5e: posix_quote() unit tests ---
+
+suite "posix_quote"
+echo ""
+echo "=== Test 5e: posix_quote() escaping ==="
+echo ""
+
+# Source the shared library (already sourced above, but be explicit)
+source "$REPO_DIR/scripts/lib-detect.sh"
+
+assert_eq "posix_quote plain path" "'/tmp/project'" "$(posix_quote "/tmp/project")"
+assert_eq "posix_quote path with space" "'/tmp/my project'" "$(posix_quote "/tmp/my project")"
+assert_eq "posix_quote path with single quote" "'/tmp/project'\"'\"'s dir'" "$(posix_quote "/tmp/project's dir")"
+assert_eq "posix_quote path with double quote" "'/tmp/project\"dir'" "$(posix_quote '/tmp/project"dir')"
+assert_eq "posix_quote path with dollar" "'/tmp/\$HOME/project'" "$(posix_quote '/tmp/$HOME/project')"
+assert_eq "posix_quote empty string" "''" "$(posix_quote "")"
+
+# Verify posix_quote output is actually eval-safe in bash
+eval_result=$(eval "echo $(posix_quote "/tmp/project's dir")")
+assert_eq "posix_quote round-trips through eval" "/tmp/project's dir" "$eval_result"
+
+# --- Test 5f: pane_has_assistant() with wrapper chains ---
+#
+# Verify the restore guard's full tree walk catches assistants launched
+# via wrappers (npx, env, etc.) and as the pane PID itself (exec).
+
+suite "pane_has_assistant"
+echo ""
+echo "=== Test 5f: pane_has_assistant() full tree walk ==="
+echo ""
+
+# Test 1: direct child — should find it
+tmux new-session -d -s test-guard-direct -c /tmp
+tmux send-keys -t test-guard-direct "claude --resume ses_guard_test" Enter
+sleep 2
+
+guard_direct_pid=$(tmux display-message -t test-guard-direct -p '#{pane_pid}')
+if found_pid=$(pane_has_assistant "$guard_direct_pid"); then
+	pass "pane_has_assistant finds direct child"
+else
+	fail "pane_has_assistant missed direct child"
+fi
+
+# Test 2: wrapper chain (npx) — should find it through tree walk
+tmux new-session -d -s test-guard-wrapper -c /tmp
+tmux send-keys -t test-guard-wrapper "npx opencode -s ses_guard_npx" Enter
+sleep 3
+
+guard_wrapper_pid=$(tmux display-message -t test-guard-wrapper -p '#{pane_pid}')
+if found_pid=$(pane_has_assistant "$guard_wrapper_pid"); then
+	pass "pane_has_assistant finds assistant behind npx wrapper"
+else
+	fail "pane_has_assistant missed assistant behind npx wrapper"
+fi
+
+# Test 3: no assistant — should NOT match
+tmux new-session -d -s test-guard-empty -c /tmp
+tmux send-keys -t test-guard-empty "sleep 999 &" Enter
+sleep 1
+
+guard_empty_pid=$(tmux display-message -t test-guard-empty -p '#{pane_pid}')
+if pane_has_assistant "$guard_empty_pid" >/dev/null 2>&1; then
+	fail "pane_has_assistant false-positive on non-assistant pane"
+else
+	pass "pane_has_assistant correctly ignores non-assistant pane"
+fi
+
+# Clean up guard test sessions
+for s in test-guard-direct test-guard-wrapper test-guard-empty; do
+	spid=$(tmux display-message -t "$s" -p '#{pane_pid}' 2>/dev/null || true)
+	if [ -n "$spid" ]; then
+		tmux send-keys -t "$s" C-c 2>/dev/null || true
+		ps -eo pid=,ppid= | awk -v root="$spid" '
+			BEGIN { pids[root]=1 }
+			{ if ($2 in pids) { pids[$1]=1; print $1 } }
+		' | while read -r cpid; do kill -9 "$cpid" 2>/dev/null || true; done
+	fi
+	tmux kill-session -t "$s" 2>/dev/null || true
+done
+sleep 1
 
 # --- Test 6: Clean recipe ---
 

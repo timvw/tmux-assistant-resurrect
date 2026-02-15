@@ -7,6 +7,11 @@
 
 set -euo pipefail
 
+# Source shared detection library (detect_tool, pane_has_assistant, posix_quote)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-detect.sh
+source "$SCRIPT_DIR/lib-detect.sh"
+
 RESURRECT_DIR="${HOME}/.tmux/resurrect"
 INPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
 LOG_FILE="${RESURRECT_DIR}/assistant-restore.log"
@@ -61,10 +66,13 @@ while read -r entry; do
 	fi
 
 	# Guard: skip if the pane already has a running assistant (e.g., if
-	# @resurrect-processes launched it, or user restarted manually)
+	# @resurrect-processes launched it, or user restarted manually).
+	# Uses the same full tree walk + detect_tool() as the save script to
+	# catch exec-replaced shells, wrappers (npx, env, direnv), and deep
+	# process chains.
 	pane_shell_pid=$(tmux display-message -t "$pane" -p '#{pane_pid}' 2>/dev/null || true)
 	if [ -n "$pane_shell_pid" ]; then
-		existing=$(ps -eo pid=,ppid=,args= 2>/dev/null | awk -v ppid="$pane_shell_pid" '$2 == ppid && (/claude/ || /opencode/ || /codex/) {print $1; exit}')
+		existing=$(pane_has_assistant "$pane_shell_pid" || true)
 		if [ -n "$existing" ]; then
 			log "pane $pane already has a running assistant (pid $existing), skipping"
 			continue
@@ -92,10 +100,9 @@ while read -r entry; do
 	log "restoring $tool in $pane (session: $session_id)"
 
 	# Build the full command: cd to cwd (if it exists) then resume.
-	# Use printf %q to safely quote the cwd for the shell, handling single
-	# quotes, spaces, and special characters.
+	# Use POSIX single-quote escaping (safe for bash, zsh, sh, dash, fish).
 	if [ -n "$cwd" ] && [ "$cwd" != "null" ]; then
-		safe_cwd=$(printf '%q' "$cwd")
+		safe_cwd=$(posix_quote "$cwd")
 		tmux send-keys -t "$pane" "cd ${safe_cwd} 2>/dev/null; ${resume_cmd}" Enter
 	else
 		tmux send-keys -t "$pane" "${resume_cmd}" Enter

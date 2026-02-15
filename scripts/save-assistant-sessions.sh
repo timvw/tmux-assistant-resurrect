@@ -10,6 +10,11 @@
 
 set -euo pipefail
 
+# Source shared detection library (detect_tool, pane_has_assistant, posix_quote)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-detect.sh
+source "$SCRIPT_DIR/lib-detect.sh"
+
 STATE_DIR="${TMUX_ASSISTANT_RESURRECT_DIR:-/tmp/tmux-assistant-resurrect}"
 RESURRECT_DIR="${HOME}/.tmux/resurrect"
 OUTPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
@@ -21,30 +26,6 @@ log() {
 	local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
 	echo "$msg" >&2
 	echo "$msg" >>"$LOG_FILE"
-}
-
-# --- Process-based assistant detection ---
-#
-# Detects assistants by matching binary names in the process args of
-# direct children of tmux pane shells. This is infrastructure plumbing:
-# we match the binary path, not screen content or heuristics.
-
-detect_tool() {
-	local args="$1"
-	# Match binary name with optional path prefix, standalone or with arguments.
-	# Handles: /path/to/claude, claude, claude --resume ..., opencode -s ..., etc.
-	# Excludes: opencode run ... (LSP subprocesses)
-	case "$args" in
-	claude | claude\ * | */claude | */claude\ *) echo "claude" ;;
-	opencode | opencode\ * | */opencode | */opencode\ *)
-		# Exclude LSP/language server subprocesses
-		case "$args" in
-		*"opencode run "*) ;;
-		*) echo "opencode" ;;
-		esac
-		;;
-	codex | codex\ * | */codex | */codex\ *) echo "codex" ;;
-	esac
 }
 
 # --- Session ID extraction ---
