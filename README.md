@@ -61,8 +61,6 @@ user switches sessions at runtime via `/sessions`).
 
 ## Installation
 
-### Via TPM (recommended)
-
 Add to your `~/.tmux.conf`:
 
 ```bash
@@ -82,38 +80,10 @@ automatically set up:
 - Claude Code hooks in `~/.claude/settings.json`
 - OpenCode session-tracker plugin in `~/.config/opencode/plugins/`
 
-### Via git clone + just
-
-```bash
-git clone https://github.com/timvw/tmux-assistant-resurrect.git
-cd tmux-assistant-resurrect
-just install
-```
-
-After installation, reload tmux and install TPM plugins:
-
-```bash
-tmux source-file ~/.tmux.conf
-# Inside tmux, press: prefix + I
-```
-
 ## Uninstallation
-
-### TPM
 
 Remove the `@plugin 'timvw/tmux-assistant-resurrect'` line from `~/.tmux.conf`,
 then press `prefix + alt + u` inside tmux.
-
-The Claude hooks and OpenCode plugin are cleaned up automatically when the
-plugin is removed.
-
-### just
-
-```bash
-just uninstall
-```
-
-Removes all hooks, plugins, and tmux config entries.
 
 ## Usage
 
