@@ -179,9 +179,14 @@ tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}
 			fi
 		fi
 
-		# Check direct children of the pane shell (normal case)
+		# Walk the entire process tree under the pane shell to find assistants.
+		# This handles wrappers like npx, env, direnv exec, bash -lc, etc.
+		# We collect all descendant PIDs, then check each for an assistant match.
 		if [ ! -s "$FOUND_FLAG" ]; then
-			echo "$PS_SNAPSHOT" | awk -v ppid="$shell_pid" '$2 == ppid {print $1, $2, substr($0, index($0,$3))}' |
+			echo "$PS_SNAPSHOT" | awk -v root="$shell_pid" '
+				BEGIN { pids[root]=1 }
+				{ if ($2 in pids) { pids[$1]=1; print $1, $2, substr($0, index($0,$3)) } }
+			' |
 				while read -r cpid _ppid cargs; do
 					tool=$(detect_tool "$cargs")
 					[ -z "$tool" ] && continue

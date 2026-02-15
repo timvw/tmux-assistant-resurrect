@@ -175,8 +175,9 @@ tmux send-keys -t test-opencode-nosid "opencode" Enter
 # OpenCode LSP subprocess (should be excluded from detection)
 tmux send-keys -t test-lsp "opencode run pyright-langserver.js" Enter
 
-# Give processes time to start
-sleep 2
+# Give processes time to start (OpenCode spawns node → native binary chain;
+# on slow CI runners 2s is sometimes not enough)
+sleep 4
 
 # Create a Claude hook state file keyed by the Claude child PID
 # (When Claude runs the hook, hook's $PPID = Claude PID, so the save script
@@ -239,6 +240,34 @@ if grep -q "no session ID available" "$LOG"; then
 else
 	fail "Expected log warning about missing session ID"
 fi
+
+# --- Test 2b: Save detects assistants launched via wrappers (npx) ---
+
+echo ""
+echo "=== Test 2b: save detects assistants via wrappers (npx) ==="
+echo ""
+
+tmux new-session -d -s test-npx -c /tmp
+tmux send-keys -t test-npx "npx opencode -s ses_npx_wrapper" Enter
+sleep 3
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+npx_sid=$(jq -r '.sessions[] | select(.pane | contains("test-npx")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+assert_eq "Save detects opencode launched via npx" "ses_npx_wrapper" "$npx_sid"
+
+tmux send-keys -t test-npx C-c
+sleep 2
+npx_spid=$(tmux display-message -t test-npx -p '#{pane_pid}' 2>/dev/null || true)
+if [ -n "$npx_spid" ]; then
+	ps -eo pid=,ppid= | awk -v root="$npx_spid" '
+		BEGIN { pids[root]=1 }
+		{ if ($2 in pids) { pids[$1]=1; print $1 } }
+	' | while read -r cpid; do kill -9 "$cpid" 2>/dev/null || true; done
+fi
+sleep 1
+tmux kill-session -t test-npx 2>/dev/null || true
 
 # --- Test 3: Restore — sends correct resume commands ---
 
@@ -303,6 +332,92 @@ if echo "$restore_log_2" | grep -q "already has a running assistant"; then
 	pass "Restore skips panes with already-running assistants"
 else
 	fail "Expected restore to detect running assistants and skip (double-launch guard)"
+fi
+
+# --- Test 3c: Restore handles cwd with single quotes and missing dirs ---
+
+echo ""
+echo "=== Test 3c: restore handles tricky cwd values ==="
+echo ""
+
+# Kill assistants so panes are clean shells
+for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
+	tmux send-keys -t "$sess" C-c 2>/dev/null || true
+done
+sleep 2
+for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
+	spid=$(tmux display-message -t "$sess" -p '#{pane_pid}' 2>/dev/null || true)
+	if [ -n "$spid" ]; then
+		ps -eo pid=,ppid= | awk -v ppid="$spid" '$2 == ppid {print $1}' | while read -r cpid; do
+			kill -9 "$cpid" 2>/dev/null || true
+		done
+	fi
+done
+sleep 1
+
+# Create a sidecar JSON with a cwd containing a single quote
+mkdir -p "/tmp/project's dir"
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'CWDEOF'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_cwd_test", "cwd": "/tmp/project's dir", "pid": "99999"}
+  ]
+}
+CWDEOF
+
+>"$RESTORE_LOG"
+restore_exit=0
+just restore 2>&1 || restore_exit=$?
+sleep 5
+
+assert_eq "Restore doesn't crash on cwd with single quote" "0" "$restore_exit"
+assert_contains "Restore attempted resume with tricky cwd" "$(cat "$RESTORE_LOG")" "ses_cwd_test"
+
+# Kill any assistant that was just launched so the next restore can proceed
+spid=$(tmux display-message -t test-claude -p '#{pane_pid}' 2>/dev/null || true)
+if [ -n "$spid" ]; then
+	ps -eo pid=,ppid= | awk -v ppid="$spid" '$2 == ppid {print $1}' | while read -r cpid; do
+		kill -9 "$cpid" 2>/dev/null || true
+	done
+fi
+sleep 1
+
+# Test with a missing cwd
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'CWDEOF2'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_nocwd_test", "cwd": "/nonexistent/path/that/does/not/exist", "pid": "99999"}
+  ]
+}
+CWDEOF2
+
+>"$RESTORE_LOG"
+restore_exit2=0
+just restore 2>&1 || restore_exit2=$?
+sleep 5
+
+assert_eq "Restore doesn't crash on missing cwd" "0" "$restore_exit2"
+assert_contains "Restore attempted resume with missing cwd" "$(cat "$RESTORE_LOG")" "ses_nocwd_test"
+
+# --- Test 3d: @resurrect-processes does not include assistants ---
+#
+# Verify that the plugin entry point does NOT set @resurrect-processes to
+# include assistants, preventing the double-launch scenario.
+
+echo ""
+echo "=== Test 3d: @resurrect-processes excludes assistants ==="
+echo ""
+
+# Run the plugin entry point (this sets tmux options)
+bash "$REPO_DIR/tmux-assistant-resurrect.tmux"
+
+resurrect_procs=$(tmux show-option -gv @resurrect-processes 2>/dev/null || echo "")
+if echo "$resurrect_procs" | grep -qiE "claude|opencode|codex"; then
+	fail "@resurrect-processes still contains assistants (double-launch risk!)"
+else
+	pass "@resurrect-processes does not include assistants"
 fi
 
 # --- Test 4: Uninstall ---
