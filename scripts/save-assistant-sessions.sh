@@ -50,11 +50,30 @@ detect_tool() {
 # --- Session ID extraction ---
 
 get_claude_session() {
-	local shell_pid="$1"
-	# Method 1: SessionStart hook state file (keyed by shell PID = PPID of claude)
-	local state_file="$STATE_DIR/claude-${shell_pid}.json"
+	local claude_pid="$1"
+	local args="$2"
+
+	# Method 1: SessionStart hook state file (keyed by Claude PID)
+	# When Claude runs `bash hook.sh`, the hook's $PPID = Claude's PID.
+	# This takes priority because the user may have switched sessions inside the TUI.
+	local state_file="$STATE_DIR/claude-${claude_pid}.json"
 	if [ -f "$state_file" ]; then
-		jq -r '.session_id // empty' "$state_file" 2>/dev/null || true
+		local sid
+		sid=$(jq -r '.session_id // empty' "$state_file" 2>/dev/null || true)
+		if [ -n "$sid" ]; then
+			echo "$sid"
+			return
+		fi
+	fi
+
+	# Method 2: --resume flag in process args (chicken-and-egg fallback)
+	# After restore, claude is launched as `claude --resume <session_id>`.
+	# If the SessionStart hook hasn't fired yet, the ID is still in the args.
+	local sid
+	sid=$(echo "$args" | sed -n "s/.*--resume  *\([A-Za-z0-9_-]*\).*/\1/p")
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return
 	fi
 }
 
@@ -86,11 +105,28 @@ get_opencode_session() {
 
 get_codex_session() {
 	local child_pid="$1"
+	local args="$2"
+
+	# Method 1: session-tags.jsonl (written by Codex at runtime)
 	local tags_file="${HOME}/.codex/session-tags.jsonl"
 	if [ -f "$tags_file" ]; then
-		grep "\"pid\": *${child_pid}[,}]" "$tags_file" 2>/dev/null |
+		local sid
+		sid=$(grep "\"pid\": *${child_pid}[,}]" "$tags_file" 2>/dev/null |
 			tail -1 |
-			jq -r '.session // empty' 2>/dev/null || true
+			jq -r '.session // empty' 2>/dev/null || true)
+		if [ -n "$sid" ]; then
+			echo "$sid"
+			return
+		fi
+	fi
+
+	# Method 2: resume arg in process args (chicken-and-egg fallback)
+	# After restore, codex is launched as `codex resume <session_id>`.
+	local sid
+	sid=$(echo "$args" | sed -n "s/.*resume  *\([A-Za-z0-9_-]*\).*/\1/p")
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return
 	fi
 }
 
@@ -113,9 +149,9 @@ tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}
 
 				session_id=""
 				case "$tool" in
-				claude) session_id=$(get_claude_session "$shell_pid") ;;
+				claude) session_id=$(get_claude_session "$cpid" "$cargs") ;;
 				opencode) session_id=$(get_opencode_session "$cpid" "$cargs") ;;
-				codex) session_id=$(get_codex_session "$cpid") ;;
+				codex) session_id=$(get_codex_session "$cpid" "$cargs") ;;
 				esac
 
 				if [ -n "$session_id" ]; then

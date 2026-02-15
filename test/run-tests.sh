@@ -127,15 +127,18 @@ tmux send-keys -t test-lsp "opencode run pyright-langserver.js" Enter
 # Give processes time to start
 sleep 2
 
-# Create a Claude hook state file for test-claude pane's shell PID
+# Create a Claude hook state file keyed by the Claude child PID
+# (When Claude runs the hook, hook's $PPID = Claude PID, so the save script
+#  looks for claude-{child_pid}.json where child_pid = the claude process PID)
 claude_pane_shell_pid=$(tmux display-message -t test-claude -p '#{pane_pid}')
+claude_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$claude_pane_shell_pid" '$2 == ppid && /claude/ {print $1; exit}')
 STATE_DIR="/tmp/tmux-assistant-resurrect"
 mkdir -p "$STATE_DIR"
-cat >"$STATE_DIR/claude-${claude_pane_shell_pid}.json" <<EOF
+cat >"$STATE_DIR/claude-${claude_child_pid}.json" <<EOF
 {
   "tool": "claude",
   "session_id": "ses_claude_test_123",
-  "ppid": $claude_pane_shell_pid,
+  "ppid": $claude_child_pid,
   "timestamp": "2026-01-01T00:00:00Z"
 }
 EOF
@@ -268,10 +271,277 @@ assert_file_not_exists "SessionEnd hook removes state file" "$state_file"
 
 unset TMUX_ASSISTANT_RESURRECT_DIR
 
-# --- Test 5b: detect_tool() unit tests ---
+# --- Test 5b: Claude state file keyed by child PID (regression) ---
+#
+# The SessionStart hook's $PPID = Claude's PID (not the shell PID), because
+# Claude spawns the hook. The save script must look up state files by the
+# Claude child PID. Previously the save script used the shell PID, which
+# never matched — session IDs were silently lost.
 
 echo ""
-echo "=== Test 5b: detect_tool() pattern matching ==="
+echo "=== Test 5b: Claude state file lookup by child PID (regression) ==="
+echo ""
+
+# Set up a fresh tmux session with a Claude process
+tmux new-session -d -s test-claude-pid -c /tmp
+tmux send-keys -t test-claude-pid "claude --resume ses_pid_test" Enter
+sleep 2
+
+claude_pid_test_shell=$(tmux display-message -t test-claude-pid -p '#{pane_pid}')
+claude_pid_test_child=$(ps -eo pid=,ppid=,args= | awk -v ppid="$claude_pid_test_shell" '$2 == ppid && /claude/ {print $1; exit}')
+
+# Sanity: make sure we found the child
+if [ -n "$claude_pid_test_child" ]; then
+	pass "Found Claude child PID ($claude_pid_test_child) under shell PID ($claude_pid_test_shell)"
+else
+	fail "Could not find Claude child PID under shell $claude_pid_test_shell"
+fi
+
+PID_TEST_STATE_DIR="/tmp/tmux-assistant-resurrect"
+mkdir -p "$PID_TEST_STATE_DIR"
+
+# Clean up any prior state files for these PIDs
+rm -f "$PID_TEST_STATE_DIR/claude-${claude_pid_test_child}.json" "$PID_TEST_STATE_DIR/claude-${claude_pid_test_shell}.json"
+
+# Create state file keyed by CHILD PID (correct — matches how the hook works)
+cat >"$PID_TEST_STATE_DIR/claude-${claude_pid_test_child}.json" <<CEOF
+{
+  "tool": "claude",
+  "session_id": "ses_child_pid_test",
+  "ppid": $claude_pid_test_child,
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+CEOF
+
+# Run save and check that the session ID is picked up
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+child_pid_sid=$(jq -r '.sessions[] | select(.pane | contains("test-claude-pid")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+assert_eq "Save finds state file keyed by Claude child PID" "ses_child_pid_test" "$child_pid_sid"
+
+# --- Test 5c: State file keyed by shell PID must NOT match (regression) ---
+#
+# If someone (or a bug) creates a state file keyed by the shell PID instead
+# of the Claude child PID, the save script must NOT pick it up via the state
+# file path. The session ID may still be found via --resume in process args
+# (the chicken-and-egg fallback), but it must NOT come from the wrong file.
+
+echo ""
+echo "=== Test 5c: State file keyed by shell PID must NOT match (regression) ==="
+echo ""
+
+# Remove the correct (child-keyed) state file
+rm -f "$PID_TEST_STATE_DIR/claude-${claude_pid_test_child}.json"
+
+# Create state file keyed by SHELL PID (incorrect — the old bug)
+cat >"$PID_TEST_STATE_DIR/claude-${claude_pid_test_shell}.json" <<SEOF
+{
+  "tool": "claude",
+  "session_id": "ses_shell_pid_WRONG",
+  "ppid": $claude_pid_test_shell,
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+SEOF
+
+# Run save — should NOT pick up the shell-keyed file's session ID
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+shell_pid_sid=$(jq -r '.sessions[] | select(.pane | contains("test-claude-pid")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+if [ "$shell_pid_sid" = "ses_shell_pid_WRONG" ]; then
+	fail "Save incorrectly matched state file keyed by shell PID (regression!)"
+else
+	pass "Save correctly ignores state file keyed by shell PID"
+fi
+
+# The session ID may still be found from --resume in process args (the
+# chicken-and-egg fallback). That's fine — the key assertion is that the
+# WRONG file's ID was not used.
+if [ "$shell_pid_sid" = "ses_pid_test" ]; then
+	pass "Fallback correctly found session ID from --resume args instead"
+else
+	# No args fallback available — should log warning
+	if grep -q "test-claude-pid.*no session ID available" "$HOME/.tmux/resurrect/assistant-save.log"; then
+		pass "Log correctly reports no session ID for shell-PID-keyed state"
+	else
+		fail "Expected either args fallback or log warning for test-claude-pid"
+	fi
+fi
+
+# Clean up test state files and session
+rm -f "$PID_TEST_STATE_DIR/claude-${claude_pid_test_shell}.json"
+tmux send-keys -t test-claude-pid C-c
+sleep 1
+tmux kill-session -t test-claude-pid 2>/dev/null || true
+
+# --- Test 5c2: Chicken-and-egg — session ID extraction unit tests ---
+#
+# These test the extraction functions directly, without needing live processes.
+# Claude Code overwrites its process title, so --resume isn't visible in `ps`
+# for real Claude. But the fallback code works when args ARE preserved (e.g.,
+# shell wrappers, or future tools). We test both extraction methods.
+
+echo ""
+echo "=== Test 5c2: Session ID extraction unit tests (chicken-and-egg) ==="
+echo ""
+
+# Source the extraction functions from the save script
+eval "$(sed -n '/^get_claude_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
+eval "$(sed -n '/^get_codex_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
+eval "$(sed -n '/^get_opencode_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
+
+# --- Claude: --resume arg fallback ---
+# Method 2: extract session ID from --resume in process args
+assert_eq "Claude --resume extraction" "ses_abc_123" "$(get_claude_session 99999 "claude --resume ses_abc_123")"
+assert_eq "Claude --resume with path" "ses_abc_123" "$(get_claude_session 99999 "/usr/bin/claude --resume ses_abc_123")"
+assert_eq "Claude bare (no --resume)" "" "$(get_claude_session 99999 "claude")"
+assert_eq "Claude --resume with UUID" "a1b2c3d4-e5f6-7890-abcd-ef1234567890" "$(get_claude_session 99999 "claude --resume a1b2c3d4-e5f6-7890-abcd-ef1234567890")"
+
+# --- Claude: state file takes priority over args ---
+UNIT_STATE_DIR=$(mktemp -d)
+STATE_DIR="$UNIT_STATE_DIR"
+cat >"$UNIT_STATE_DIR/claude-12345.json" <<UEOF
+{"tool":"claude","session_id":"ses_from_hook","ppid":12345,"timestamp":"2026-01-01T00:00:00Z"}
+UEOF
+assert_eq "Claude state file beats --resume arg" "ses_from_hook" "$(get_claude_session 12345 "claude --resume ses_from_args")"
+rm -rf "$UNIT_STATE_DIR"
+
+# --- Claude: corrupt state file falls through to args ---
+UNIT_STATE_DIR=$(mktemp -d)
+STATE_DIR="$UNIT_STATE_DIR"
+echo "NOT JSON" >"$UNIT_STATE_DIR/claude-12345.json"
+assert_eq "Claude corrupt state file falls through to args" "ses_fallback" "$(get_claude_session 12345 "claude --resume ses_fallback")"
+rm -rf "$UNIT_STATE_DIR"
+
+# --- Claude: empty state file falls through to args ---
+UNIT_STATE_DIR=$(mktemp -d)
+STATE_DIR="$UNIT_STATE_DIR"
+echo '{}' >"$UNIT_STATE_DIR/claude-12345.json"
+assert_eq "Claude empty state file falls through to args" "ses_fallback2" "$(get_claude_session 12345 "claude --resume ses_fallback2")"
+rm -rf "$UNIT_STATE_DIR"
+
+# Reset STATE_DIR
+STATE_DIR="/tmp/tmux-assistant-resurrect"
+
+# --- Codex: resume arg fallback ---
+assert_eq "Codex resume extraction" "ses_codex_789" "$(get_codex_session 99999 "codex resume ses_codex_789")"
+assert_eq "Codex resume with path" "ses_codex_789" "$(get_codex_session 99999 "/usr/bin/codex resume ses_codex_789")"
+assert_eq "Codex bare (no resume)" "" "$(get_codex_session 99999 "codex")"
+
+# --- OpenCode: -s and --session arg extraction ---
+assert_eq "OpenCode -s extraction" "ses_oc_456" "$(get_opencode_session 99999 "opencode -s ses_oc_456")"
+assert_eq "OpenCode --session extraction" "ses_oc_789" "$(get_opencode_session 99999 "opencode --session ses_oc_789")"
+assert_eq "OpenCode bare (no -s)" "" "$(get_opencode_session 99999 "opencode")"
+
+# --- Test 5c3: Claude state file takes priority over --resume arg ---
+#
+# If both a state file and --resume arg exist, the state file should win
+# because the user may have switched sessions inside the TUI after launch.
+
+echo ""
+echo "=== Test 5c3: Claude state file takes priority over --resume arg ==="
+echo ""
+
+tmux new-session -d -s test-claude-priority -c /tmp
+tmux send-keys -t test-claude-priority "claude --resume ses_args_old" Enter
+sleep 2
+
+priority_shell_pid=$(tmux display-message -t test-claude-priority -p '#{pane_pid}')
+priority_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$priority_shell_pid" '$2 == ppid && /claude/ {print $1; exit}')
+
+# Create a state file with a DIFFERENT session ID (simulating a session switch)
+cat >"$PID_TEST_STATE_DIR/claude-${priority_child_pid}.json" <<PEOF
+{
+  "tool": "claude",
+  "session_id": "ses_hook_newer",
+  "ppid": $priority_child_pid,
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+PEOF
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+priority_sid=$(jq -r '.sessions[] | select(.pane | contains("test-claude-priority")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+assert_eq "State file session ID takes priority over --resume arg" "ses_hook_newer" "$priority_sid"
+
+rm -f "$PID_TEST_STATE_DIR/claude-${priority_child_pid}.json"
+tmux send-keys -t test-claude-priority C-c
+sleep 1
+tmux kill-session -t test-claude-priority 2>/dev/null || true
+
+# --- Test 5c4: Codex resume arg fallback (chicken-and-egg) ---
+#
+# After restore, Codex is launched as `codex resume <session_id>`. Even
+# without a session-tags.jsonl entry, the save script should extract the
+# session ID from the process args.
+
+echo ""
+echo "=== Test 5c4: Codex resume arg fallback (chicken-and-egg) ==="
+echo ""
+
+tmux new-session -d -s test-codex-resume -c /tmp
+tmux send-keys -t test-codex-resume "codex resume ses_codex_from_args" Enter
+sleep 2
+
+# Make sure NO session-tags.jsonl entry exists for this PID
+rm -f "$HOME/.codex/session-tags.jsonl"
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+codex_resume_sid=$(jq -r '.sessions[] | select(.pane | contains("test-codex-resume")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+assert_eq "Codex resume arg fallback extracts session ID" "ses_codex_from_args" "$codex_resume_sid"
+
+tmux send-keys -t test-codex-resume C-c
+sleep 1
+tmux kill-session -t test-codex-resume 2>/dev/null || true
+
+# --- Test 5c5: Corrupt/empty state file doesn't crash save ---
+#
+# If a state file is corrupt (not valid JSON) or empty, the save script
+# should not crash — it should fall through gracefully.
+# Note: Claude Code overwrites its process title, so --resume args are NOT
+# visible in `ps`. The unit tests (5c2) verify the args fallback in isolation.
+
+echo ""
+echo "=== Test 5c5: Corrupt state file doesn't crash save ==="
+echo ""
+
+tmux new-session -d -s test-corrupt -c /tmp
+tmux send-keys -t test-corrupt "claude" Enter
+sleep 2
+
+corrupt_shell_pid=$(tmux display-message -t test-corrupt -p '#{pane_pid}')
+corrupt_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$corrupt_shell_pid" '$2 == ppid && /claude/ {print $1; exit}')
+
+# Write a corrupt (non-JSON) state file
+echo "THIS IS NOT JSON" >"$PID_TEST_STATE_DIR/claude-${corrupt_child_pid}.json"
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+save_exit_code=0
+just save 2>&1 || save_exit_code=$?
+
+assert_eq "Save doesn't crash on corrupt state file" "0" "$save_exit_code"
+
+# Claude is detected but neither state file (corrupt) nor args (title overwritten) yield an ID
+# Verify the save script logged the warning rather than crashing
+if grep -q "test-corrupt.*no session ID available" "$HOME/.tmux/resurrect/assistant-save.log"; then
+	pass "Save gracefully handles corrupt state file"
+else
+	fail "Expected log warning about no session ID for corrupt state file pane"
+fi
+
+rm -f "$PID_TEST_STATE_DIR/claude-${corrupt_child_pid}.json"
+tmux send-keys -t test-corrupt C-c
+sleep 1
+tmux kill-session -t test-corrupt 2>/dev/null || true
+
+# --- Test 5d: detect_tool() unit tests ---
+
+echo ""
+echo "=== Test 5d: detect_tool() pattern matching ==="
 echo ""
 
 # Source detect_tool from the save script (extract the function)

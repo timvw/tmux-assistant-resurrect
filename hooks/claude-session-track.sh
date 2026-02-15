@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Claude Code SessionStart hook — writes session ID to a trackable file.
 # Receives JSON on stdin with session_id, cwd, etc.
-# Keyed by PPID (the shell process in the tmux pane).
+# Keyed by PPID (Claude Code's PID, since Claude spawns this hook).
 #
 # Install: add to ~/.claude/settings.json under hooks.SessionStart
 
@@ -18,7 +18,7 @@ if [ -z "$SESSION_ID" ]; then
 	exit 0
 fi
 
-# Write session file keyed by parent PID (the shell in the tmux pane)
+# Write session file keyed by PPID (Claude Code's PID when it spawns this hook)
 cat >"$STATE_DIR/claude-$PPID.json" <<EOF
 {
   "tool": "claude",
