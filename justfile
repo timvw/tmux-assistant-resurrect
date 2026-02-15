@@ -51,6 +51,7 @@ install-claude-hook:
     cleanup_cmd="bash {{repo_dir}}/hooks/claude-session-cleanup.sh"
 
     if [ ! -f "$settings" ]; then
+        mkdir -p "$(dirname "$settings")"
         echo '{}' > "$settings"
     fi
 
