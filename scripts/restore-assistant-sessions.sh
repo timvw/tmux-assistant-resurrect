@@ -60,6 +60,17 @@ while read -r entry; do
 		continue
 	fi
 
+	# Guard: skip if the pane already has a running assistant (e.g., if
+	# @resurrect-processes launched it, or user restarted manually)
+	pane_shell_pid=$(tmux display-message -t "$pane" -p '#{pane_pid}' 2>/dev/null || true)
+	if [ -n "$pane_shell_pid" ]; then
+		existing=$(ps -eo pid=,ppid=,args= 2>/dev/null | awk -v ppid="$pane_shell_pid" '$2 == ppid && (/claude/ || /opencode/ || /codex/) {print $1; exit}')
+		if [ -n "$existing" ]; then
+			log "pane $pane already has a running assistant (pid $existing), skipping"
+			continue
+		fi
+	fi
+
 	# Build the resume command for each tool
 	resume_cmd=""
 	case "$tool" in
@@ -79,7 +90,16 @@ while read -r entry; do
 	esac
 
 	log "restoring $tool in $pane (session: $session_id)"
-	tmux send-keys -t "$pane" "cd '${cwd}' && ${resume_cmd}" Enter
+
+	# Build the full command: cd to cwd (if it exists) then resume.
+	# Use printf %q to safely quote the cwd for the shell, handling single
+	# quotes, spaces, and special characters.
+	if [ -n "$cwd" ] && [ "$cwd" != "null" ]; then
+		safe_cwd=$(printf '%q' "$cwd")
+		tmux send-keys -t "$pane" "cd ${safe_cwd} 2>/dev/null; ${resume_cmd}" Enter
+	else
+		tmux send-keys -t "$pane" "${resume_cmd}" Enter
+	fi
 
 	restored=$((restored + 1))
 

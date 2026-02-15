@@ -13,7 +13,9 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- tmux settings ---
 
 tmux set-option -g @resurrect-capture-pane-contents 'on'
-tmux set-option -g @resurrect-processes '"~claude" "~opencode" "~codex"'
+# Do NOT add assistants to @resurrect-processes — that would launch bare
+# binaries (without session IDs) and the post-restore hook would then type
+# resume commands into the running TUI. The hook handles all resuming.
 tmux set-option -g @resurrect-hook-post-save-all "bash ${CURRENT_DIR}/scripts/save-assistant-sessions.sh"
 tmux set-option -g @resurrect-hook-post-restore-all "bash ${CURRENT_DIR}/scripts/restore-assistant-sessions.sh"
 tmux set-option -g @continuum-save-interval '5'

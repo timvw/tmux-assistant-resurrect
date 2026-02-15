@@ -68,9 +68,10 @@ get_claude_session() {
 
 	# Method 2: --resume flag in process args (chicken-and-egg fallback)
 	# After restore, claude is launched as `claude --resume <session_id>`.
+	# Supports both `--resume <id>` and `--resume=<id>` forms.
 	# If the SessionStart hook hasn't fired yet, the ID is still in the args.
 	local sid
-	sid=$(echo "$args" | sed -n "s/.*--resume  *\([A-Za-z0-9_-]*\).*/\1/p")
+	sid=$(echo "$args" | sed -n "s/.*--resume[= ] *\([A-Za-z0-9_-]*\).*/\1/p")
 	if [ -n "$sid" ]; then
 		echo "$sid"
 		return
@@ -89,8 +90,8 @@ get_opencode_session() {
 		return
 	fi
 
-	# Method 2: --session flag in process args
-	sid=$(echo "$args" | sed -n 's/.*--session \(ses_[A-Za-z0-9_]*\).*/\1/p')
+	# Method 2: --session flag in process args (supports --session=<id> too)
+	sid=$(echo "$args" | sed -n 's/.*--session[= ] *\(ses_[A-Za-z0-9_]*\).*/\1/p')
 	if [ -n "$sid" ]; then
 		echo "$sid"
 		return
@@ -137,37 +138,58 @@ PS_SNAPSHOT=$(ps -eo pid=,ppid=,args= 2>/dev/null)
 
 # Temp file for collecting entries (avoids subshell scoping issues)
 PARTS_FILE=$(mktemp)
-trap 'rm -f "$PARTS_FILE"' EXIT
+
+emit_session() {
+	local target="$1" tool="$2" cpid="$3" cargs="$4" cwd="$5"
+	local session_id=""
+	case "$tool" in
+	claude) session_id=$(get_claude_session "$cpid" "$cargs") ;;
+	opencode) session_id=$(get_opencode_session "$cpid" "$cargs") ;;
+	codex) session_id=$(get_codex_session "$cpid" "$cargs") ;;
+	esac
+
+	if [ -n "$session_id" ]; then
+		jq -n \
+			--arg pane "$target" \
+			--arg tool "$tool" \
+			--arg sid "$session_id" \
+			--arg cwd "$cwd" \
+			--arg pid "$cpid" \
+			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid}' >>"$PARTS_FILE"
+		return 0
+	else
+		log "detected $tool in $target (pid $cpid) but no session ID available"
+		return 1
+	fi
+}
+
+FOUND_FLAG=$(mktemp)
+trap 'rm -f "$PARTS_FILE" "$FOUND_FLAG"' EXIT
 
 tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}" |
 	while IFS='|' read -r target shell_pid cwd; do
-		# Find direct children of the pane shell
-		echo "$PS_SNAPSHOT" | awk -v ppid="$shell_pid" '$2 == ppid {print $1, $2, substr($0, index($0,$3))}' |
-			while read -r cpid _ppid cargs; do
-				tool=$(detect_tool "$cargs")
-				[ -z "$tool" ] && continue
+		>"$FOUND_FLAG"
 
-				session_id=""
-				case "$tool" in
-				claude) session_id=$(get_claude_session "$cpid" "$cargs") ;;
-				opencode) session_id=$(get_opencode_session "$cpid" "$cargs") ;;
-				codex) session_id=$(get_codex_session "$cpid" "$cargs") ;;
-				esac
+		# Check the pane PID itself (handles exec-replaced shells, e.g. exec claude)
+		pane_args=$(echo "$PS_SNAPSHOT" | awk -v pid="$shell_pid" '$1 == pid {print substr($0, index($0,$3)); exit}')
+		pane_tool=$(detect_tool "$pane_args")
+		if [ -n "$pane_tool" ]; then
+			if emit_session "$target" "$pane_tool" "$shell_pid" "$pane_args" "$cwd"; then
+				echo 1 >"$FOUND_FLAG"
+			fi
+		fi
 
-				if [ -n "$session_id" ]; then
-					jq -n \
-						--arg pane "$target" \
-						--arg tool "$tool" \
-						--arg sid "$session_id" \
-						--arg cwd "$cwd" \
-						--arg pid "$cpid" \
-						'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid}' >>"$PARTS_FILE"
-				else
-					log "detected $tool in $target (pid $cpid) but no session ID available"
-				fi
+		# Check direct children of the pane shell (normal case)
+		if [ ! -s "$FOUND_FLAG" ]; then
+			echo "$PS_SNAPSHOT" | awk -v ppid="$shell_pid" '$2 == ppid {print $1, $2, substr($0, index($0,$3))}' |
+				while read -r cpid _ppid cargs; do
+					tool=$(detect_tool "$cargs")
+					[ -z "$tool" ] && continue
 
-				break # Only match the first assistant per pane
-			done
+					emit_session "$target" "$tool" "$cpid" "$cargs" "$cwd" || true
+					break # Only match the first assistant per pane
+				done
+		fi
 	done
 
 # Assemble final JSON

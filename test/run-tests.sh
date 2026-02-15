@@ -247,12 +247,21 @@ echo ""
 echo "=== Test 3: restore (resume commands) ==="
 echo ""
 
-# Kill all mock assistants first (so panes are empty shells)
-tmux send-keys -t test-claude C-c
-tmux send-keys -t test-opencode C-c
-tmux send-keys -t test-codex C-c
-tmux send-keys -t test-opencode-nosid C-c
-tmux send-keys -t test-lsp C-c
+# Kill all assistants first (so panes are empty shells)
+# Real CLIs may take a moment to exit, so send C-c and then kill child processes directly
+for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
+	tmux send-keys -t "$sess" C-c
+done
+sleep 2
+# Force-kill any remaining assistant children
+for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
+	spid=$(tmux display-message -t "$sess" -p '#{pane_pid}' 2>/dev/null || true)
+	if [ -n "$spid" ]; then
+		ps -eo pid=,ppid= | awk -v ppid="$spid" '$2 == ppid {print $1}' | while read -r cpid; do
+			kill -9 "$cpid" 2>/dev/null || true
+		done
+	fi
+done
 sleep 1
 
 # Run restore
@@ -275,6 +284,26 @@ assert_contains "Restore log mentions codex" "$restore_log_content" "restoring c
 assert_contains "Restore sent claude --resume" "$restore_log_content" "ses_claude_test_123"
 assert_contains "Restore sent opencode -s" "$restore_log_content" "ses_opencode_test_456"
 assert_contains "Restore sent codex resume" "$restore_log_content" "ses_codex_test_789"
+
+# --- Test 3b: Restore skips panes with already-running assistants ---
+
+echo ""
+echo "=== Test 3b: restore skips panes with running assistants ==="
+echo ""
+
+# The restore above launched assistants in the panes. Running restore again
+# should skip them (the double-launch guard).
+sleep 2
+>"$RESTORE_LOG"
+just restore 2>&1
+sleep $((session_count * 2 + 3))
+
+restore_log_2=$(cat "$RESTORE_LOG")
+if echo "$restore_log_2" | grep -q "already has a running assistant"; then
+	pass "Restore skips panes with already-running assistants"
+else
+	fail "Expected restore to detect running assistants and skip (double-launch guard)"
+fi
 
 # --- Test 4: Uninstall ---
 
@@ -322,6 +351,23 @@ fi
 # Test SessionEnd hook: should remove the state file
 echo '{}' | bash "$REPO_DIR/hooks/claude-session-cleanup.sh"
 assert_file_not_exists "SessionEnd hook removes state file" "$state_file"
+
+# Test SessionStart hook with special characters (JSON escaping)
+echo '{"session_id": "ses_quote\"test", "cwd": "/tmp/project'\''s dir"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
+special_state="$TMUX_ASSISTANT_RESURRECT_DIR/claude-$$.json"
+if [ -f "$special_state" ]; then
+	# Verify the file is valid JSON (jq can parse it)
+	if jq empty "$special_state" 2>/dev/null; then
+		pass "SessionStart hook produces valid JSON with special chars"
+	else
+		fail "SessionStart hook produces invalid JSON with special chars"
+	fi
+	special_sid=$(jq -r '.session_id' "$special_state")
+	assert_eq "SessionStart hook preserves special chars in session_id" 'ses_quote"test' "$special_sid"
+	rm -f "$special_state"
+else
+	fail "SessionStart hook state file not created for special chars test"
+fi
 
 unset TMUX_ASSISTANT_RESURRECT_DIR
 
@@ -488,6 +534,10 @@ assert_eq "Codex bare (no resume)" "" "$(get_codex_session 99999 "codex")"
 assert_eq "OpenCode -s extraction" "ses_oc_456" "$(get_opencode_session 99999 "opencode -s ses_oc_456")"
 assert_eq "OpenCode --session extraction" "ses_oc_789" "$(get_opencode_session 99999 "opencode --session ses_oc_789")"
 assert_eq "OpenCode bare (no -s)" "" "$(get_opencode_session 99999 "opencode")"
+
+# --- Equals form: --resume=<id>, --session=<id> ---
+assert_eq "Claude --resume=id (equals form)" "ses_equals_test" "$(get_claude_session 99999 "claude --resume=ses_equals_test")"
+assert_eq "OpenCode --session=id (equals form)" "ses_oc_eq" "$(get_opencode_session 99999 "opencode --session=ses_oc_eq")"
 
 # --- Test 5c3: Claude state file takes priority over --resume arg ---
 #

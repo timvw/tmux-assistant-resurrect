@@ -19,12 +19,12 @@ if [ -z "$SESSION_ID" ]; then
 fi
 
 # Write session file keyed by PPID (Claude Code's PID when it spawns this hook)
-cat >"$STATE_DIR/claude-$PPID.json" <<EOF
-{
-  "tool": "claude",
-  "session_id": "$SESSION_ID",
-  "cwd": "$CWD",
-  "ppid": $PPID,
-  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-EOF
+# Use jq to ensure proper JSON escaping of all values.
+jq -n \
+	--arg tool "claude" \
+	--arg session_id "$SESSION_ID" \
+	--arg cwd "$CWD" \
+	--argjson ppid "$PPID" \
+	--arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+	'{tool: $tool, session_id: $session_id, cwd: $cwd, ppid: $ppid, timestamp: $timestamp}' \
+	>"$STATE_DIR/claude-$PPID.json"
