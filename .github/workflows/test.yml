@@ -1,0 +1,19 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build -t tmux-assistant-resurrect-test -f test/Dockerfile .
+
+      - name: Run tests
+        run: docker run --rm tmux-assistant-resurrect-test
