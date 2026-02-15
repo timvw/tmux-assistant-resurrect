@@ -103,8 +103,8 @@ PS_SNAPSHOT=$(ps -eo pid=,ppid=,args= 2>/dev/null)
 PARTS_FILE=$(mktemp)
 trap 'rm -f "$PARTS_FILE"' EXIT
 
-tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}	#{pane_pid}	#{pane_current_path}" |
-	while IFS=$'\t' read -r target shell_pid cwd; do
+tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}" |
+	while IFS='|' read -r target shell_pid cwd; do
 		# Find direct children of the pane shell
 		echo "$PS_SNAPSHOT" | awk -v ppid="$shell_pid" '$2 == ppid {print $1, $2, substr($0, index($0,$3))}' |
 			while read -r cpid _ppid cargs; do

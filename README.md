@@ -55,11 +55,34 @@ user switches sessions at runtime via `/sessions`).
 ## Prerequisites
 
 - [tmux](https://github.com/tmux/tmux) (tested with 3.x)
+- [TPM](https://github.com/tmux-plugins/tpm) (Tmux Plugin Manager)
 - [jq](https://jqlang.github.io/jq/) (used by save/restore scripts)
-- [just](https://just.systems/) (task runner)
 - At least one of: Claude Code, OpenCode, Codex CLI
 
 ## Installation
+
+### Via TPM (recommended)
+
+Add to your `~/.tmux.conf`:
+
+```bash
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-continuum'
+set -g @plugin 'timvw/tmux-assistant-resurrect'
+
+# Initialize TPM (must be last line)
+run '~/.tmux/plugins/tpm/tpm'
+```
+
+Then press `prefix + I` inside tmux. TPM will clone the plugin and
+automatically set up:
+
+- tmux-resurrect + tmux-continuum settings
+- Claude Code hooks in `~/.claude/settings.json`
+- OpenCode session-tracker plugin in `~/.config/opencode/plugins/`
+
+### Via git clone + just
 
 ```bash
 git clone https://github.com/timvw/tmux-assistant-resurrect.git
@@ -67,39 +90,30 @@ cd tmux-assistant-resurrect
 just install
 ```
 
-This will:
-
-1. Install [TPM](https://github.com/tmux-plugins/tpm) (Tmux Plugin Manager) if
-   not present
-2. Add a `SessionStart` hook to `~/.claude/settings.json` (Claude Code)
-3. Symlink a session-tracker plugin into `~/.config/opencode/plugins/` (OpenCode)
-4. Append a `source-file` directive and TPM init to `~/.tmux.conf`
-
-After installation, complete the setup:
+After installation, reload tmux and install TPM plugins:
 
 ```bash
-# Reload tmux config
 tmux source-file ~/.tmux.conf
-
-# Install TPM plugins (inside tmux, press):
-#   prefix + I    (capital I)
-
-# Verify everything
-just status
+# Inside tmux, press: prefix + I
 ```
 
 ## Uninstallation
+
+### TPM
+
+Remove the `@plugin 'timvw/tmux-assistant-resurrect'` line from `~/.tmux.conf`,
+then press `prefix + alt + u` inside tmux.
+
+The Claude hooks and OpenCode plugin are cleaned up automatically when the
+plugin is removed.
+
+### just
 
 ```bash
 just uninstall
 ```
 
-Removes all hooks, plugins, and tmux config entries. Optionally remove TPM:
-
-```bash
-rm -rf ~/.tmux/plugins/
-tmux source-file ~/.tmux.conf
-```
+Removes all hooks, plugins, and tmux config entries.
 
 ## Usage
 
@@ -138,11 +152,9 @@ just clean
 ## Repository structure
 
 ```
-AGENTS.md                         # Guidelines for AI coding agents
+tmux-assistant-resurrect.tmux     # TPM plugin entry point
 config/
-  resurrect-assistants.conf       # tmux config: TPM + resurrect + continuum + hooks
-docs/
-  design-principles.md            # Design principles and detection approach
+  resurrect-assistants.conf       # tmux config (used by just install, not TPM)
 hooks/
   claude-session-track.sh         # Claude SessionStart hook (writes session ID)
   claude-session-cleanup.sh       # Claude SessionEnd hook (removes state file)
@@ -150,8 +162,23 @@ hooks/
 scripts/
   save-assistant-sessions.sh      # Resurrect post-save hook (process detection + session IDs)
   restore-assistant-sessions.sh   # Resurrect post-restore hook (resumes assistants)
-justfile                          # Install/uninstall/status/save/restore recipes
+test/
+  Dockerfile                      # Docker image with tmux, jq, just, and mock assistants
+  run-tests.sh                    # Integration test suite
+justfile                          # Install/uninstall/status/save/restore/test recipes
 ```
+
+## Testing
+
+Integration tests run in Docker with mock assistant binaries:
+
+```bash
+just test
+```
+
+This builds a Docker image with tmux, jq, just, and mock `claude`/`opencode`/`codex`
+binaries, then runs the full test suite covering install, save, restore, uninstall,
+hooks, cleanup, and TPM plugin installation.
 
 ## Configuration
 

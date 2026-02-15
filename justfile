@@ -343,3 +343,8 @@ clean:
     done
 
     echo "Cleaned $removed stale state file(s)"
+
+# Run integration tests in Docker
+test:
+    docker build -t tmux-assistant-resurrect-test -f test/Dockerfile .
+    docker run --rm tmux-assistant-resurrect-test
