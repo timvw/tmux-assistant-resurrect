@@ -1,24 +1,73 @@
 #!/usr/bin/env bash
 # Integration tests for tmux-assistant-resurrect.
-# Runs inside Docker with mock assistant binaries.
+# Runs inside Docker with real assistant CLI binaries.
 set -euo pipefail
 
 REPO_DIR="$HOME/tmux-assistant-resurrect"
+JUNIT_FILE="${JUNIT_FILE:-/tmp/test-results/junit.xml}"
 PASS=0
 FAIL=0
 ERRORS=""
+
+# --- JUnit XML tracking ---
+
+CURRENT_SUITE=""
+JUNIT_CASES=""
+
+# XML-escape special characters in text
+xml_escape() {
+	printf '%s' "$1" | sed "s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/\"/\&quot;/g; s/'/\&apos;/g"
+}
+
+suite() {
+	CURRENT_SUITE="$1"
+}
+
+junit_pass() {
+	local name
+	name=$(xml_escape "$1")
+	local suite
+	suite=$(xml_escape "$CURRENT_SUITE")
+	JUNIT_CASES="${JUNIT_CASES}<testcase classname=\"${suite}\" name=\"${name}\"/>"
+}
+
+junit_fail() {
+	local name
+	name=$(xml_escape "$1")
+	local message
+	message=$(xml_escape "$2")
+	local suite
+	suite=$(xml_escape "$CURRENT_SUITE")
+	JUNIT_CASES="${JUNIT_CASES}<testcase classname=\"${suite}\" name=\"${name}\"><failure message=\"${message}\"/></testcase>"
+}
+
+write_junit() {
+	local total=$((PASS + FAIL))
+	mkdir -p "$(dirname "$JUNIT_FILE")"
+	cat >"$JUNIT_FILE" <<JEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="${total}" failures="${FAIL}">
+  <testsuite name="tmux-assistant-resurrect" tests="${total}" failures="${FAIL}">
+    ${JUNIT_CASES}
+  </testsuite>
+</testsuites>
+JEOF
+	echo "JUnit XML written to $JUNIT_FILE"
+}
 
 # --- Helpers ---
 
 pass() {
 	PASS=$((PASS + 1))
 	echo "  PASS: $1"
+	junit_pass "$1"
 }
 
 fail() {
 	FAIL=$((FAIL + 1))
 	ERRORS="${ERRORS}\n  FAIL: $1"
 	echo "  FAIL: $1"
+	junit_fail "$1" "$1"
 }
 
 assert_eq() {
@@ -59,6 +108,7 @@ assert_file_not_exists() {
 
 # --- Test 1: Installation ---
 
+suite "install"
 echo ""
 echo "=== Test 1: just install ==="
 echo ""
@@ -99,8 +149,9 @@ just install 2>&1 >/dev/null
 hook_count_after=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
 assert_eq "Install is idempotent (no duplicate hooks)" "1" "$hook_count_after"
 
-# --- Test 2: Save — detect mock assistants in tmux panes ---
+# --- Test 2: Save — detect assistants in tmux panes ---
 
+suite "save"
 echo ""
 echo "=== Test 2: save (process detection + session IDs) ==="
 echo ""
@@ -191,6 +242,7 @@ fi
 
 # --- Test 3: Restore — sends correct resume commands ---
 
+suite "restore"
 echo ""
 echo "=== Test 3: restore (resume commands) ==="
 echo ""
@@ -226,6 +278,7 @@ assert_contains "Restore sent codex resume" "$restore_log_content" "ses_codex_te
 
 # --- Test 4: Uninstall ---
 
+suite "uninstall"
 echo ""
 echo "=== Test 4: just uninstall ==="
 echo ""
@@ -248,6 +301,7 @@ fi
 
 # --- Test 5: Claude hooks (SessionStart / SessionEnd) ---
 
+suite "hooks"
 echo ""
 echo "=== Test 5: Claude hook scripts ==="
 echo ""
@@ -271,6 +325,7 @@ assert_file_not_exists "SessionEnd hook removes state file" "$state_file"
 
 unset TMUX_ASSISTANT_RESURRECT_DIR
 
+suite "regression"
 # --- Test 5b: Claude state file keyed by child PID (regression) ---
 #
 # The SessionStart hook's $PPID = Claude's PID (not the shell PID), because
@@ -540,6 +595,7 @@ tmux kill-session -t test-corrupt 2>/dev/null || true
 
 # --- Test 5d: detect_tool() unit tests ---
 
+suite "detect_tool"
 echo ""
 echo "=== Test 5d: detect_tool() pattern matching ==="
 echo ""
@@ -573,6 +629,7 @@ assert_eq "ignore 'node server.js'" "" "$(detect_tool "node server.js")"
 
 # --- Test 6: Clean recipe ---
 
+suite "clean"
 echo ""
 echo "=== Test 6: just clean ==="
 echo ""
@@ -598,6 +655,7 @@ assert_file_not_exists "Stale state file removed" "$STATE_DIR/claude-99999.json"
 
 # --- Test 7: TPM plugin entry point ---
 
+suite "tpm"
 echo ""
 echo "=== Test 7: TPM plugin entry point (.tmux file) ==="
 echo ""
@@ -637,6 +695,8 @@ echo ""
 echo "=========================================="
 echo "  Results: $PASS passed, $FAIL failed"
 echo "=========================================="
+
+write_junit
 
 if [ "$FAIL" -gt 0 ]; then
 	echo -e "\nFailures:$ERRORS"

@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  checks: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -16,4 +20,12 @@ jobs:
         run: docker build -t tmux-assistant-resurrect-test -f test/Dockerfile .
 
       - name: Run tests
-        run: docker run --rm tmux-assistant-resurrect-test
+        run: |
+          mkdir -p test-results
+          docker run --rm -v ${{ github.workspace }}/test-results:/tmp/test-results tmux-assistant-resurrect-test
+
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: test-results/junit.xml
