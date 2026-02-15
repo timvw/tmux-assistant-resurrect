@@ -62,7 +62,8 @@ user switches sessions at runtime via `/sessions`).
 ## Installation
 
 ```bash
-cd ~/src/timvw/tmux-assistant-resurrect
+git clone https://github.com/timvw/tmux-assistant-resurrect.git
+cd tmux-assistant-resurrect
 just install
 ```
 
