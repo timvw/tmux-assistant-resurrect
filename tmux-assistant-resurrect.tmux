@@ -16,7 +16,7 @@ tmux set-option -g @resurrect-capture-pane-contents 'on'
 tmux set-option -g @resurrect-processes '"~claude" "~opencode" "~codex"'
 tmux set-option -g @resurrect-hook-post-save-all "bash ${CURRENT_DIR}/scripts/save-assistant-sessions.sh"
 tmux set-option -g @resurrect-hook-post-restore-all "bash ${CURRENT_DIR}/scripts/restore-assistant-sessions.sh"
-tmux set-option -g @continuum-save-interval '10'
+tmux set-option -g @continuum-save-interval '5'
 tmux set-option -g @continuum-restore 'on'
 
 # --- Claude Code hooks ---

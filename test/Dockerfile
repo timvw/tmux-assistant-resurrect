@@ -11,24 +11,17 @@ RUN apt-get update && apt-get install -y \
     git \
     procps \
     nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 # Install just
 RUN curl -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
 
-# Create mock assistant binaries that sleep forever (mimic real processes).
-# IMPORTANT: Must NOT use `exec sleep` — that replaces the process image and
-# the binary name disappears from `ps`. Instead, use a trap+wait loop so the
-# shell stays alive with the original command visible in the process table.
+# Install real assistant CLIs (no mocks)
+RUN npm install -g @anthropic-ai/claude-code @openai/codex opencode-ai
 
-RUN printf '#!/bin/bash\ntrap "exit 0" TERM INT\nwhile true; do sleep 3600 & wait $!; done\n' > /usr/local/bin/claude && \
-    chmod +x /usr/local/bin/claude
-
-RUN printf '#!/bin/bash\ntrap "exit 0" TERM INT\nwhile true; do sleep 3600 & wait $!; done\n' > /usr/local/bin/opencode && \
-    chmod +x /usr/local/bin/opencode
-
-RUN printf '#!/bin/bash\ntrap "exit 0" TERM INT\nwhile true; do sleep 3600 & wait $!; done\n' > /usr/local/bin/codex && \
-    chmod +x /usr/local/bin/codex
+# Verify the binaries exist
+RUN which claude && which codex && which opencode
 
 # Create a test user (avoid running as root — tmux behaves differently)
 RUN useradd -m -s /bin/bash testuser
