@@ -103,22 +103,6 @@ Manual save/restore keybindings (tmux-resurrect defaults):
 | `prefix + Ctrl-s` | Save tmux state + assistant sessions |
 | `prefix + Ctrl-r` | Restore tmux state + resume assistants |
 
-### Manual commands
-
-```bash
-# Save current assistant sessions (without full tmux save)
-just save
-
-# Restore saved assistant sessions into current panes
-just restore
-
-# Check installation status and tracked sessions
-just status
-
-# Clean up state files from dead processes
-just clean
-```
-
 ## Repository structure
 
 ```
