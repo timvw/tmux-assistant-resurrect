@@ -10,6 +10,12 @@
 # Match binary name with optional path prefix, standalone or with arguments.
 # Handles: /path/to/claude, claude, claude --resume ..., opencode -s ..., etc.
 # Excludes: opencode run ... (LSP subprocesses)
+#
+# Limitation: patterns match any command line containing /claude, /opencode, or
+# /codex as a path component. An unrelated binary with the same name (e.g., a
+# LaTeX tool named "codex") would be falsely detected. In practice this is rare
+# inside tmux panes, but worth noting. Future: could verify identity via
+# --version or known subcommands if false positives become an issue.
 detect_tool() {
 	local args="$1"
 	case "$args" in
@@ -47,6 +53,12 @@ pane_has_assistant() {
 
 	# Walk the entire process tree under the pane shell.
 	# Uses a single-pass awk that builds the descendant set as it goes.
+	#
+	# Assumption: ps output is ordered by ascending PID, so parents appear
+	# before children. POSIX doesn't guarantee this, but it holds on Linux
+	# (procfs enumeration) and macOS (libproc). If a child PID appeared before
+	# its parent, it would be missed. A multi-pass approach would be more
+	# robust but slower; in practice, single-pass has been reliable.
 	local found_pid
 	found_pid=$(echo "$snapshot" | awk -v root="$shell_pid" '
 		BEGIN { pids[root]=1 }

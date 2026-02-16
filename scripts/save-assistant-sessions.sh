@@ -23,6 +23,12 @@ LOG_FILE="${RESURRECT_DIR}/assistant-save.log"
 mkdir -p -m 0700 "$STATE_DIR"
 mkdir -p "$RESURRECT_DIR"
 
+# Rotate log: keep only the most recent 500 lines to prevent unbounded growth
+# (continuum saves every 5 minutes, so this grows ~12 lines/hour).
+if [ -f "$LOG_FILE" ]; then
+	tail -n 500 "$LOG_FILE" >"${LOG_FILE}.tmp" 2>/dev/null && mv "${LOG_FILE}.tmp" "$LOG_FILE" || true
+fi
+
 log() {
 	local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
 	echo "$msg" >&2
@@ -179,7 +185,7 @@ emit_session() {
 }
 
 FOUND_FLAG=$(mktemp)
-trap 'rm -f "$PARTS_FILE" "$FOUND_FLAG"' EXIT
+trap 'rm -f "$PARTS_FILE" "$FOUND_FLAG"' EXIT INT TERM
 
 tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}" |
 	while IFS='|' read -r target shell_pid cwd; do
@@ -197,6 +203,8 @@ tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}
 		# Walk the entire process tree under the pane shell to find assistants.
 		# This handles wrappers like npx, env, direnv exec, bash -lc, etc.
 		# We collect all descendant PIDs, then check each for an assistant match.
+		# NOTE: single-pass awk assumes ps output is PID-ascending (parents before
+		# children). See lib-detect.sh comment for rationale and limitations.
 		if [ ! -s "$FOUND_FLAG" ]; then
 			echo "$PS_SNAPSHOT" | awk -v root="$shell_pid" '
 				BEGIN { pids[root]=1 }

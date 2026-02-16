@@ -7,7 +7,7 @@
 import { writeFileSync, mkdirSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 
-export const SessionTracker = async ({ client }) => {
+export const SessionTracker = async ({ client, directory }) => {
   const stateDir =
     process.env.TMUX_ASSISTANT_RESURRECT_DIR ||
     `${process.env.XDG_RUNTIME_DIR || tmpdir()}/tmux-assistant-resurrect`;
@@ -41,6 +41,7 @@ export const SessionTracker = async ({ client }) => {
         tool: "opencode",
         session_id: sessionID,
         pid: pid,
+        cwd: directory || process.cwd(),
         timestamp: new Date().toISOString(),
       },
       null,

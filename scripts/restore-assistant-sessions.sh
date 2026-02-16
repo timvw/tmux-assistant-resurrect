@@ -16,6 +16,11 @@ RESURRECT_DIR="${HOME}/.tmux/resurrect"
 INPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
 LOG_FILE="${RESURRECT_DIR}/assistant-restore.log"
 
+# Rotate log: keep only the most recent 500 lines
+if [ -f "$LOG_FILE" ]; then
+	tail -n 500 "$LOG_FILE" >"${LOG_FILE}.tmp" 2>/dev/null && mv "${LOG_FILE}.tmp" "$LOG_FILE" || true
+fi
+
 log() {
 	local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
 	echo "$msg" >&2
@@ -79,17 +84,20 @@ while read -r entry; do
 		fi
 	fi
 
-	# Build the resume command for each tool
+	# Build the resume command for each tool.
+	# Apply posix_quote to session_id defensively — IDs are alphanumeric in
+	# practice, but a corrupt/tampered sidecar JSON could inject shell commands.
+	safe_sid=$(posix_quote "$session_id")
 	resume_cmd=""
 	case "$tool" in
 	claude)
-		resume_cmd="claude --resume '${session_id}'"
+		resume_cmd="claude --resume ${safe_sid}"
 		;;
 	opencode)
-		resume_cmd="opencode -s '${session_id}'"
+		resume_cmd="opencode -s ${safe_sid}"
 		;;
 	codex)
-		resume_cmd="codex resume '${session_id}'"
+		resume_cmd="codex resume ${safe_sid}"
 		;;
 	*)
 		log "unknown tool '$tool' for pane $pane, skipping"
