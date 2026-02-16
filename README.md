@@ -141,45 +141,62 @@ TPM plugin installation, session ID extraction, POSIX quoting, process tree
 detection, and regression scenarios. No API keys are needed — the tests exercise
 the process detection and session management layer, not the AI functionality.
 
-### Manual testing on your machine
+### Try it yourself
 
-You can verify the full save → kill → restore cycle on your own tmux setup.
+You can verify the full save → kill → restore cycle on your own machine using
+the normal TPM installation — no cloning or build tools needed.
 
-**Prerequisites**: tmux, jq, [just](https://just.systems), and at least one of
-claude/opencode/codex installed.
+**Prerequisites**: tmux, jq, and at least one of claude / opencode / codex
+installed.
 
-#### 1. Install (developer mode)
+#### 1. Install via TPM
+
+Add to your `~/.tmux.conf` (if you haven't already):
 
 ```bash
-git clone https://github.com/timvw/tmux-assistant-resurrect.git
-cd tmux-assistant-resurrect
-just install
-tmux source-file ~/.tmux.conf
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-continuum'
+set -g @plugin 'timvw/tmux-assistant-resurrect'
+
+run '~/.tmux/plugins/tpm/tpm'
 ```
+
+Then inside tmux, press `prefix + I` (capital I). TPM will install the plugins
+and set up the Claude hooks and OpenCode plugin automatically.
 
 #### 2. Launch some assistants
 
-Open tmux and start assistants in separate sessions/windows:
+Start assistants in separate tmux windows or sessions — just like you normally
+would:
 
 ```bash
-# In one tmux pane, cd to a project and launch claude:
+# In one tmux window:
 cd ~/src/my-project
 claude
 
-# In another pane, launch opencode:
+# In another window:
 cd ~/src/other-project
 opencode
 ```
 
-#### 3. Verify save detects them
+Work with them for a bit so the session hooks fire (Claude's `SessionStart`
+hook writes the session ID to disk automatically).
+
+#### 3. Save
+
+Press `prefix + Ctrl-s` (the tmux-resurrect save keybinding). This saves the
+tmux layout **and** runs the assistant save hook, which detects running
+assistants and writes their session IDs to
+`~/.tmux/resurrect/assistant-sessions.json`.
+
+You can inspect what was saved:
 
 ```bash
-just save
 cat ~/.tmux/resurrect/assistant-sessions.json | jq .
 ```
 
-You should see each assistant with its session ID, tool name, pane address, and
-working directory. Example output:
+Example output:
 
 ```json
 {
@@ -203,64 +220,67 @@ working directory. Example output:
 }
 ```
 
-#### 4. Check status
+#### 4. Kill tmux (simulate a reboot)
 
 ```bash
-just status
-```
-
-This shows installed hooks, active state files, and the last saved sessions.
-
-#### 5. Test the restore flow
-
-```bash
-# Save the current state
-tmux send-keys 'prefix + Ctrl-s'     # or: just save
-
-# Kill the tmux server (simulates a reboot)
 tmux kill-server
-
-# Restart tmux and restore
-tmux new-session -d
-tmux source-file ~/.tmux.conf
-tmux send-keys 'prefix + Ctrl-r'     # triggers tmux-resurrect restore
-
-# Or restore just the assistants manually:
-just restore
 ```
 
-After restore, each pane should have the assistant relaunched with
-`--resume <session-id>` (Claude), `-s <session-id>` (OpenCode), or
-`resume <session-id>` (Codex).
+Everything is gone — all sessions, all panes, all running assistants.
 
-#### 6. Inspect logs
+#### 5. Restore
+
+Start tmux again:
 
 ```bash
-# Save log — shows detected tools and session IDs
-cat ~/.tmux/resurrect/assistant-save.log
+tmux
+```
 
-# Restore log — shows which panes received resume commands
+Then press `prefix + Ctrl-r` (the tmux-resurrect restore keybinding).
+
+tmux-resurrect recreates your sessions, windows, and panes. The post-restore
+hook then reads the saved assistant sessions and sends the correct resume
+command to each pane:
+
+- `claude --resume <session-id>` for Claude
+- `opencode -s <session-id>` for OpenCode
+- `codex resume <session-id>` for Codex
+
+Each assistant should launch in the correct working directory and resume its
+previous conversation.
+
+#### 6. Verify
+
+Check the restore log to see what happened:
+
+```bash
 cat ~/.tmux/resurrect/assistant-restore.log
 ```
 
-#### 7. Clean up
+You should see lines like:
+
+```
+[2026-02-15T20:34:31Z] restoring 2 assistant session(s)...
+[2026-02-15T20:34:31Z] restoring claude in my-project:0.0 (session: 01abc...)
+[2026-02-15T20:34:32Z] restoring opencode in other-project:0.0 (session: ses_xyz...)
+[2026-02-15T20:34:33Z] restored 2 of 2 assistant session(s)
+```
+
+The save log is also available if you want to see what was detected:
 
 ```bash
-# Remove stale state files (from dead processes)
-just clean
-
-# Full uninstall
-just uninstall
+cat ~/.tmux/resurrect/assistant-save.log
 ```
 
 ### Troubleshooting
 
 | Symptom | Check |
 |---------|-------|
-| `just save` finds 0 sessions | Run `ps -eo pid=,ppid=,args= \| grep -E 'claude\|opencode\|codex'` to verify assistants are running |
-| Session ID is missing for Claude | Verify the SessionStart hook is installed: `jq '.hooks.SessionStart' ~/.claude/settings.json` |
-| Session ID is missing for OpenCode | Either launch with `-s <id>` or verify the plugin: `ls ~/.config/opencode/plugins/session-tracker.js` |
-| Restore sends commands but assistant doesn't resume | The session ID may have expired or belong to a different machine. Start a fresh session. |
+| Save finds 0 sessions | Run `ps -eo pid=,ppid=,args= \| grep -E 'claude\|opencode\|codex'` to verify assistants are running |
+| Session ID missing for Claude | Verify the hook is installed: `jq '.hooks.SessionStart' ~/.claude/settings.json` |
+| Session ID missing for OpenCode | Launch with `-s <id>`, or verify the plugin: `ls ~/.config/opencode/plugins/session-tracker.js` |
+| Restore launches but assistant says "session not found" | The session ID may have expired. This is normal — start a fresh session and the next save will pick up the new ID |
+| Assistants launch twice after restore | Make sure assistants are **not** listed in `@resurrect-processes` — the plugin handles all resuming via the post-restore hook |
 | `just test` fails with Docker errors | Ensure Docker is running and you have network access (the image pulls npm packages) |
 
 ## Configuration
