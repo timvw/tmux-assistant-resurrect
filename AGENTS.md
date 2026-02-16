@@ -13,7 +13,10 @@ Agent detection is done via direct process inspection: the save script takes a
 assistant binary names (`claude`, `opencode`, `codex`).
 
 Session ID extraction uses tool-native mechanisms (state files, process args,
-JSONL lookup) -- this is infrastructure plumbing, not heuristic classification.
+JSONL lookup, SQLite database) -- this is infrastructure plumbing, not heuristic
+classification. Both Claude and OpenCode overwrite their process titles, so
+process args are unreliable; state files and database queries are the primary
+extraction methods.
 
 ## Architecture
 

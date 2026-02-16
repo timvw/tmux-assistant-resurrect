@@ -61,7 +61,10 @@ export const SessionTracker = async ({ client }) => {
         "session.idle",
       ];
       if (sessionEvents.includes(event.type)) {
-        const sessionID = event.properties?.id;
+        // v1.2.x+: event.properties.info is a Session object with .id
+        // Fallback: check event.properties.id directly (future-proofing)
+        const sessionID =
+          event.properties?.info?.id || event.properties?.id;
         writeSessionFile(sessionID);
       }
     },

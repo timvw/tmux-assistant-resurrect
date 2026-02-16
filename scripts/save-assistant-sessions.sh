@@ -63,6 +63,7 @@ get_claude_session() {
 get_opencode_session() {
 	local child_pid="$1"
 	local args="$2"
+	local cwd="${3:-}"
 
 	# Method 1: -s flag in process args (fastest)
 	local sid
@@ -82,7 +83,39 @@ get_opencode_session() {
 	# Method 3: plugin state file (handles runtime session switches)
 	local state_file="$STATE_DIR/opencode-${child_pid}.json"
 	if [ -f "$state_file" ]; then
-		jq -r '.session_id // empty' "$state_file" 2>/dev/null || true
+		sid=$(jq -r '.session_id // empty' "$state_file" 2>/dev/null || true)
+		if [ -n "$sid" ]; then
+			echo "$sid"
+			return
+		fi
+	fi
+
+	# Method 4: SQLite database (version-resilient fallback).
+	# OpenCode stores sessions in ~/.local/share/opencode/opencode.db.
+	# Query the most recently updated session matching the pane's cwd.
+	# Uses python3 (available on Linux and macOS) since sqlite3 CLI
+	# is not always installed (e.g. missing on Ubuntu minimal).
+	local db_file="${HOME}/.local/share/opencode/opencode.db"
+	if [ -n "$cwd" ] && [ -f "$db_file" ] && command -v python3 >/dev/null 2>&1; then
+		sid=$(python3 -c "
+import sqlite3, sys
+try:
+    conn = sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True)
+    cur = conn.cursor()
+    cur.execute(
+        'SELECT id FROM session WHERE directory = ? ORDER BY time_updated DESC LIMIT 1',
+        (sys.argv[2],))
+    row = cur.fetchone()
+    if row:
+        print(row[0])
+    conn.close()
+except Exception:
+    pass
+" "$db_file" "$cwd" 2>/dev/null || true)
+		if [ -n "$sid" ]; then
+			echo "$sid"
+			return
+		fi
 	fi
 }
 
@@ -126,7 +159,7 @@ emit_session() {
 	local session_id=""
 	case "$tool" in
 	claude) session_id=$(get_claude_session "$cpid" "$cargs") ;;
-	opencode) session_id=$(get_opencode_session "$cpid" "$cargs") ;;
+	opencode) session_id=$(get_opencode_session "$cpid" "$cargs" "$cwd") ;;
 	codex) session_id=$(get_codex_session "$cpid" "$cargs") ;;
 	esac
 

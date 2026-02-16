@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     procps \
     nodejs \
     npm \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install just

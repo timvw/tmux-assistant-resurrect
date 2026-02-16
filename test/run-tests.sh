@@ -170,7 +170,8 @@ tmux new-session -d -s test-lsp -c /tmp
 # Launch mock assistants inside tmux panes
 # Claude: just a bare claude process (session ID comes from hook state file)
 tmux send-keys -t test-claude "claude --resume ses_claude_test_123" Enter
-# OpenCode: with -s flag (detected from process args)
+# OpenCode: with -s flag (session ID comes from plugin state file — the Go
+# binary overwrites its process title so -s is NOT visible in ps)
 tmux send-keys -t test-opencode "opencode -s ses_opencode_test_456" Enter
 # Codex: bare process (session ID comes from session-tags.jsonl)
 tmux send-keys -t test-codex "codex resume ses_codex_test_789" Enter
@@ -194,6 +195,21 @@ cat >"$TEST_STATE_DIR/claude-${claude_child_pid}.json" <<EOF
   "tool": "claude",
   "session_id": "ses_claude_test_123",
   "ppid": $claude_child_pid,
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+EOF
+
+# Create an OpenCode plugin state file keyed by the OpenCode child PID
+# (The Go binary overwrites its process title, so -s flag is NOT visible
+#  in `ps` output. The plugin writes a state file instead — same mechanism
+#  as Claude's hook.)
+opencode_pane_shell_pid=$(tmux display-message -t test-opencode -p '#{pane_pid}')
+opencode_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$opencode_pane_shell_pid" '$2 == ppid && /opencode/ {print $1; exit}')
+cat >"$TEST_STATE_DIR/opencode-${opencode_child_pid}.json" <<EOF
+{
+  "tool": "opencode",
+  "session_id": "ses_opencode_test_456",
+  "pid": $opencode_child_pid,
   "timestamp": "2026-01-01T00:00:00Z"
 }
 EOF
@@ -224,9 +240,9 @@ fi
 claude_sid=$(jq -r '.sessions[] | select(.tool == "claude") | .session_id' "$SAVED")
 assert_eq "Claude session ID extracted" "ses_claude_test_123" "$claude_sid"
 
-# Verify OpenCode was detected with correct session ID (from -s arg)
+# Verify OpenCode was detected with correct session ID (from plugin state file)
 opencode_sid=$(jq -r '[.sessions[] | select(.tool == "opencode" and .session_id != "")] | first | .session_id' "$SAVED")
-assert_eq "OpenCode session ID extracted from -s arg" "ses_opencode_test_456" "$opencode_sid"
+assert_eq "OpenCode session ID extracted from plugin state file" "ses_opencode_test_456" "$opencode_sid"
 
 # Verify Codex was detected with correct session ID (from session-tags.jsonl)
 codex_sid=$(jq -r '.sessions[] | select(.tool == "codex") | .session_id' "$SAVED")
@@ -653,13 +669,51 @@ assert_eq "Codex resume with path" "ses_codex_789" "$(get_codex_session 99999 "/
 assert_eq "Codex bare (no resume)" "" "$(get_codex_session 99999 "codex")"
 
 # --- OpenCode: -s and --session arg extraction ---
-assert_eq "OpenCode -s extraction" "ses_oc_456" "$(get_opencode_session 99999 "opencode -s ses_oc_456")"
-assert_eq "OpenCode --session extraction" "ses_oc_789" "$(get_opencode_session 99999 "opencode --session ses_oc_789")"
-assert_eq "OpenCode bare (no -s)" "" "$(get_opencode_session 99999 "opencode")"
+assert_eq "OpenCode -s extraction" "ses_oc_456" "$(get_opencode_session 99999 "opencode -s ses_oc_456" "/tmp")"
+assert_eq "OpenCode --session extraction" "ses_oc_789" "$(get_opencode_session 99999 "opencode --session ses_oc_789" "/tmp")"
+assert_eq "OpenCode bare (no -s, no DB)" "" "$(get_opencode_session 99999 "opencode" "/nonexistent")"
 
 # --- Equals form: --resume=<id>, --session=<id> ---
 assert_eq "Claude --resume=id (equals form)" "ses_equals_test" "$(get_claude_session 99999 "claude --resume=ses_equals_test")"
-assert_eq "OpenCode --session=id (equals form)" "ses_oc_eq" "$(get_opencode_session 99999 "opencode --session=ses_oc_eq")"
+assert_eq "OpenCode --session=id (equals form)" "ses_oc_eq" "$(get_opencode_session 99999 "opencode --session=ses_oc_eq" "/tmp")"
+
+# --- OpenCode: SQLite database fallback ---
+# When no -s flag and no plugin state file, fall back to the OpenCode DB.
+OC_DB_DIR=$(mktemp -d)
+OC_DB_FILE="$OC_DB_DIR/opencode.db"
+python3 -c "
+import sqlite3
+conn = sqlite3.connect('$OC_DB_FILE')
+conn.execute('''CREATE TABLE session (
+    id TEXT PRIMARY KEY,
+    slug TEXT,
+    project_id TEXT,
+    directory TEXT,
+    title TEXT,
+    version TEXT,
+    time_created INTEGER,
+    time_updated INTEGER
+)''')
+conn.execute('''INSERT INTO session (id, slug, project_id, directory, title, version, time_created, time_updated)
+    VALUES ('ses_db_fallback_test', 'test-slug', 'global', '/tmp/oc-project', 'test session', '1.2.5', 1000000, 2000000)''')
+conn.execute('''INSERT INTO session (id, slug, project_id, directory, title, version, time_created, time_updated)
+    VALUES ('ses_db_older', 'old-slug', 'global', '/tmp/oc-project', 'older session', '1.2.5', 500000, 1000000)''')
+conn.execute('''INSERT INTO session (id, slug, project_id, directory, title, version, time_created, time_updated)
+    VALUES ('ses_db_other_dir', 'other-slug', 'global', '/tmp/other-dir', 'other dir session', '1.2.5', 1000000, 3000000)''')
+conn.commit()
+conn.close()
+"
+# Temporarily override HOME so the save script finds our mock DB
+REAL_HOME="$HOME"
+export HOME="$OC_DB_DIR"
+mkdir -p "$HOME/.local/share/opencode"
+mv "$OC_DB_FILE" "$HOME/.local/share/opencode/opencode.db"
+assert_eq "OpenCode DB fallback finds session by cwd" "ses_db_fallback_test" "$(get_opencode_session 99999 "opencode" "/tmp/oc-project")"
+assert_eq "OpenCode DB fallback picks most recent by time_updated" "ses_db_fallback_test" "$(get_opencode_session 99999 "opencode" "/tmp/oc-project")"
+assert_eq "OpenCode DB fallback returns empty for unknown cwd" "" "$(get_opencode_session 99999 "opencode" "/tmp/unknown-dir")"
+assert_eq "OpenCode DB other dir returns correct session" "ses_db_other_dir" "$(get_opencode_session 99999 "opencode" "/tmp/other-dir")"
+export HOME="$REAL_HOME"
+rm -rf "$OC_DB_DIR"
 
 # --- Test 5c3: Claude state file takes priority over --resume arg ---
 #

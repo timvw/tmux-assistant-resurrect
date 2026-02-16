@@ -2,7 +2,7 @@
 
 > **Disclaimer**: This project was entirely vibecoded (designed and implemented
 > through conversation with AI coding assistants). It has been end-to-end tested
-> in Docker with real CLI binaries (91 automated tests + full save/kill/restore
+> in Docker with real CLI binaries (95 automated tests + full save/kill/restore
 > lifecycle smoke test), but has **limited real-world usage** so far. Expect
 > rough edges. Contributions and bug reports welcome.
 
@@ -43,15 +43,16 @@ and matches known assistant binary names (`claude`, `opencode`, `codex`).
 
 Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 
-| Tool | Primary method | Fallback | Notes |
-|------|---------------|----------|-------|
-| **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` in process args | Claude overwrites its process title, so args fallback only works if args are visible |
-| **OpenCode** | `-s` / `--session` in process args | Plugin state file | Plugin handles runtime session switches via `/sessions` |
-| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | Codex runs via Node.js, so args are always visible in `ps` |
+| Tool | Primary method | Fallback 1 | Fallback 2 | Notes |
+|------|---------------|------------|------------|-------|
+| **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` in process args | - | Claude overwrites its process title, so args fallback only works if args are visible |
+| **OpenCode** | `-s` / `--session` in process args | Plugin state file | SQLite DB query (`~/.local/share/opencode/opencode.db`) | Go binary overwrites process title; DB fallback matches most recent session by cwd |
+| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | - | Codex runs via Node.js, so args are always visible in `ps` |
 
 Each tool has a primary and fallback extraction method. Fallbacks address the
 chicken-and-egg problem: after a restore, session IDs are in process args even
-before hooks/plugins have fired.
+before hooks/plugins have fired. The OpenCode SQLite database fallback provides
+version-resilient session ID extraction even when the plugin hasn't fired.
 
 ## Prerequisites
 

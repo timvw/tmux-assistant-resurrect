@@ -33,7 +33,9 @@ before hooks/plugins have fired):
   (primary); `--resume <id>` in process args (fallback -- note: Claude
   overwrites its process title, so this only works if args are still visible)
 - **OpenCode**: `-s` / `--session` flag in process args (fast path); plugin
-  state file (fallback for runtime session switches)
+  state file (fallback for runtime session switches); SQLite database query
+  at `~/.local/share/opencode/opencode.db` matching the pane's cwd (version-
+  resilient fallback when the plugin hasn't fired)
 - **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary);
   `resume <id>` in process args (fallback)
 
@@ -54,9 +56,10 @@ To add support for a new tool:
   reliable source of session IDs for Claude.
 - **Codex CLI** runs via Node.js and preserves its full command line in `ps`,
   so `codex resume <id>` is always visible.
-- **OpenCode** is a native binary on Linux (distributed via npm as `opencode-ai`
-  with a Node.js launcher that finds a platform-specific binary). The `-s` flag
-  may or may not be visible depending on the platform.
+- **OpenCode** is a native Go binary (distributed via npm as `opencode-ai`
+  or installed via `opencode upgrade`). Like Claude, the Go binary overwrites
+  its process title, so `-s <id>` is NOT visible in `ps`. The plugin state
+  file and SQLite database fallback are the reliable sources of session IDs.
 
 ## macOS considerations
 
