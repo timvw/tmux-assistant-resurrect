@@ -18,7 +18,7 @@ LOG_FILE="${RESURRECT_DIR}/assistant-restore.log"
 
 log() {
 	local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
-	echo "$msg"
+	echo "$msg" >&2
 	echo "$msg" >>"$LOG_FILE"
 }
 
@@ -98,6 +98,15 @@ while read -r entry; do
 	esac
 
 	log "restoring $tool in $pane (session: $session_id)"
+
+	# Clear the pane before launching: tmux-resurrect may have restored old
+	# pane contents (captured terminal text from the previous session). Without
+	# clearing, TUI tools like Claude show stale output above the new instance.
+	# Uses tmux clear-history to wipe scrollback, then sends 'clear' to reset
+	# the visible area.
+	tmux send-keys -t "$pane" "clear" Enter
+	tmux clear-history -t "$pane"
+	sleep 0.3
 
 	# Build the full command: cd to cwd (if it exists) then resume.
 	# Use POSIX single-quote escaping (safe for bash, zsh, sh, dash, fish).
