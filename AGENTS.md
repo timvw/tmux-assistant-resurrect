@@ -26,7 +26,7 @@ JSONL lookup) -- this is infrastructure plumbing, not heuristic classification.
 ## Key conventions
 
 - All scripts use `set -euo pipefail`
-- State files go to `$TMUX_ASSISTANT_RESURRECT_DIR` (default: `/tmp/tmux-assistant-resurrect/`)
+- State files go to `$TMUX_ASSISTANT_RESURRECT_DIR` (default: `$XDG_RUNTIME_DIR` or `$TMPDIR` + `/tmux-assistant-resurrect`)
 - Log files go to `~/.tmux/resurrect/assistant-{save,restore}.log`
 - Process inspection uses `ps -eo pid=,ppid=` (not `pgrep -P` -- unreliable on macOS)
 - Agent detection matches binary names via `case` patterns in `detect_tool()`

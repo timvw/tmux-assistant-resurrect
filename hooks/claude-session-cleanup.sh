@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-STATE_DIR="${TMUX_ASSISTANT_RESURRECT_DIR:-/tmp/tmux-assistant-resurrect}"
+STATE_DIR="${TMUX_ASSISTANT_RESURRECT_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tmux-assistant-resurrect}"
 
 # Remove the state file for this shell's PPID
 rm -f "$STATE_DIR/claude-$PPID.json" 2>/dev/null || true

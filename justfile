@@ -4,7 +4,11 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 repo_dir := justfile_directory()
-state_dir := env("TMUX_ASSISTANT_RESURRECT_DIR", "/tmp/tmux-assistant-resurrect")
+# State directory: uses TMUX_ASSISTANT_RESURRECT_DIR if set, else XDG_RUNTIME_DIR/TMPDIR/tmp.
+# The just env() function can't do nested expansion, so recipes compute the
+# default via shell. This variable is only used when the env var IS set.
+state_dir_override := env("TMUX_ASSISTANT_RESURRECT_DIR", "")
+_state_dir_expr := 'STATE_DIR="${TMUX_ASSISTANT_RESURRECT_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tmux-assistant-resurrect}"'
 
 # Show available recipes
 default:
@@ -269,7 +273,8 @@ status:
     echo ""
 
     # State files
-    state_dir="{{state_dir}}"
+    {{_state_dir_expr}}
+    state_dir="$STATE_DIR"
     if [ -d "$state_dir" ]; then
         file_count=$(ls "$state_dir"/*.json 2>/dev/null | wc -l | tr -d ' ')
         echo "State directory: $state_dir ($file_count active tracking file(s))"
@@ -313,7 +318,8 @@ restore:
 clean:
     #!/usr/bin/env bash
     set -euo pipefail
-    state_dir="{{state_dir}}"
+    {{_state_dir_expr}}
+    state_dir="$STATE_DIR"
     if [ ! -d "$state_dir" ]; then
         echo "Nothing to clean"
         exit 0

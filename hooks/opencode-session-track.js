@@ -5,15 +5,16 @@
 // Install: symlink into ~/.config/opencode/plugins/ (global) or .opencode/plugins/ (project).
 
 import { writeFileSync, mkdirSync, unlinkSync } from "fs";
+import { tmpdir } from "os";
 
 export const SessionTracker = async ({ client }) => {
   const stateDir =
     process.env.TMUX_ASSISTANT_RESURRECT_DIR ||
-    "/tmp/tmux-assistant-resurrect";
+    `${process.env.XDG_RUNTIME_DIR || tmpdir()}/tmux-assistant-resurrect`;
   const pid = process.pid;
   const stateFile = `${stateDir}/opencode-${pid}.json`;
 
-  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 
   // Clean up state file when the process exits
   const cleanup = () => {

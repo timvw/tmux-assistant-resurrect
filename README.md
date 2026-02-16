@@ -282,12 +282,24 @@ cat ~/.tmux/resurrect/assistant-save.log
 
 ### State directory
 
-Session tracking files are written to `/tmp/tmux-assistant-resurrect/` by
-default. Override with:
+Session tracking files are written to a per-user temporary directory:
+
+| Platform | Default path |
+|----------|-------------|
+| **Linux (systemd)** | `$XDG_RUNTIME_DIR/tmux-assistant-resurrect` (e.g., `/run/user/1000/tmux-assistant-resurrect`) |
+| **macOS** | `$TMPDIR/tmux-assistant-resurrect` (e.g., `/var/folders/.../T/tmux-assistant-resurrect`) |
+| **Fallback** | `/tmp/tmux-assistant-resurrect` (only if both `XDG_RUNTIME_DIR` and `TMPDIR` are unset) |
+
+This avoids permission conflicts on multi-user systems. Override with:
 
 ```bash
 export TMUX_ASSISTANT_RESURRECT_DIR=/path/to/state
 ```
+
+Note: state files are transient — they track running assistant PIDs and session
+IDs while tmux is active. The persistent sidecar JSON
+(`~/.tmux/resurrect/assistant-sessions.json`) is what survives reboots and lives
+in your home directory.
 
 ### Continuum save interval
 
@@ -318,7 +330,7 @@ To add a new AI coding assistant:
 Two hooks configured in `~/.claude/settings.json`:
 
 - **`SessionStart`**: Claude Code passes JSON on stdin (including `session_id`).
-  The hook writes this to `/tmp/tmux-assistant-resurrect/claude-<PID>.json`,
+  The hook writes this to `$STATE_DIR/claude-<PID>.json`,
   where PID is Claude Code's process ID (the hook's `$PPID`, since Claude
   spawns the hook as a subprocess).
 - **`SessionEnd`**: Removes the state file when the Claude session exits,
@@ -332,7 +344,7 @@ only reliable source of session IDs for Claude.
 
 An OpenCode plugin that listens for `session.created`, `session.updated`, and
 `session.idle` events. On each event, it writes the current session ID to
-`/tmp/tmux-assistant-resurrect/opencode-<PID>.json`. This handles the case where
+`$STATE_DIR/opencode-<PID>.json`. This handles the case where
 a user switches sessions at runtime (via `/sessions` or `Ctrl+x l`). The plugin
 also cleans up its state file on process exit (SIGINT, SIGTERM).
 

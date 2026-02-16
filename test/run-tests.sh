@@ -9,6 +9,10 @@ PASS=0
 FAIL=0
 ERRORS=""
 
+# Pin state directory to a known path for tests (overrides the per-user default)
+export TMUX_ASSISTANT_RESURRECT_DIR="/tmp/tmux-assistant-resurrect-test"
+TEST_STATE_DIR="$TMUX_ASSISTANT_RESURRECT_DIR"
+
 # --- JUnit XML tracking ---
 
 CURRENT_SUITE=""
@@ -184,9 +188,8 @@ sleep 4
 #  looks for claude-{child_pid}.json where child_pid = the claude process PID)
 claude_pane_shell_pid=$(tmux display-message -t test-claude -p '#{pane_pid}')
 claude_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$claude_pane_shell_pid" '$2 == ppid && /claude/ {print $1; exit}')
-STATE_DIR="/tmp/tmux-assistant-resurrect"
-mkdir -p "$STATE_DIR"
-cat >"$STATE_DIR/claude-${claude_child_pid}.json" <<EOF
+mkdir -p "$TEST_STATE_DIR"
+cat >"$TEST_STATE_DIR/claude-${claude_child_pid}.json" <<EOF
 {
   "tool": "claude",
   "session_id": "ses_claude_test_123",
@@ -484,7 +487,8 @@ else
 	fail "SessionStart hook state file not created for special chars test"
 fi
 
-unset TMUX_ASSISTANT_RESURRECT_DIR
+# Restore the test-wide state dir
+export TMUX_ASSISTANT_RESURRECT_DIR="$TEST_STATE_DIR"
 
 suite "regression"
 # --- Test 5b: Claude state file keyed by child PID (regression) ---
@@ -513,7 +517,7 @@ else
 	fail "Could not find Claude child PID under shell $claude_pid_test_shell"
 fi
 
-PID_TEST_STATE_DIR="/tmp/tmux-assistant-resurrect"
+PID_TEST_STATE_DIR="$TEST_STATE_DIR"
 mkdir -p "$PID_TEST_STATE_DIR"
 
 # Clean up any prior state files for these PIDs
@@ -602,7 +606,9 @@ echo ""
 echo "=== Test 5c2: Session ID extraction unit tests (chicken-and-egg) ==="
 echo ""
 
-# Source the shared library and extraction functions from the save script
+# Source the shared library and extraction functions from the save script.
+# Set STATE_DIR so get_claude_session() can check for state files.
+STATE_DIR="$TEST_STATE_DIR"
 source "$REPO_DIR/scripts/lib-detect.sh"
 eval "$(sed -n '/^get_claude_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
 eval "$(sed -n '/^get_codex_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
@@ -639,7 +645,7 @@ assert_eq "Claude empty state file falls through to args" "ses_fallback2" "$(get
 rm -rf "$UNIT_STATE_DIR"
 
 # Reset STATE_DIR
-STATE_DIR="/tmp/tmux-assistant-resurrect"
+STATE_DIR="$TEST_STATE_DIR"
 
 # --- Codex: resume arg fallback ---
 assert_eq "Codex resume extraction" "ses_codex_789" "$(get_codex_session 99999 "codex resume ses_codex_789")"
@@ -885,7 +891,7 @@ echo ""
 just install 2>&1 >/dev/null
 
 # Create a stale state file with a dead PID
-STATE_DIR="/tmp/tmux-assistant-resurrect"
+STATE_DIR="$TEST_STATE_DIR"
 mkdir -p "$STATE_DIR"
 cat >"$STATE_DIR/claude-99999.json" <<EOF
 {
