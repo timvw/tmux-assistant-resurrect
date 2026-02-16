@@ -1,9 +1,10 @@
 # tmux-assistant-resurrect
 
 > **Disclaimer**: This project was entirely vibecoded (designed and implemented
-> through conversation with an AI coding assistant). It has **not yet been tested
-> in real-world usage** beyond initial dry-runs against live tmux panes. Use at
-> your own risk, and expect rough edges. Contributions and bug reports welcome.
+> through conversation with AI coding assistants). It has been end-to-end tested
+> in Docker with real CLI binaries (91 automated tests + full save/kill/restore
+> lifecycle smoke test), but has **limited real-world usage** so far. Expect
+> rough edges. Contributions and bug reports welcome.
 
 Persist and restore AI coding assistant sessions across tmux restarts and reboots.
 
@@ -114,17 +115,20 @@ hooks/
   claude-session-cleanup.sh       # Claude SessionEnd hook (removes state file)
   opencode-session-track.js       # OpenCode plugin (tracks session ID + cleanup)
 scripts/
+  lib-detect.sh                   # Shared library (detect_tool, pane_has_assistant, posix_quote)
   save-assistant-sessions.sh      # Resurrect post-save hook (process detection + session IDs)
   restore-assistant-sessions.sh   # Resurrect post-restore hook (resumes assistants)
 test/
-  Dockerfile                      # Docker image with tmux, jq, just, and mock assistants
-  run-tests.sh                    # Integration test suite
+  Dockerfile                      # Docker image with tmux, jq, just, and real assistant CLIs
+  run-tests.sh                    # Integration test suite (91 tests)
 justfile                          # Install/uninstall/status/save/restore/test recipes
 ```
 
 ## Testing
 
-Integration tests run in Docker with real CLI binaries:
+### Automated tests (Docker)
+
+The full test suite runs in Docker with real CLI binaries (no mocks):
 
 ```bash
 just test
@@ -132,8 +136,132 @@ just test
 
 This builds a Docker image with tmux, jq, just, and the real
 `@anthropic-ai/claude-code`, `opencode-ai`, and `@openai/codex` npm packages,
-then runs 70 tests covering install, save, restore, uninstall, hooks, cleanup,
-TPM plugin installation, session ID extraction, and regression scenarios.
+then runs 91 tests covering install, save, restore, uninstall, hooks, cleanup,
+TPM plugin installation, session ID extraction, POSIX quoting, process tree
+detection, and regression scenarios. No API keys are needed — the tests exercise
+the process detection and session management layer, not the AI functionality.
+
+### Manual testing on your machine
+
+You can verify the full save → kill → restore cycle on your own tmux setup.
+
+**Prerequisites**: tmux, jq, [just](https://just.systems), and at least one of
+claude/opencode/codex installed.
+
+#### 1. Install (developer mode)
+
+```bash
+git clone https://github.com/timvw/tmux-assistant-resurrect.git
+cd tmux-assistant-resurrect
+just install
+tmux source-file ~/.tmux.conf
+```
+
+#### 2. Launch some assistants
+
+Open tmux and start assistants in separate sessions/windows:
+
+```bash
+# In one tmux pane, cd to a project and launch claude:
+cd ~/src/my-project
+claude
+
+# In another pane, launch opencode:
+cd ~/src/other-project
+opencode
+```
+
+#### 3. Verify save detects them
+
+```bash
+just save
+cat ~/.tmux/resurrect/assistant-sessions.json | jq .
+```
+
+You should see each assistant with its session ID, tool name, pane address, and
+working directory. Example output:
+
+```json
+{
+  "timestamp": "2026-02-15T20:34:28Z",
+  "sessions": [
+    {
+      "pane": "my-project:0.0",
+      "tool": "claude",
+      "session_id": "01abc...",
+      "cwd": "/home/user/src/my-project",
+      "pid": "12345"
+    },
+    {
+      "pane": "other-project:0.0",
+      "tool": "opencode",
+      "session_id": "ses_xyz...",
+      "cwd": "/home/user/src/other-project",
+      "pid": "12346"
+    }
+  ]
+}
+```
+
+#### 4. Check status
+
+```bash
+just status
+```
+
+This shows installed hooks, active state files, and the last saved sessions.
+
+#### 5. Test the restore flow
+
+```bash
+# Save the current state
+tmux send-keys 'prefix + Ctrl-s'     # or: just save
+
+# Kill the tmux server (simulates a reboot)
+tmux kill-server
+
+# Restart tmux and restore
+tmux new-session -d
+tmux source-file ~/.tmux.conf
+tmux send-keys 'prefix + Ctrl-r'     # triggers tmux-resurrect restore
+
+# Or restore just the assistants manually:
+just restore
+```
+
+After restore, each pane should have the assistant relaunched with
+`--resume <session-id>` (Claude), `-s <session-id>` (OpenCode), or
+`resume <session-id>` (Codex).
+
+#### 6. Inspect logs
+
+```bash
+# Save log — shows detected tools and session IDs
+cat ~/.tmux/resurrect/assistant-save.log
+
+# Restore log — shows which panes received resume commands
+cat ~/.tmux/resurrect/assistant-restore.log
+```
+
+#### 7. Clean up
+
+```bash
+# Remove stale state files (from dead processes)
+just clean
+
+# Full uninstall
+just uninstall
+```
+
+### Troubleshooting
+
+| Symptom | Check |
+|---------|-------|
+| `just save` finds 0 sessions | Run `ps -eo pid=,ppid=,args= \| grep -E 'claude\|opencode\|codex'` to verify assistants are running |
+| Session ID is missing for Claude | Verify the SessionStart hook is installed: `jq '.hooks.SessionStart' ~/.claude/settings.json` |
+| Session ID is missing for OpenCode | Either launch with `-s <id>` or verify the plugin: `ls ~/.config/opencode/plugins/session-tracker.js` |
+| Restore sends commands but assistant doesn't resume | The session ID may have expired or belong to a different machine. Start a fresh session. |
+| `just test` fails with Docker errors | Ensure Docker is running and you have network access (the image pulls npm packages) |
 
 ## Configuration
 
