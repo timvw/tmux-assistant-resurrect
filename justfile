@@ -145,11 +145,14 @@ configure-tmux:
     # after it won't be processed. We preserve the user's original line
     # verbatim (custom path, if-shell wrapper, etc.) instead of replacing
     # it with a hardcoded default.
+    # Filter out comment lines when capturing — a commented example like
+    # "# run '/old/tpm/tpm'" must not be mistaken for the real init line.
     existing_tpm_line=""
-    if grep -qF "tpm/tpm" "$conf" 2>/dev/null; then
-        existing_tpm_line=$(grep -F "tpm/tpm" "$conf" | tail -1)
+    if grep -F "tpm/tpm" "$conf" | grep -qv '^[[:space:]]*#' 2>/dev/null; then
+        existing_tpm_line=$(grep -F "tpm/tpm" "$conf" | grep -v '^[[:space:]]*#' | tail -1)
         tmp=$(mktemp)
-        grep -v "tpm/tpm" "$conf" > "$tmp" || true
+        # Only remove non-comment lines containing tpm/tpm (preserve comments)
+        grep -v '^[^#]*tpm/tpm' "$conf" > "$tmp" || true
         mv "$tmp" "$conf"
     fi
 

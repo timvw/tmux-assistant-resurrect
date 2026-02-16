@@ -1320,8 +1320,9 @@ echo ""
 echo "=== Test 7d: tmux.conf upgrade from legacy source-file format ==="
 echo ""
 
-# Simulate an old-format ~/.tmux.conf with a legacy source-file line
-# and a CUSTOM TPM path (not the default ~/.tmux/plugins/tpm/tpm)
+# Simulate an old-format ~/.tmux.conf with a legacy source-file line,
+# a CUSTOM TPM path, and a commented-out TPM example after the real init.
+# The commented line must NOT be captured as the TPM init.
 cat >"$HOME/.tmux.conf" <<'LEGEOF'
 # user settings
 set -g mouse on
@@ -1330,6 +1331,7 @@ set -g mouse on
 source-file '/old/path/to/tmux-assistant-resurrect/config/resurrect-assistants.conf'
 
 run '/custom/path/tpm/tpm'
+# example: run '~/.tmux/plugins/tpm/tpm'
 LEGEOF
 
 just configure-tmux 2>&1
@@ -1365,10 +1367,18 @@ else
 fi
 
 # Custom TPM path must be preserved verbatim (not replaced with default)
-if grep -qF "/custom/path/tpm/tpm" "$HOME/.tmux.conf" 2>/dev/null; then
+# The real init (uncommented) should be the one re-added, not the comment
+if grep "^run '/custom/path/tpm/tpm'" "$HOME/.tmux.conf" >/dev/null 2>&1; then
 	pass "Custom TPM path preserved during upgrade"
 else
 	fail "Custom TPM path was replaced with default"
+fi
+
+# The commented TPM example must still be present (not mistaken for real init)
+if grep -qF "# example: run" "$HOME/.tmux.conf" 2>/dev/null; then
+	pass "Commented TPM line preserved (not captured as init)"
+else
+	fail "Commented TPM line was removed"
 fi
 
 # User settings outside the block should be preserved
