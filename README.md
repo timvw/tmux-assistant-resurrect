@@ -116,7 +116,7 @@ Manual save/restore keybindings (tmux-resurrect defaults):
 ```
 tmux-assistant-resurrect.tmux     # TPM plugin entry point
 config/
-  resurrect-assistants.conf       # tmux config (used by just install, not TPM)
+  resurrect-assistants.conf       # tmux config reference template (not sourced automatically)
 hooks/
   lib-claude-pid.sh               # Shared helper: walks process tree to find Claude PID
   claude-session-track.sh         # Claude SessionStart hook (writes session ID)

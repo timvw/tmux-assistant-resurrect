@@ -240,7 +240,8 @@ fi
 
 # Verify tmux.conf configured
 assert_file_exists "tmux.conf exists" "$HOME/.tmux.conf"
-assert_contains "tmux.conf has assistant hook settings" "$(cat "$HOME/.tmux.conf")" "tmux-assistant-resurrect"
+assert_contains "tmux.conf has marker block" "$(cat "$HOME/.tmux.conf")" "begin tmux-assistant-resurrect"
+assert_contains "tmux.conf has hook paths" "$(cat "$HOME/.tmux.conf")" "save-assistant-sessions.sh"
 
 # Verify idempotent install (run again, should not duplicate)
 just install 2>&1 >/dev/null
@@ -658,10 +659,17 @@ assert_eq "Claude hooks removed after uninstall" "0" "$remaining_hooks"
 assert_file_not_exists "OpenCode plugin removed" "$HOME/.config/opencode/plugins/session-tracker.js"
 
 # Verify tmux.conf cleaned
-if grep -qF "tmux-assistant-resurrect" "$HOME/.tmux.conf" 2>/dev/null; then
-	fail "tmux.conf still references tmux-assistant-resurrect"
+if grep -qF "begin tmux-assistant-resurrect" "$HOME/.tmux.conf" 2>/dev/null; then
+	fail "tmux.conf still has marker block after uninstall"
 else
-	pass "tmux.conf cleaned"
+	pass "tmux.conf marker block removed"
+fi
+
+# Verify plugin lines within the block are also gone
+if grep -qF "save-assistant-sessions.sh" "$HOME/.tmux.conf" 2>/dev/null; then
+	fail "tmux.conf still has hook paths after uninstall"
+else
+	pass "tmux.conf hook paths removed"
 fi
 
 # --- Test 5: Claude hooks (SessionStart / SessionEnd) ---
@@ -1302,6 +1310,72 @@ assert_eq "Uninstall doesn't crash on hook entry without .command" "0" "$uninsta
 # The malformed entry should survive uninstall (we only remove our hooks)
 malformed_url_after=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.url == "https://example.com/webhook")] | length' "$HOME/.claude/settings.json" 2>/dev/null || echo "0")
 assert_eq "Uninstall preserves non-matching entries" "1" "$malformed_url_after"
+
+# --- Test 7d: tmux.conf upgrade from legacy source-file to marker block ---
+#
+# If ~/.tmux.conf has the old source-file line (pre-marker), configure-tmux
+# should remove it and write the new marker block.
+
+echo ""
+echo "=== Test 7d: tmux.conf upgrade from legacy source-file format ==="
+echo ""
+
+# Simulate an old-format ~/.tmux.conf with the legacy source-file line
+cat >"$HOME/.tmux.conf" <<'LEGEOF'
+# user settings
+set -g mouse on
+
+# tmux-assistant-resurrect
+source-file '/old/path/to/tmux-assistant-resurrect/config/resurrect-assistants.conf'
+
+run '~/.tmux/plugins/tpm/tpm'
+LEGEOF
+
+just configure-tmux 2>&1
+
+# The legacy source-file line should be gone
+if grep -qF "resurrect-assistants.conf" "$HOME/.tmux.conf" 2>/dev/null; then
+	fail "Legacy source-file line still present after upgrade"
+else
+	pass "Legacy source-file line removed on upgrade"
+fi
+
+# The new marker block should be present
+if grep -qF "begin tmux-assistant-resurrect" "$HOME/.tmux.conf" 2>/dev/null; then
+	pass "Marker block added on upgrade"
+else
+	fail "Marker block missing after upgrade"
+fi
+
+# The hook paths should point to the real repo dir
+if grep -qF "save-assistant-sessions.sh" "$HOME/.tmux.conf" 2>/dev/null; then
+	pass "Hook paths present in marker block"
+else
+	fail "Hook paths missing from marker block"
+fi
+
+# User settings outside the block should be preserved
+if grep -qF "set -g mouse on" "$HOME/.tmux.conf" 2>/dev/null; then
+	pass "User settings preserved during upgrade"
+else
+	fail "User settings lost during upgrade"
+fi
+
+# Uninstall should remove the marker block completely
+just unconfigure-tmux 2>&1
+
+if grep -qF "begin tmux-assistant-resurrect" "$HOME/.tmux.conf" 2>/dev/null; then
+	fail "Marker block still present after unconfigure"
+else
+	pass "Unconfigure removes marker block"
+fi
+
+# User settings should still be there
+if grep -qF "set -g mouse on" "$HOME/.tmux.conf" 2>/dev/null; then
+	pass "User settings preserved after unconfigure"
+else
+	fail "User settings lost during unconfigure"
+fi
 
 # --- Summary ---
 
