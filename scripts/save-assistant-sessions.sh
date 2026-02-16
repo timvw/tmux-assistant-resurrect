@@ -101,6 +101,11 @@ get_opencode_session() {
 	# Query the most recently updated session matching the pane's cwd.
 	# Uses python3 (available on Linux and macOS) since sqlite3 CLI
 	# is not always installed (e.g. missing on Ubuntu minimal).
+	#
+	# Limitation: this is NOT PID-specific. If two OpenCode instances run in
+	# the same directory (both without -s flags and without plugin state files),
+	# both panes get the most recently updated session ID — one of them will be
+	# wrong. To avoid this, launch with explicit session IDs: opencode -s <id>.
 	local db_file="${HOME}/.local/share/opencode/opencode.db"
 	if [ -n "$cwd" ] && [ -f "$db_file" ] && command -v python3 >/dev/null 2>&1; then
 		sid=$(python3 -c "

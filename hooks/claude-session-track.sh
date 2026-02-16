@@ -2,13 +2,14 @@
 # Claude Code SessionStart hook — writes session ID to a trackable file.
 # Receives JSON on stdin with session_id, cwd, etc.
 #
-# Claude may spawn this hook via an intermediate process (e.g., sh -c 'bash hook.sh'),
-# so $PPID is not necessarily the main Claude process. We walk up the process tree
-# to find the ancestor whose command is 'claude', and key the state file by that PID.
-#
 # Install: add to ~/.claude/settings.json under hooks.SessionStart
 
 set -euo pipefail
+
+# Source shared find_claude_pid() helper
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-claude-pid.sh
+source "$HOOK_DIR/lib-claude-pid.sh"
 
 STATE_DIR="${TMUX_ASSISTANT_RESURRECT_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tmux-assistant-resurrect}"
 mkdir -p -m 0700 "$STATE_DIR"
@@ -20,29 +21,6 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 if [ -z "$SESSION_ID" ]; then
 	exit 0
 fi
-
-# Walk up the process tree from $PPID to find the main Claude process.
-# On some systems $PPID IS the Claude PID; on others there's an intermediate
-# shell (sh -c) between Claude and the hook.
-find_claude_pid() {
-	local pid="$PPID"
-	local max_depth=5
-	while [ "$max_depth" -gt 0 ] && [ "$pid" -gt 1 ]; do
-		local cmd
-		cmd=$(ps -o comm= -p "$pid" 2>/dev/null || true)
-		case "$cmd" in
-		claude | */claude)
-			echo "$pid"
-			return
-			;;
-		esac
-		# Move to parent
-		pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-		max_depth=$((max_depth - 1))
-	done
-	# Fallback: use $PPID if we couldn't find 'claude' in the ancestry
-	echo "$PPID"
-}
 
 CLAUDE_PID=$(find_claude_pid)
 
