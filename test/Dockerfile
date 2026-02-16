@@ -19,7 +19,9 @@ RUN apt-get update && apt-get install -y \
 RUN curl -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
 
 # Install real assistant CLIs (no mocks)
-RUN npm install -g @anthropic-ai/claude-code @openai/codex opencode-ai
+# Pin major versions to prevent upstream breaking changes from failing CI.
+# codex is pre-1.0 (0.x), so pin to ~0 (any 0.x); claude-code is 2.x; opencode-ai is 1.x.
+RUN npm install -g "@anthropic-ai/claude-code@^2" "@openai/codex@^0" "opencode-ai@^1"
 
 # Verify the binaries exist
 RUN which claude && which codex && which opencode

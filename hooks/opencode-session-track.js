@@ -11,6 +11,9 @@ export const SessionTracker = async ({ client, directory }) => {
   const stateDir =
     process.env.TMUX_ASSISTANT_RESURRECT_DIR ||
     `${process.env.XDG_RUNTIME_DIR || tmpdir()}/tmux-assistant-resurrect`;
+  // OpenCode loads plugins in-process via `await import()` (no child process),
+  // so process.pid is the opencode binary's PID — matching what the save script
+  // finds via `ps` tree walk.
   const pid = process.pid;
   const stateFile = `${stateDir}/opencode-${pid}.json`;
 

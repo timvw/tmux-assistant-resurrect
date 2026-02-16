@@ -159,12 +159,72 @@ get_codex_session() {
 
 # --- Main ---
 
-# Build a snapshot of all child processes once (avoid calling ps per pane)
-PS_SNAPSHOT=$(ps -eo pid=,ppid=,args= 2>/dev/null)
+main() {
+	# Build a snapshot of all child processes once (avoid calling ps per pane)
+	PS_SNAPSHOT=$(ps -eo pid=,ppid=,args= 2>/dev/null)
 
-# Temp file for collecting entries (avoids subshell scoping issues)
-PARTS_FILE=$(mktemp)
+	# Temp file for collecting entries (avoids subshell scoping issues)
+	PARTS_FILE=$(mktemp)
 
+	FOUND_FLAG=$(mktemp)
+	trap 'rm -f "$PARTS_FILE" "$FOUND_FLAG"' EXIT INT TERM
+
+	# Delimiter: pipe (|) separates fields. tmux 3.4+ converts control characters
+	# (like \x1f) to octal escapes in -F output, so we use a printable delimiter.
+	# Limitation: directory names containing | will break parsing. While | is a
+	# valid path character on Linux and macOS, it is extremely rare in practice.
+	tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}" |
+		while IFS='|' read -r target shell_pid cwd; do
+			>"$FOUND_FLAG"
+
+			# Check the pane PID itself (handles exec-replaced shells, e.g. exec claude)
+			pane_args=$(echo "$PS_SNAPSHOT" | awk -v pid="$shell_pid" '$1 == pid {print substr($0, index($0,$3)); exit}')
+			pane_tool=$(detect_tool "$pane_args")
+			if [ -n "$pane_tool" ]; then
+				if emit_session "$target" "$pane_tool" "$shell_pid" "$pane_args" "$cwd"; then
+					echo 1 >"$FOUND_FLAG"
+				fi
+			fi
+
+			# Walk the entire process tree under the pane shell to find assistants.
+			# This handles wrappers like npx, env, direnv exec, bash -lc, etc.
+			# We collect all descendant PIDs, then check each for an assistant match.
+			# NOTE: single-pass awk assumes ps output is PID-ascending (parents before
+			# children). See lib-detect.sh comment for rationale and limitations.
+			if [ ! -s "$FOUND_FLAG" ]; then
+				echo "$PS_SNAPSHOT" | awk -v root="$shell_pid" '
+					BEGIN { pids[root]=1 }
+					{ if ($2 in pids) { pids[$1]=1; print $1, $2, substr($0, index($0,$3)) } }
+				' |
+					while read -r cpid _ppid cargs; do
+						tool=$(detect_tool "$cargs")
+						[ -z "$tool" ] && continue
+
+						emit_session "$target" "$tool" "$cpid" "$cargs" "$cwd" || true
+						break # Only match the first assistant per pane
+					done
+			fi
+		done
+
+	# Assemble final JSON
+	local sessions count
+	if [ -s "$PARTS_FILE" ]; then
+		sessions=$(jq -s '.' "$PARTS_FILE")
+	else
+		sessions="[]"
+	fi
+
+	count=$(echo "$sessions" | jq 'length')
+
+	jq -n \
+		--argjson sessions "$sessions" \
+		--arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		'{timestamp: $timestamp, sessions: $sessions}' >"$OUTPUT_FILE"
+
+	log "saved $count assistant session(s) to $OUTPUT_FILE"
+}
+
+# Internal helper — called from main(). Requires PARTS_FILE to be set.
 emit_session() {
 	local target="$1" tool="$2" cpid="$3" cargs="$4" cwd="$5"
 	local session_id=""
@@ -189,54 +249,8 @@ emit_session() {
 	fi
 }
 
-FOUND_FLAG=$(mktemp)
-trap 'rm -f "$PARTS_FILE" "$FOUND_FLAG"' EXIT INT TERM
-
-tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}" |
-	while IFS='|' read -r target shell_pid cwd; do
-		>"$FOUND_FLAG"
-
-		# Check the pane PID itself (handles exec-replaced shells, e.g. exec claude)
-		pane_args=$(echo "$PS_SNAPSHOT" | awk -v pid="$shell_pid" '$1 == pid {print substr($0, index($0,$3)); exit}')
-		pane_tool=$(detect_tool "$pane_args")
-		if [ -n "$pane_tool" ]; then
-			if emit_session "$target" "$pane_tool" "$shell_pid" "$pane_args" "$cwd"; then
-				echo 1 >"$FOUND_FLAG"
-			fi
-		fi
-
-		# Walk the entire process tree under the pane shell to find assistants.
-		# This handles wrappers like npx, env, direnv exec, bash -lc, etc.
-		# We collect all descendant PIDs, then check each for an assistant match.
-		# NOTE: single-pass awk assumes ps output is PID-ascending (parents before
-		# children). See lib-detect.sh comment for rationale and limitations.
-		if [ ! -s "$FOUND_FLAG" ]; then
-			echo "$PS_SNAPSHOT" | awk -v root="$shell_pid" '
-				BEGIN { pids[root]=1 }
-				{ if ($2 in pids) { pids[$1]=1; print $1, $2, substr($0, index($0,$3)) } }
-			' |
-				while read -r cpid _ppid cargs; do
-					tool=$(detect_tool "$cargs")
-					[ -z "$tool" ] && continue
-
-					emit_session "$target" "$tool" "$cpid" "$cargs" "$cwd" || true
-					break # Only match the first assistant per pane
-				done
-		fi
-	done
-
-# Assemble final JSON
-if [ -s "$PARTS_FILE" ]; then
-	sessions=$(jq -s '.' "$PARTS_FILE")
-else
-	sessions="[]"
+# Allow sourcing this script without executing main (for unit tests).
+# When sourced, only functions and variables are defined.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	main "$@"
 fi
-
-count=$(echo "$sessions" | jq 'length')
-
-jq -n \
-	--argjson sessions "$sessions" \
-	--arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-	'{timestamp: $timestamp, sessions: $sessions}' >"$OUTPUT_FILE"
-
-log "saved $count assistant session(s) to $OUTPUT_FILE"

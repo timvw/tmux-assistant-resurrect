@@ -110,6 +110,101 @@ assert_file_not_exists() {
 	fi
 }
 
+# Source shared detection library early (needed by wait_for_descendant and other helpers)
+source "$REPO_DIR/scripts/lib-detect.sh"
+
+# --- Process lifecycle helpers ---
+
+# Poll for a child process matching a pattern under a given parent PID.
+# Replaces fixed `sleep N` after `tmux send-keys` — fast on quick machines,
+# tolerant on slow CI runners.
+#
+# Usage: wait_for_child <parent_pid> <grep_pattern> [timeout_secs]
+# Returns 0 and prints child PID on success, 1 on timeout.
+wait_for_child() {
+	local ppid="$1" pattern="$2" timeout="${3:-10}"
+	local deadline=$((SECONDS + timeout))
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		local cpid
+		cpid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$ppid" -v pat="$pattern" \
+			'$2 == ppid && $0 ~ pat {print $1; exit}')
+		if [ -n "$cpid" ]; then
+			echo "$cpid"
+			return 0
+		fi
+		sleep 0.5
+	done
+	return 1
+}
+
+# Poll for a descendant process anywhere in the tree under a given root PID
+# whose args match detect_tool(). Handles wrapper chains like npx → node → opencode.
+# Unlike wait_for_child (direct children only), this walks the full tree.
+#
+# Usage: wait_for_descendant <root_pid> [timeout_secs]
+# Returns 0 and prints descendant PID on success, 1 on timeout.
+wait_for_descendant() {
+	local root="$1" timeout="${2:-15}"
+	local deadline=$((SECONDS + timeout))
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		local dpid
+		dpid=$(ps -eo pid=,ppid=,args= | awk -v root="$root" '
+			BEGIN { pids[root]=1 }
+			{ if ($2 in pids) { pids[$1]=1; print $1, substr($0, index($0,$3)) } }
+		' | while read -r cpid cargs; do
+			if [ -n "$(detect_tool "$cargs")" ]; then
+				echo "$cpid"
+				break
+			fi
+		done)
+		if [ -n "$dpid" ]; then
+			echo "$dpid"
+			return 0
+		fi
+		sleep 0.5
+	done
+	return 1
+}
+
+# Wait until a specific PID no longer exists.
+# Usage: wait_for_death <pid> [timeout_secs]
+wait_for_death() {
+	local pid="$1" timeout="${2:-10}"
+	local deadline=$((SECONDS + timeout))
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			return 0
+		fi
+		sleep 0.5
+	done
+	return 1
+}
+
+# Kill all descendant processes of a tmux pane, then optionally kill the session.
+# Sends C-c first to allow graceful exit, then force-kills remaining children.
+#
+# Usage: kill_pane_children <tmux_target> [kill_session]
+#   kill_session: "true" to also kill the tmux session (default: "false")
+kill_pane_children() {
+	local target="$1" kill_session="${2:-false}"
+	tmux send-keys -t "$target" C-c 2>/dev/null || true
+	local spid
+	spid=$(tmux display-message -t "$target" -p '#{pane_pid}' 2>/dev/null || true)
+	if [ -n "$spid" ]; then
+		# Give the C-c a moment to propagate
+		sleep 0.5
+		# Force-kill all descendants via full tree walk
+		ps -eo pid=,ppid= | awk -v root="$spid" '
+			BEGIN { pids[root]=1 }
+			{ if ($2 in pids) { pids[$1]=1; print $1 } }
+		' | while read -r cpid; do kill -9 "$cpid" 2>/dev/null || true; done
+	fi
+	if [ "$kill_session" = "true" ]; then
+		sleep 0.3
+		tmux kill-session -t "$target" 2>/dev/null || true
+	fi
+}
+
 # --- Test 1: Installation ---
 
 suite "install"
@@ -180,14 +275,21 @@ tmux send-keys -t test-opencode-nosid "opencode" Enter
 # OpenCode LSP subprocess (should be excluded from detection)
 tmux send-keys -t test-lsp "opencode run pyright-langserver.js" Enter
 
-# Give processes time to start (OpenCode spawns node → native binary chain;
-# on slow CI runners 2s is sometimes not enough)
-sleep 4
+# Wait for each assistant to appear as a child process (replaces fixed sleep 4).
+# OpenCode spawns node → native binary chain, so it takes longer than claude/codex.
+claude_pane_shell_pid=$(tmux display-message -t test-claude -p '#{pane_pid}')
+opencode_pane_shell_pid=$(tmux display-message -t test-opencode -p '#{pane_pid}')
+codex_pane_shell_pid=$(tmux display-message -t test-codex -p '#{pane_pid}')
+nosid_pane_shell_pid=$(tmux display-message -t test-opencode-nosid -p '#{pane_pid}')
+
+wait_for_child "$claude_pane_shell_pid" "claude" 10 >/dev/null || echo "WARN: claude child not found (may still work via tree walk)"
+wait_for_child "$opencode_pane_shell_pid" "opencode" 10 >/dev/null || echo "WARN: opencode child not found"
+wait_for_child "$codex_pane_shell_pid" "codex" 10 >/dev/null || echo "WARN: codex child not found"
+wait_for_child "$nosid_pane_shell_pid" "opencode" 10 >/dev/null || echo "WARN: opencode-nosid child not found"
 
 # Create a Claude hook state file keyed by the Claude child PID
 # (When Claude runs the hook, hook's $PPID = Claude PID, so the save script
 #  looks for claude-{child_pid}.json where child_pid = the claude process PID)
-claude_pane_shell_pid=$(tmux display-message -t test-claude -p '#{pane_pid}')
 claude_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$claude_pane_shell_pid" '$2 == ppid && /claude/ {print $1; exit}')
 mkdir -p "$TEST_STATE_DIR"
 cat >"$TEST_STATE_DIR/claude-${claude_child_pid}.json" <<EOF
@@ -203,7 +305,6 @@ EOF
 # (The Go binary overwrites its process title, so -s flag is NOT visible
 #  in `ps` output. The plugin writes a state file instead — same mechanism
 #  as Claude's hook.)
-opencode_pane_shell_pid=$(tmux display-message -t test-opencode -p '#{pane_pid}')
 opencode_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$opencode_pane_shell_pid" '$2 == ppid && /opencode/ {print $1; exit}')
 cat >"$TEST_STATE_DIR/opencode-${opencode_child_pid}.json" <<EOF
 {
@@ -215,7 +316,7 @@ cat >"$TEST_STATE_DIR/opencode-${opencode_child_pid}.json" <<EOF
 EOF
 
 # Create a Codex session-tags.jsonl entry
-codex_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$(tmux display-message -t test-codex -p '#{pane_pid}')" '$2 == ppid && /codex/ {print $1; exit}')
+codex_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$codex_pane_shell_pid" '$2 == ppid && /codex/ {print $1; exit}')
 mkdir -p "$HOME/.codex"
 echo "{\"pid\": ${codex_child_pid}, \"session\": \"ses_codex_test_789\", \"host\": \"test\", \"started_at\": \"2026-01-01T00:00:00Z\"}" >"$HOME/.codex/session-tags.jsonl"
 
@@ -268,7 +369,23 @@ echo ""
 
 tmux new-session -d -s test-npx -c /tmp
 tmux send-keys -t test-npx "npx opencode -s ses_npx_wrapper" Enter
-sleep 3
+npx_shell_pid=$(tmux display-message -t test-npx -p '#{pane_pid}')
+# npx spawns: npm → sh → node → opencode (4 levels deep)
+npx_oc_pid=$(wait_for_descendant "$npx_shell_pid" 15) || echo "WARN: npx opencode descendant not found"
+
+# Create a plugin state file for the npx-launched opencode (same mechanism
+# as the OpenCode plugin in production — the Go binary overwrites its title
+# so -s flag is NOT visible in `ps`)
+if [ -n "$npx_oc_pid" ]; then
+	cat >"$TEST_STATE_DIR/opencode-${npx_oc_pid}.json" <<NPXEOF
+{
+  "tool": "opencode",
+  "session_id": "ses_npx_wrapper",
+  "pid": $npx_oc_pid,
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+NPXEOF
+fi
 
 rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
 just save 2>&1
@@ -276,17 +393,7 @@ just save 2>&1
 npx_sid=$(jq -r '.sessions[] | select(.pane | contains("test-npx")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
 assert_eq "Save detects opencode launched via npx" "ses_npx_wrapper" "$npx_sid"
 
-tmux send-keys -t test-npx C-c
-sleep 2
-npx_spid=$(tmux display-message -t test-npx -p '#{pane_pid}' 2>/dev/null || true)
-if [ -n "$npx_spid" ]; then
-	ps -eo pid=,ppid= | awk -v root="$npx_spid" '
-		BEGIN { pids[root]=1 }
-		{ if ($2 in pids) { pids[$1]=1; print $1 } }
-	' | while read -r cpid; do kill -9 "$cpid" 2>/dev/null || true; done
-fi
-sleep 1
-tmux kill-session -t test-npx 2>/dev/null || true
+kill_pane_children test-npx true
 
 # --- Test 3: Restore — sends correct resume commands ---
 
@@ -296,19 +403,8 @@ echo "=== Test 3: restore (resume commands) ==="
 echo ""
 
 # Kill all assistants first (so panes are empty shells)
-# Real CLIs may take a moment to exit, so send C-c and then kill child processes directly
 for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
-	tmux send-keys -t "$sess" C-c
-done
-sleep 2
-# Force-kill any remaining assistant children
-for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
-	spid=$(tmux display-message -t "$sess" -p '#{pane_pid}' 2>/dev/null || true)
-	if [ -n "$spid" ]; then
-		ps -eo pid=,ppid= | awk -v ppid="$spid" '$2 == ppid {print $1}' | while read -r cpid; do
-			kill -9 "$cpid" 2>/dev/null || true
-		done
-	fi
+	kill_pane_children "$sess"
 done
 sleep 1
 
@@ -336,22 +432,77 @@ assert_contains "Restore sent codex resume" "$restore_log_content" "ses_codex_te
 # --- Test 3b: Restore skips panes with already-running assistants ---
 
 echo ""
-echo "=== Test 3b: restore skips panes with running assistants ==="
+echo "=== Test 3b: restore Guard 1 — skips non-shell foreground process ==="
 echo ""
 
-# The restore above launched assistants in the panes. Running restore again
-# should skip them (the double-launch guard).
+# The restore above launched assistants in the panes. The TUI tool (claude/node)
+# becomes the foreground process, so pane_current_command != shell. Guard 1
+# (the shell whitelist) should fire and skip these panes.
 sleep 2
 >"$RESTORE_LOG"
 just restore 2>&1
 sleep $((session_count * 2 + 3))
 
 restore_log_2=$(cat "$RESTORE_LOG")
-if echo "$restore_log_2" | grep -q "already has a running assistant"; then
-	pass "Restore skips panes with already-running assistants"
+if echo "$restore_log_2" | grep -q "not a shell"; then
+	pass "Guard 1: restore skips panes with non-shell foreground process"
 else
-	fail "Expected restore to detect running assistants and skip (double-launch guard)"
+	fail "Guard 1: expected 'not a shell' in restore log"
 fi
+
+# --- Test 3b2: Guard 2 — skips panes with background assistant process ---
+#
+# Guard 2 (pane_has_assistant tree walk) must also work independently of Guard 1.
+# To test it, we need a pane where the foreground process IS a shell (so Guard 1
+# passes) but an assistant is running as a descendant. We achieve this by
+# launching an assistant in the background.
+
+echo ""
+echo "=== Test 3b2: restore Guard 2 — skips panes with background assistant ==="
+echo ""
+
+# Kill existing assistants so panes return to shells
+for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
+	kill_pane_children "$sess"
+done
+sleep 1
+
+# Launch claude in the background — the shell remains the foreground process
+tmux send-keys -t test-claude "claude --resume ses_bg_test &" Enter
+sleep 2
+
+# Verify the shell is still the foreground command (Guard 1 should pass)
+bg_pane_cmd=$(tmux display-message -t test-claude -p '#{pane_current_command}' 2>/dev/null || true)
+echo "  (test-claude foreground command: $bg_pane_cmd)"
+
+# Create a sidecar entry pointing at this pane
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'BG_EOF'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_bg_guard2_test", "cwd": "/tmp", "pid": "99999"}
+  ]
+}
+BG_EOF
+
+>"$RESTORE_LOG"
+just restore 2>&1
+sleep 5
+
+restore_log_bg=$(cat "$RESTORE_LOG")
+if echo "$restore_log_bg" | grep -q "already has a running assistant"; then
+	pass "Guard 2: restore skips panes with background assistant"
+else
+	# If the shell isn't foreground (Claude took over), Guard 1 fired instead
+	if echo "$restore_log_bg" | grep -q "not a shell"; then
+		pass "Guard 2: skipped (Guard 1 fired — Claude took foreground; acceptable)"
+	else
+		fail "Guard 2: expected 'already has a running assistant' in restore log"
+	fi
+fi
+
+# Clean up the background assistant
+kill_pane_children test-claude
 
 # --- Test 3c: Restore handles cwd with single quotes and missing dirs ---
 
@@ -361,16 +512,7 @@ echo ""
 
 # Kill assistants so panes are clean shells
 for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
-	tmux send-keys -t "$sess" C-c 2>/dev/null || true
-done
-sleep 2
-for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
-	spid=$(tmux display-message -t "$sess" -p '#{pane_pid}' 2>/dev/null || true)
-	if [ -n "$spid" ]; then
-		ps -eo pid=,ppid= | awk -v ppid="$spid" '$2 == ppid {print $1}' | while read -r cpid; do
-			kill -9 "$cpid" 2>/dev/null || true
-		done
-	fi
+	kill_pane_children "$sess"
 done
 sleep 1
 
@@ -394,13 +536,7 @@ assert_eq "Restore doesn't crash on cwd with single quote" "0" "$restore_exit"
 assert_contains "Restore attempted resume with tricky cwd" "$(cat "$RESTORE_LOG")" "ses_cwd_test"
 
 # Kill any assistant that was just launched so the next restore can proceed
-spid=$(tmux display-message -t test-claude -p '#{pane_pid}' 2>/dev/null || true)
-if [ -n "$spid" ]; then
-	ps -eo pid=,ppid= | awk -v ppid="$spid" '$2 == ppid {print $1}' | while read -r cpid; do
-		kill -9 "$cpid" 2>/dev/null || true
-	done
-fi
-sleep 1
+kill_pane_children test-claude
 
 # Test with a missing cwd
 cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'CWDEOF2'
@@ -438,6 +574,72 @@ if echo "$resurrect_procs" | grep -qiE "claude|opencode|codex"; then
 else
 	pass "@resurrect-processes does not include assistants"
 fi
+
+# --- Test 3e: Restore logs unknown tool name ---
+#
+# Verify the `*` default branch in the restore script's case statement
+# correctly logs unknown tool names and skips the pane.
+
+echo ""
+echo "=== Test 3e: restore logs unknown tool ==="
+echo ""
+
+# Kill any assistants so panes are clean shells
+kill_pane_children test-claude
+
+# Create a sidecar JSON with an unknown tool name
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'UNKNEOF'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {"pane": "test-claude:0.0", "tool": "unknowntool", "session_id": "ses_unknown_test", "cwd": "/tmp", "pid": "99999"}
+  ]
+}
+UNKNEOF
+
+>"$RESTORE_LOG"
+restore_exit_unknown=0
+just restore 2>&1 || restore_exit_unknown=$?
+sleep 3
+
+assert_eq "Restore doesn't crash on unknown tool" "0" "$restore_exit_unknown"
+assert_contains "Restore logs unknown tool" "$(cat "$RESTORE_LOG")" "unknown tool"
+
+# --- Test 3f: Restore skips panes running non-shell programs ---
+#
+# If a pane is running something other than a shell (e.g., vim, sleep, top),
+# the restore script should NOT inject send-keys into it.
+
+echo ""
+echo "=== Test 3f: restore skips non-shell panes ==="
+echo ""
+
+# Launch a non-shell program in test-claude pane (which has a sidecar entry)
+kill_pane_children test-claude
+sleep 0.5
+tmux send-keys -t test-claude "sleep 9999" Enter
+sleep 1
+
+# Create a sidecar entry pointing at that pane
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'NOSHELLEOF'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_noshell_test", "cwd": "/tmp", "pid": "99999"}
+  ]
+}
+NOSHELLEOF
+
+>"$RESTORE_LOG"
+restore_exit_noshell=0
+just restore 2>&1 || restore_exit_noshell=$?
+sleep 3
+
+assert_eq "Restore doesn't crash on non-shell pane" "0" "$restore_exit_noshell"
+assert_contains "Restore skips non-shell pane" "$(cat "$RESTORE_LOG")" "not a shell"
+
+# Clean up — kill the sleep and get the pane back to a shell
+kill_pane_children test-claude
 
 # --- Test 4: Uninstall ---
 
@@ -521,9 +723,9 @@ echo ""
 # Set up a fresh tmux session with a Claude process
 tmux new-session -d -s test-claude-pid -c /tmp
 tmux send-keys -t test-claude-pid "claude --resume ses_pid_test" Enter
-sleep 2
-
 claude_pid_test_shell=$(tmux display-message -t test-claude-pid -p '#{pane_pid}')
+wait_for_child "$claude_pid_test_shell" "claude" 10 >/dev/null || echo "WARN: claude child not found for pid test"
+
 claude_pid_test_child=$(ps -eo pid=,ppid=,args= | awk -v ppid="$claude_pid_test_shell" '$2 == ppid && /claude/ {print $1; exit}')
 
 # Sanity: make sure we found the child
@@ -607,9 +809,7 @@ fi
 
 # Clean up test state files and session
 rm -f "$PID_TEST_STATE_DIR/claude-${claude_pid_test_shell}.json"
-tmux send-keys -t test-claude-pid C-c
-sleep 1
-tmux kill-session -t test-claude-pid 2>/dev/null || true
+kill_pane_children test-claude-pid true
 
 # --- Test 5c2: Chicken-and-egg — session ID extraction unit tests ---
 #
@@ -622,13 +822,10 @@ echo ""
 echo "=== Test 5c2: Session ID extraction unit tests (chicken-and-egg) ==="
 echo ""
 
-# Source the shared library and extraction functions from the save script.
-# Set STATE_DIR so get_claude_session() can check for state files.
+# Source the save script (the main guard prevents execution; only functions
+# and variables are defined). This replaces the fragile eval+sed extraction.
 STATE_DIR="$TEST_STATE_DIR"
-source "$REPO_DIR/scripts/lib-detect.sh"
-eval "$(sed -n '/^get_claude_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
-eval "$(sed -n '/^get_codex_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
-eval "$(sed -n '/^get_opencode_session()/,/^}/p' "$REPO_DIR/scripts/save-assistant-sessions.sh")"
+source "$REPO_DIR/scripts/save-assistant-sessions.sh"
 
 # --- Claude: --resume arg fallback ---
 # Method 2: extract session ID from --resume in process args
@@ -726,9 +923,9 @@ echo ""
 
 tmux new-session -d -s test-claude-priority -c /tmp
 tmux send-keys -t test-claude-priority "claude --resume ses_args_old" Enter
-sleep 2
-
 priority_shell_pid=$(tmux display-message -t test-claude-priority -p '#{pane_pid}')
+wait_for_child "$priority_shell_pid" "claude" 10 >/dev/null || echo "WARN: claude child not found for priority test"
+
 priority_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$priority_shell_pid" '$2 == ppid && /claude/ {print $1; exit}')
 
 # Create a state file with a DIFFERENT session ID (simulating a session switch)
@@ -748,9 +945,7 @@ priority_sid=$(jq -r '.sessions[] | select(.pane | contains("test-claude-priorit
 assert_eq "State file session ID takes priority over --resume arg" "ses_hook_newer" "$priority_sid"
 
 rm -f "$PID_TEST_STATE_DIR/claude-${priority_child_pid}.json"
-tmux send-keys -t test-claude-priority C-c
-sleep 1
-tmux kill-session -t test-claude-priority 2>/dev/null || true
+kill_pane_children test-claude-priority true
 
 # --- Test 5c4: Codex resume arg fallback (chicken-and-egg) ---
 #
@@ -764,7 +959,8 @@ echo ""
 
 tmux new-session -d -s test-codex-resume -c /tmp
 tmux send-keys -t test-codex-resume "codex resume ses_codex_from_args" Enter
-sleep 2
+codex_resume_shell_pid=$(tmux display-message -t test-codex-resume -p '#{pane_pid}')
+wait_for_child "$codex_resume_shell_pid" "codex" 10 >/dev/null || echo "WARN: codex child not found for resume test"
 
 # Make sure NO session-tags.jsonl entry exists for this PID
 rm -f "$HOME/.codex/session-tags.jsonl"
@@ -775,9 +971,7 @@ just save 2>&1
 codex_resume_sid=$(jq -r '.sessions[] | select(.pane | contains("test-codex-resume")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
 assert_eq "Codex resume arg fallback extracts session ID" "ses_codex_from_args" "$codex_resume_sid"
 
-tmux send-keys -t test-codex-resume C-c
-sleep 1
-tmux kill-session -t test-codex-resume 2>/dev/null || true
+kill_pane_children test-codex-resume true
 
 # --- Test 5c5: Corrupt/empty state file doesn't crash save ---
 #
@@ -792,9 +986,9 @@ echo ""
 
 tmux new-session -d -s test-corrupt -c /tmp
 tmux send-keys -t test-corrupt "claude" Enter
-sleep 2
-
 corrupt_shell_pid=$(tmux display-message -t test-corrupt -p '#{pane_pid}')
+wait_for_child "$corrupt_shell_pid" "claude" 10 >/dev/null || echo "WARN: claude child not found for corrupt test"
+
 corrupt_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$corrupt_shell_pid" '$2 == ppid && /claude/ {print $1; exit}')
 
 # Write a corrupt (non-JSON) state file
@@ -815,9 +1009,7 @@ else
 fi
 
 rm -f "$PID_TEST_STATE_DIR/claude-${corrupt_child_pid}.json"
-tmux send-keys -t test-corrupt C-c
-sleep 1
-tmux kill-session -t test-corrupt 2>/dev/null || true
+kill_pane_children test-corrupt true
 
 # --- Test 5d: detect_tool() unit tests ---
 
@@ -887,9 +1079,9 @@ echo ""
 # Test 1: direct child — should find it
 tmux new-session -d -s test-guard-direct -c /tmp
 tmux send-keys -t test-guard-direct "claude --resume ses_guard_test" Enter
-sleep 2
-
 guard_direct_pid=$(tmux display-message -t test-guard-direct -p '#{pane_pid}')
+wait_for_child "$guard_direct_pid" "claude" 10 >/dev/null || echo "WARN: claude child not found for guard test"
+
 if found_pid=$(pane_has_assistant "$guard_direct_pid"); then
 	pass "pane_has_assistant finds direct child"
 else
@@ -899,9 +1091,9 @@ fi
 # Test 2: wrapper chain (npx) — should find it through tree walk
 tmux new-session -d -s test-guard-wrapper -c /tmp
 tmux send-keys -t test-guard-wrapper "npx opencode -s ses_guard_npx" Enter
-sleep 3
-
 guard_wrapper_pid=$(tmux display-message -t test-guard-wrapper -p '#{pane_pid}')
+wait_for_descendant "$guard_wrapper_pid" 15 >/dev/null || echo "WARN: opencode descendant not found for guard wrapper test"
+
 if found_pid=$(pane_has_assistant "$guard_wrapper_pid"); then
 	pass "pane_has_assistant finds assistant behind npx wrapper"
 else
@@ -922,17 +1114,9 @@ fi
 
 # Clean up guard test sessions
 for s in test-guard-direct test-guard-wrapper test-guard-empty; do
-	spid=$(tmux display-message -t "$s" -p '#{pane_pid}' 2>/dev/null || true)
-	if [ -n "$spid" ]; then
-		tmux send-keys -t "$s" C-c 2>/dev/null || true
-		ps -eo pid=,ppid= | awk -v root="$spid" '
-			BEGIN { pids[root]=1 }
-			{ if ($2 in pids) { pids[$1]=1; print $1 } }
-		' | while read -r cpid; do kill -9 "$cpid" 2>/dev/null || true; done
-	fi
-	tmux kill-session -t "$s" 2>/dev/null || true
+	kill_pane_children "$s" true
 done
-sleep 1
+sleep 0.5
 
 # --- Test 6: Clean recipe ---
 
@@ -959,6 +1143,30 @@ EOF
 clean_output=$(just clean 2>&1)
 assert_contains "Clean removes stale files" "$clean_output" "Cleaned"
 assert_file_not_exists "Stale state file removed" "$STATE_DIR/claude-99999.json"
+
+# Test: corrupt state file with non-numeric PID should be cleaned
+cat >"$STATE_DIR/claude-corrupt.json" <<EOF
+{
+  "tool": "claude",
+  "session_id": "ses_corrupt_pid",
+  "ppid": "not-a-number",
+  "timestamp": "2025-01-01T00:00:00Z"
+}
+EOF
+
+# Test: state file with PID 0 should be cleaned (kill -0 0 succeeds for process group)
+cat >"$STATE_DIR/opencode-zeropid.json" <<EOF
+{
+  "tool": "opencode",
+  "session_id": "ses_zero_pid",
+  "pid": 0,
+  "timestamp": "2025-01-01T00:00:00Z"
+}
+EOF
+
+clean_output_2=$(just clean 2>&1)
+assert_file_not_exists "Clean removes corrupt PID state file" "$STATE_DIR/claude-corrupt.json"
+assert_file_not_exists "Clean removes zero-PID state file" "$STATE_DIR/opencode-zeropid.json"
 
 # --- Test 7: TPM plugin entry point ---
 

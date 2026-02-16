@@ -48,6 +48,7 @@ log "restoring $count assistant session(s)..."
 
 # Use a temp file to avoid subshell variable scoping issues with pipes
 tmpfile=$(mktemp)
+trap 'rm -f "$tmpfile"' EXIT INT TERM
 echo "$sessions" | jq -c '.[]' >"$tmpfile"
 
 restored=0
@@ -70,7 +71,21 @@ while read -r entry; do
 		continue
 	fi
 
-	# Guard: skip if the pane already has a running assistant (e.g., if
+	# Guard 1: skip if the pane is not running a shell.
+	# After tmux-resurrect restore, panes should be running a shell (bash, zsh,
+	# etc.). If something else is running (e.g., the user manually started vim,
+	# or @resurrect-processes restored a non-assistant program), injecting
+	# send-keys would feed commands into the wrong program.
+	pane_cmd=$(tmux display-message -t "$pane" -p '#{pane_current_command}' 2>/dev/null || true)
+	case "$pane_cmd" in
+	bash | zsh | fish | sh | dash | ksh | tcsh | csh | nu) ;;
+	*)
+		log "pane $pane is running '$pane_cmd' (not a shell), skipping"
+		continue
+		;;
+	esac
+
+	# Guard 2: skip if the pane already has a running assistant (e.g., if
 	# @resurrect-processes launched it, or user restarted manually).
 	# Uses the same full tree walk + detect_tool() as the save script to
 	# catch exec-replaced shells, wrappers (npx, env, direnv), and deep

@@ -51,8 +51,8 @@ install-claude-hook:
     #!/usr/bin/env bash
     set -euo pipefail
     settings="$HOME/.claude/settings.json"
-    track_cmd="bash {{repo_dir}}/hooks/claude-session-track.sh"
-    cleanup_cmd="bash {{repo_dir}}/hooks/claude-session-cleanup.sh"
+    track_cmd="bash '{{repo_dir}}/hooks/claude-session-track.sh'"
+    cleanup_cmd="bash '{{repo_dir}}/hooks/claude-session-cleanup.sh'"
 
     if [ ! -f "$settings" ]; then
         mkdir -p "$(dirname "$settings")"
@@ -120,7 +120,7 @@ configure-tmux:
     #!/usr/bin/env bash
     set -euo pipefail
     conf="$HOME/.tmux.conf"
-    source_line="source-file {{repo_dir}}/config/resurrect-assistants.conf"
+    source_line="source-file '{{repo_dir}}/config/resurrect-assistants.conf'"
     tpm_line="run '~/.tmux/plugins/tpm/tpm'"
 
     # Check if already sourced
@@ -153,8 +153,8 @@ uninstall-claude-hook:
     #!/usr/bin/env bash
     set -euo pipefail
     settings="$HOME/.claude/settings.json"
-    track_cmd="bash {{repo_dir}}/hooks/claude-session-track.sh"
-    cleanup_cmd="bash {{repo_dir}}/hooks/claude-session-cleanup.sh"
+    track_cmd="bash '{{repo_dir}}/hooks/claude-session-track.sh'"
+    cleanup_cmd="bash '{{repo_dir}}/hooks/claude-session-cleanup.sh'"
 
     if [ ! -f "$settings" ]; then
         echo "No Claude settings to modify"
@@ -250,8 +250,8 @@ status:
     fi
 
     # Claude hooks
-    track_cmd="bash {{repo_dir}}/hooks/claude-session-track.sh"
-    cleanup_cmd="bash {{repo_dir}}/hooks/claude-session-cleanup.sh"
+    track_cmd="bash '{{repo_dir}}/hooks/claude-session-track.sh'"
+    cleanup_cmd="bash '{{repo_dir}}/hooks/claude-session-cleanup.sh'"
     if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command == "'"$track_cmd"'")' ~/.claude/settings.json >/dev/null 2>&1; then
         echo "[ok] Claude SessionStart hook installed"
     else
@@ -276,7 +276,7 @@ status:
     {{_state_dir_expr}}
     state_dir="$STATE_DIR"
     if [ -d "$state_dir" ]; then
-        file_count=$(ls "$state_dir"/*.json 2>/dev/null | wc -l | tr -d ' ')
+        file_count=$(find "$state_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
         echo "State directory: $state_dir ($file_count active tracking file(s))"
         if [ "$file_count" -gt 0 ]; then
             echo ""
@@ -328,19 +328,30 @@ clean:
     removed=0
     for f in "$state_dir"/*.json; do
         [ -f "$f" ] || continue
-        tool=$(jq -r '.tool' "$f" 2>/dev/null || continue)
+        # NOTE: || continue inside $() is a no-op (subshell context). Use
+        # a separate step so the loop actually skips corrupt files.
+        tool=$(jq -r '.tool' "$f" 2>/dev/null) || continue
 
         case "$tool" in
             claude)
-                pid=$(jq -r '.ppid' "$f" 2>/dev/null || echo "0")
+                pid=$(jq -r '.ppid' "$f" 2>/dev/null || echo "")
                 ;;
             opencode)
-                pid=$(jq -r '.pid' "$f" 2>/dev/null || echo "0")
+                pid=$(jq -r '.pid' "$f" 2>/dev/null || echo "")
                 ;;
             *)
                 continue
                 ;;
         esac
+
+        # Treat non-numeric, empty, or <=1 PIDs as invalid (stale/corrupt).
+        # Without this, pid="0" would cause `kill -0 0` to succeed (checks
+        # current process group), keeping the corrupt file forever.
+        if ! [[ "$pid" =~ ^[0-9]+$ ]] || [ "${pid:-0}" -le 1 ]; then
+            rm -f "$f"
+            removed=$((removed + 1))
+            continue
+        fi
 
         if ! kill -0 "$pid" 2>/dev/null; then
             rm -f "$f"

@@ -2,7 +2,7 @@
 
 > **Disclaimer**: This project was entirely vibecoded (designed and implemented
 > through conversation with AI coding assistants). It has been end-to-end tested
-> in Docker with real CLI binaries (95 automated tests + full save/kill/restore
+> in Docker with real CLI binaries (101 automated tests + full save/kill/restore
 > lifecycle smoke test), but has **limited real-world usage** so far. Expect
 > rough edges. Contributions and bug reports welcome.
 
@@ -118,6 +118,7 @@ tmux-assistant-resurrect.tmux     # TPM plugin entry point
 config/
   resurrect-assistants.conf       # tmux config (used by just install, not TPM)
 hooks/
+  lib-claude-pid.sh               # Shared helper: walks process tree to find Claude PID
   claude-session-track.sh         # Claude SessionStart hook (writes session ID)
   claude-session-cleanup.sh       # Claude SessionEnd hook (removes state file)
   opencode-session-track.js       # OpenCode plugin (tracks session ID + cleanup)
@@ -127,7 +128,7 @@ scripts/
   restore-assistant-sessions.sh   # Resurrect post-restore hook (resumes assistants)
 test/
   Dockerfile                      # Docker image with tmux, jq, just, and real assistant CLIs
-  run-tests.sh                    # Integration test suite (91 tests)
+  run-tests.sh                    # Integration test suite (101 tests)
 justfile                          # Install/uninstall/status/save/restore/test recipes
 ```
 
@@ -381,6 +382,11 @@ appropriate resume command to each pane via `tmux send-keys`.
   reliable source of Claude session IDs.
 - **OpenCode without plugin**: If the OpenCode plugin isn't installed and the
   process was started without `-s`, the session ID cannot be detected.
+- **OpenCode DB fallback (same-cwd ambiguity)**: When the plugin state file is
+  unavailable and no `-s` flag was used, the save script falls back to the
+  OpenCode SQLite database, matching sessions by working directory. If multiple
+  sessions share the same cwd, the most recently updated one is picked — which
+  may not be the correct one for that specific pane.
 - **Process inspection on macOS**: Uses `ps -eo pid=,ppid=` instead of `pgrep -P`
   due to reliability issues with `pgrep` on macOS.
 - **Pane matching after restore**: tmux-resurrect preserves pane indices, so the
