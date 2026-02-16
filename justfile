@@ -140,9 +140,25 @@ configure-tmux:
         mv "$tmp" "$conf"
     fi
 
+    # Remove TPM init line so we can re-add it at the very end.
+    # TPM's run line must be the last line in tmux.conf — anything after
+    # it won't be processed. By removing and re-appending, we guarantee
+    # our marker block is above TPM init regardless of the user's
+    # starting config.
+    had_tpm=false
+    if grep -qF "tpm/tpm" "$conf" 2>/dev/null; then
+        had_tpm=true
+        tmp=$(mktemp)
+        grep -v "tpm/tpm" "$conf" > "$tmp" || true
+        mv "$tmp" "$conf"
+    fi
+
     # Write the new block with begin/end markers. The markers allow
     # unconfigure-tmux to remove exactly what we added (including plugin
     # lines) without affecting user settings outside the block.
+    # NOTE: The sed patterns in this recipe work because the marker
+    # strings contain no sed-special characters (no /, *, ., etc.).
+    # If the markers ever change, the sed commands may need escaping.
     {
         echo ""
         echo "$begin_marker"
@@ -158,11 +174,11 @@ configure-tmux:
     } >> "$conf"
     echo "Added tmux-assistant-resurrect settings to $conf"
 
-    # Ensure TPM init is present and is the last line
-    if grep -qF "tpm/tpm" "$conf" 2>/dev/null; then
-        echo "TPM init already present in $conf"
+    # Re-add TPM init as the very last line (required by TPM)
+    echo "$tpm_line" >> "$conf"
+    if [ "$had_tpm" = true ]; then
+        echo "TPM init moved to end of $conf"
     else
-        echo "$tpm_line" >> "$conf"
         echo "Added TPM init to $conf"
     fi
 
@@ -237,7 +253,9 @@ unconfigure-tmux:
     begin_marker="# --- begin tmux-assistant-resurrect ---"
     end_marker="# --- end tmux-assistant-resurrect ---"
 
-    # Remove the marker block (current format)
+    # Remove the marker block (current format).
+    # NOTE: sed range pattern works because markers contain no sed-special
+    # characters. If markers ever change, escaping may be needed.
     if grep -qF "$begin_marker" "$conf"; then
         tmp=$(mktemp)
         sed "/$begin_marker/,/$end_marker/d" "$conf" > "$tmp"

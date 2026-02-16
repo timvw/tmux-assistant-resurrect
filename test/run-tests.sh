@@ -1354,6 +1354,15 @@ else
 	fail "Hook paths missing from marker block"
 fi
 
+# TPM init must come AFTER the marker block (TPM ignores lines after its run line)
+end_line=$(grep -n "end tmux-assistant-resurrect" "$HOME/.tmux.conf" | tail -1 | cut -d: -f1)
+tpm_line=$(grep -n "tpm/tpm" "$HOME/.tmux.conf" | tail -1 | cut -d: -f1)
+if [ -n "$end_line" ] && [ -n "$tpm_line" ] && [ "$tpm_line" -gt "$end_line" ]; then
+	pass "TPM init line is after marker block"
+else
+	fail "TPM init line is NOT after marker block (end=$end_line, tpm=$tpm_line)"
+fi
+
 # User settings outside the block should be preserved
 if grep -qF "set -g mouse on" "$HOME/.tmux.conf" 2>/dev/null; then
 	pass "User settings preserved during upgrade"
