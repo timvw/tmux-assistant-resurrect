@@ -120,17 +120,29 @@ configure-tmux:
     #!/usr/bin/env bash
     set -euo pipefail
     conf="$HOME/.tmux.conf"
-    source_line="source-file '{{repo_dir}}/config/resurrect-assistants.conf'"
     tpm_line="run '~/.tmux/plugins/tpm/tpm'"
 
-    # Check if already sourced
-    if grep -qF "resurrect-assistants.conf" "$conf" 2>/dev/null; then
-        echo "tmux config already sources resurrect-assistants.conf"
+    # Check if already configured (idempotent)
+    if grep -qF "tmux-assistant-resurrect" "$conf" 2>/dev/null; then
+        echo "tmux config already has tmux-assistant-resurrect settings"
     else
-        echo "" >> "$conf"
-        echo "# tmux-assistant-resurrect" >> "$conf"
-        echo "$source_line" >> "$conf"
-        echo "Added source line to $conf"
+        # Write hook settings inline with the actual repo path (not a
+        # placeholder). This replaces the old source-file approach which
+        # relied on config/resurrect-assistants.conf and broke when that
+        # file had placeholder paths.
+        {
+            echo ""
+            echo "# tmux-assistant-resurrect"
+            echo "set -g @plugin 'tmux-plugins/tpm'"
+            echo "set -g @plugin 'tmux-plugins/tmux-resurrect'"
+            echo "set -g @plugin 'tmux-plugins/tmux-continuum'"
+            echo "set -g @resurrect-capture-pane-contents 'on'"
+            echo "set -g @resurrect-hook-post-save-all \"bash '{{repo_dir}}/scripts/save-assistant-sessions.sh'\""
+            echo "set -g @resurrect-hook-post-restore-all \"bash '{{repo_dir}}/scripts/restore-assistant-sessions.sh'\""
+            echo "set -g @continuum-save-interval '5'"
+            echo "set -g @continuum-restore 'on'"
+        } >> "$conf"
+        echo "Added tmux-assistant-resurrect settings to $conf"
     fi
 
     # Ensure TPM init is present and is the last line
@@ -209,10 +221,13 @@ unconfigure-tmux:
         exit 0
     fi
 
+    # Remove all lines added by configure-tmux (both old source-file form
+    # and new inline settings). Matches the comment marker and any lines
+    # referencing our scripts/config.
     tmp=$(mktemp)
-    grep -v "resurrect-assistants.conf" "$conf" | grep -v "# tmux-assistant-resurrect" > "$tmp"
+    grep -v "tmux-assistant-resurrect" "$conf" > "$tmp" || true
     mv "$tmp" "$conf"
-    echo "Removed resurrect-assistants.conf source from $conf"
+    echo "Removed tmux-assistant-resurrect settings from $conf"
 
 # Show current status: installed hooks, tracked sessions, state files
 status:
@@ -242,8 +257,8 @@ status:
         echo "[--] tmux-continuum not installed (press prefix+I in tmux)"
     fi
 
-    # tmux.conf
-    if grep -qF "resurrect-assistants.conf" ~/.tmux.conf 2>/dev/null; then
+    # tmux.conf — check for both old (source-file) and new (inline) forms
+    if grep -qF "tmux-assistant-resurrect" ~/.tmux.conf 2>/dev/null; then
         echo "[ok] tmux.conf configured"
     else
         echo "[--] tmux.conf not configured"

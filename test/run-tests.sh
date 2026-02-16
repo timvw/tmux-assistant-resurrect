@@ -240,7 +240,7 @@ fi
 
 # Verify tmux.conf configured
 assert_file_exists "tmux.conf exists" "$HOME/.tmux.conf"
-assert_contains "tmux.conf sources resurrect config" "$(cat "$HOME/.tmux.conf")" "resurrect-assistants.conf"
+assert_contains "tmux.conf has assistant hook settings" "$(cat "$HOME/.tmux.conf")" "tmux-assistant-resurrect"
 
 # Verify idempotent install (run again, should not duplicate)
 just install 2>&1 >/dev/null
@@ -658,8 +658,8 @@ assert_eq "Claude hooks removed after uninstall" "0" "$remaining_hooks"
 assert_file_not_exists "OpenCode plugin removed" "$HOME/.config/opencode/plugins/session-tracker.js"
 
 # Verify tmux.conf cleaned
-if grep -qF "resurrect-assistants.conf" "$HOME/.tmux.conf" 2>/dev/null; then
-	fail "tmux.conf still references resurrect-assistants.conf"
+if grep -qF "tmux-assistant-resurrect" "$HOME/.tmux.conf" 2>/dev/null; then
+	fail "tmux.conf still references tmux-assistant-resurrect"
 else
 	pass "tmux.conf cleaned"
 fi
