@@ -35,9 +35,9 @@ get_claude_session() {
 	local claude_pid="$1"
 	local args="$2"
 
-	# Method 1: SessionStart hook state file (keyed by Claude PID)
-	# When Claude runs `bash hook.sh`, the hook's $PPID = Claude's PID.
-	# This takes priority because the user may have switched sessions inside the TUI.
+	# Method 1: SessionStart hook state file (keyed by Claude PID).
+	# The hook walks up the process tree to find the main 'claude' process,
+	# so the state file is named claude-{claude_pid}.json.
 	local state_file="$STATE_DIR/claude-${claude_pid}.json"
 	if [ -f "$state_file" ]; then
 		local sid
