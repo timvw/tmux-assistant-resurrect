@@ -140,14 +140,14 @@ configure-tmux:
         mv "$tmp" "$conf"
     fi
 
-    # Remove TPM init line so we can re-add it at the very end.
-    # TPM's run line must be the last line in tmux.conf — anything after
-    # it won't be processed. By removing and re-appending, we guarantee
-    # our marker block is above TPM init regardless of the user's
-    # starting config.
-    had_tpm=false
+    # Capture and remove the TPM init line so we can re-add it at the very
+    # end. TPM's run line must be the last line in tmux.conf — anything
+    # after it won't be processed. We preserve the user's original line
+    # verbatim (custom path, if-shell wrapper, etc.) instead of replacing
+    # it with a hardcoded default.
+    existing_tpm_line=""
     if grep -qF "tpm/tpm" "$conf" 2>/dev/null; then
-        had_tpm=true
+        existing_tpm_line=$(grep -F "tpm/tpm" "$conf" | tail -1)
         tmp=$(mktemp)
         grep -v "tpm/tpm" "$conf" > "$tmp" || true
         mv "$tmp" "$conf"
@@ -174,11 +174,13 @@ configure-tmux:
     } >> "$conf"
     echo "Added tmux-assistant-resurrect settings to $conf"
 
-    # Re-add TPM init as the very last line (required by TPM)
-    echo "$tpm_line" >> "$conf"
-    if [ "$had_tpm" = true ]; then
+    # Re-add TPM init as the very last line (required by TPM).
+    # Use the user's original line if we captured one, otherwise the default.
+    if [ -n "$existing_tpm_line" ]; then
+        echo "$existing_tpm_line" >> "$conf"
         echo "TPM init moved to end of $conf"
     else
+        echo "$tpm_line" >> "$conf"
         echo "Added TPM init to $conf"
     fi
 
@@ -364,11 +366,11 @@ status:
 
 # Manually trigger a save of current assistant sessions
 save:
-    @bash {{repo_dir}}/scripts/save-assistant-sessions.sh
+    @bash "{{repo_dir}}/scripts/save-assistant-sessions.sh"
 
 # Manually trigger a restore of saved assistant sessions
 restore:
-    @bash {{repo_dir}}/scripts/restore-assistant-sessions.sh
+    @bash "{{repo_dir}}/scripts/restore-assistant-sessions.sh"
 
 # Clean up stale state files (from dead processes)
 clean:

@@ -1320,7 +1320,8 @@ echo ""
 echo "=== Test 7d: tmux.conf upgrade from legacy source-file format ==="
 echo ""
 
-# Simulate an old-format ~/.tmux.conf with the legacy source-file line
+# Simulate an old-format ~/.tmux.conf with a legacy source-file line
+# and a CUSTOM TPM path (not the default ~/.tmux/plugins/tpm/tpm)
 cat >"$HOME/.tmux.conf" <<'LEGEOF'
 # user settings
 set -g mouse on
@@ -1328,7 +1329,7 @@ set -g mouse on
 # tmux-assistant-resurrect
 source-file '/old/path/to/tmux-assistant-resurrect/config/resurrect-assistants.conf'
 
-run '~/.tmux/plugins/tpm/tpm'
+run '/custom/path/tpm/tpm'
 LEGEOF
 
 just configure-tmux 2>&1
@@ -1356,11 +1357,18 @@ fi
 
 # TPM init must come AFTER the marker block (TPM ignores lines after its run line)
 end_line=$(grep -n "end tmux-assistant-resurrect" "$HOME/.tmux.conf" | tail -1 | cut -d: -f1)
-tpm_line=$(grep -n "tpm/tpm" "$HOME/.tmux.conf" | tail -1 | cut -d: -f1)
-if [ -n "$end_line" ] && [ -n "$tpm_line" ] && [ "$tpm_line" -gt "$end_line" ]; then
+tpm_line_num=$(grep -n "tpm/tpm" "$HOME/.tmux.conf" | tail -1 | cut -d: -f1)
+if [ -n "$end_line" ] && [ -n "$tpm_line_num" ] && [ "$tpm_line_num" -gt "$end_line" ]; then
 	pass "TPM init line is after marker block"
 else
-	fail "TPM init line is NOT after marker block (end=$end_line, tpm=$tpm_line)"
+	fail "TPM init line is NOT after marker block (end=$end_line, tpm=$tpm_line_num)"
+fi
+
+# Custom TPM path must be preserved verbatim (not replaced with default)
+if grep -qF "/custom/path/tpm/tpm" "$HOME/.tmux.conf" 2>/dev/null; then
+	pass "Custom TPM path preserved during upgrade"
+else
+	fail "Custom TPM path was replaced with default"
 fi
 
 # User settings outside the block should be preserved
