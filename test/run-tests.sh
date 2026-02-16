@@ -1404,6 +1404,111 @@ else
 	fail "User settings lost during unconfigure"
 fi
 
+# --- Test 8: strip_assistant_pane_contents() ---
+
+suite "strip_pane_contents"
+echo ""
+echo "=== Test 8: strip_assistant_pane_contents() ==="
+echo ""
+
+# Source the save script to get the function (main guard prevents execution)
+STRIP_STATE_DIR=$(mktemp -d)
+STATE_DIR="$STRIP_STATE_DIR"
+RESURRECT_DIR=$(mktemp -d)
+OUTPUT_FILE="$RESURRECT_DIR/assistant-sessions.json"
+LOG_FILE="$RESURRECT_DIR/assistant-save.log"
+source "$REPO_DIR/scripts/save-assistant-sessions.sh"
+
+# Create a fake pane_contents archive with 3 panes:
+#   assistant-session:0.0  (assistant — should be stripped)
+#   regular-session:0.0    (non-assistant — should be preserved)
+#   assistant-session:1.0  (assistant — should be stripped)
+strip_tmpdir=$(mktemp -d)
+mkdir -p "$strip_tmpdir/pane_contents"
+echo "old claude TUI output here" >"$strip_tmpdir/pane_contents/pane-assistant-session:0.0"
+echo "regular shell output here" >"$strip_tmpdir/pane_contents/pane-regular-session:0.0"
+echo "old opencode TUI output" >"$strip_tmpdir/pane_contents/pane-assistant-session:1.0"
+tar cf - -C "$strip_tmpdir" ./pane_contents/ | gzip >"$RESURRECT_DIR/pane_contents.tar.gz"
+rm -rf "$strip_tmpdir"
+
+# Create a matching assistant-sessions.json with 2 assistant panes
+cat >"$OUTPUT_FILE" <<'STRIPEOF'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {"pane": "assistant-session:0.0", "tool": "claude", "session_id": "ses_1", "cwd": "/tmp", "pid": "111"},
+    {"pane": "assistant-session:1.0", "tool": "opencode", "session_id": "ses_2", "cwd": "/tmp", "pid": "222"}
+  ]
+}
+STRIPEOF
+
+# Run the stripping function
+strip_assistant_pane_contents
+
+# Extract the modified archive and verify
+strip_verify=$(mktemp -d)
+gzip -d <"$RESURRECT_DIR/pane_contents.tar.gz" | tar xf - -C "$strip_verify"
+
+if [ -f "$strip_verify/pane_contents/pane-assistant-session:0.0" ]; then
+	fail "Assistant pane content not stripped (assistant-session:0.0)"
+else
+	pass "Assistant pane content stripped (assistant-session:0.0)"
+fi
+
+if [ -f "$strip_verify/pane_contents/pane-assistant-session:1.0" ]; then
+	fail "Assistant pane content not stripped (assistant-session:1.0)"
+else
+	pass "Assistant pane content stripped (assistant-session:1.0)"
+fi
+
+if [ -f "$strip_verify/pane_contents/pane-regular-session:0.0" ]; then
+	pass "Non-assistant pane content preserved (regular-session:0.0)"
+	content=$(cat "$strip_verify/pane_contents/pane-regular-session:0.0")
+	assert_eq "Non-assistant pane content unchanged" "regular shell output here" "$content"
+else
+	fail "Non-assistant pane content was removed (regular-session:0.0)"
+fi
+
+# Verify log message
+if grep -q "stripped pane contents for 2 assistant pane" "$LOG_FILE" 2>/dev/null; then
+	pass "Strip function logs count of removed panes"
+else
+	fail "Strip function log message missing or wrong count"
+fi
+
+# Test: no archive → no-op (should not crash)
+rm -f "$RESURRECT_DIR/pane_contents.tar.gz"
+strip_noarchive_exit=0
+strip_assistant_pane_contents 2>/dev/null || strip_noarchive_exit=$?
+assert_eq "Strip no-ops gracefully when archive missing" "0" "$strip_noarchive_exit"
+
+# Test: no assistant sessions → archive untouched
+cat >"$OUTPUT_FILE" <<'EMPTYEOF'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": []
+}
+EMPTYEOF
+
+# Recreate the archive
+strip_tmpdir2=$(mktemp -d)
+mkdir -p "$strip_tmpdir2/pane_contents"
+echo "should stay" >"$strip_tmpdir2/pane_contents/pane-keep:0.0"
+tar cf - -C "$strip_tmpdir2" ./pane_contents/ | gzip >"$RESURRECT_DIR/pane_contents.tar.gz"
+rm -rf "$strip_tmpdir2"
+
+archive_before=$(md5sum "$RESURRECT_DIR/pane_contents.tar.gz" 2>/dev/null || md5 -q "$RESURRECT_DIR/pane_contents.tar.gz" 2>/dev/null)
+strip_assistant_pane_contents
+archive_after=$(md5sum "$RESURRECT_DIR/pane_contents.tar.gz" 2>/dev/null || md5 -q "$RESURRECT_DIR/pane_contents.tar.gz" 2>/dev/null)
+assert_eq "Strip leaves archive untouched when no assistant sessions" "$archive_before" "$archive_after"
+
+# Clean up
+rm -rf "$strip_verify" "$STRIP_STATE_DIR" "$RESURRECT_DIR"
+
+# Restore variables for any subsequent tests
+RESURRECT_DIR="${HOME}/.tmux/resurrect"
+STATE_DIR="$TEST_STATE_DIR"
+
 # --- Summary ---
 
 echo ""

@@ -84,6 +84,7 @@ changes after an upgrade, check the relevant source to confirm.
 | **OpenCode Go binary overwrites process title** | `-s <id>` is NOT visible in `ps`; plugin state file or SQLite DB are the reliable sources | Run `ps -eo args=` on a running `opencode -s <id>` process |
 | **OpenCode SQLite DB** at `~/.local/share/opencode/opencode.db` | Fallback session ID extraction when plugin state file and args are unavailable; matches by cwd + most recent `time_updated` | Check DB schema: `sqlite3 ~/.local/share/opencode/opencode.db ".schema session"` |
 | **Codex writes `~/.codex/session-tags.jsonl`** | Primary session ID source for Codex (PID → session mapping) | Run Codex and check `cat ~/.codex/session-tags.jsonl` |
+| **tmux-resurrect pane content archive** layout: `./pane_contents/pane-{session}:{window}.{pane}` inside `pane_contents.tar.gz` | `strip_assistant_pane_contents()` removes assistant pane files from this archive to prevent stale TUI flash on restore | tmux-resurrect source: `scripts/helpers.sh:pane_contents_file()` |
 
 ## Platform gotchas
 

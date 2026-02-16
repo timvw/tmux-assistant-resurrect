@@ -222,6 +222,63 @@ main() {
 		'{timestamp: $timestamp, sessions: $sessions}' >"$OUTPUT_FILE"
 
 	log "saved $count assistant session(s) to $OUTPUT_FILE"
+
+	# Strip captured pane contents for assistant panes so tmux-resurrect
+	# won't restore stale TUI output that the post-restore hook would
+	# immediately replace. Non-assistant pane contents are preserved.
+	if [ "$count" -gt 0 ]; then
+		strip_assistant_pane_contents
+	fi
+}
+
+# Remove assistant pane entries from tmux-resurrect's pane_contents.tar.gz.
+# tmux-resurrect stores captured pane text in an archive with entries like:
+#   ./pane_contents/pane-{session_name}:{window_index}.{pane_index}
+# Our saved JSON uses the same "{session}:{window}.{pane}" target format,
+# so the mapping is direct.
+#
+# Upstream assumption: tmux-resurrect archive layout uses the naming convention
+# described above. Verified against tmux-resurrect helpers.sh:pane_contents_file().
+strip_assistant_pane_contents() {
+	local archive="$RESURRECT_DIR/pane_contents.tar.gz"
+	[ -f "$archive" ] || return 0
+
+	# Collect pane targets from the sessions we just saved
+	local panes
+	panes=$(jq -r '.sessions[].pane' "$OUTPUT_FILE" 2>/dev/null) || return 0
+	[ -z "$panes" ] && return 0
+
+	local tmpdir
+	tmpdir=$(mktemp -d) || return 0
+
+	# Extract, remove assistant pane files, re-archive.
+	# If any step fails, log a warning and leave the archive untouched.
+	if ! (gzip -d <"$archive" | tar xf - -C "$tmpdir") 2>/dev/null; then
+		log "warning: failed to extract pane_contents archive, skipping content stripping"
+		rm -rf "$tmpdir"
+		return 0
+	fi
+
+	local removed=0
+	while IFS= read -r pane_target; do
+		local content_file="$tmpdir/pane_contents/pane-${pane_target}"
+		if [ -f "$content_file" ]; then
+			rm -f "$content_file"
+			removed=$((removed + 1))
+		fi
+	done <<<"$panes"
+
+	if [ "$removed" -gt 0 ]; then
+		if tar cf - -C "$tmpdir" ./pane_contents/ | gzip >"${archive}.tmp" 2>/dev/null; then
+			mv "${archive}.tmp" "$archive"
+			log "stripped pane contents for $removed assistant pane(s)"
+		else
+			log "warning: failed to repack pane_contents archive"
+			rm -f "${archive}.tmp"
+		fi
+	fi
+
+	rm -rf "$tmpdir"
 }
 
 # Internal helper — called from main(). Requires PARTS_FILE to be set.

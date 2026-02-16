@@ -77,6 +77,11 @@ set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
 set -g @plugin 'timvw/tmux-assistant-resurrect'
 
+# Optional: restore terminal text in non-assistant panes after tmux restart.
+# If enabled, the plugin automatically strips captured content for assistant
+# panes so restore won't briefly flash stale TUI output before resuming.
+# set -g @resurrect-capture-pane-contents 'on'
+
 # Initialize TPM (must be last line)
 run '~/.tmux/plugins/tpm/tpm'
 ```

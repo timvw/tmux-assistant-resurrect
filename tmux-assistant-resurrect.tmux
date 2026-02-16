@@ -16,7 +16,11 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- tmux settings ---
 
-tmux set-option -g @resurrect-capture-pane-contents 'on'
+# Do NOT set @resurrect-capture-pane-contents here — that is the user's choice.
+# If it is enabled, the post-save hook strips captured content for assistant panes
+# (see strip_assistant_pane_contents in save-assistant-sessions.sh) so restore
+# won't briefly flash stale TUI output before the assistant is resumed.
+#
 # Do NOT add assistants to @resurrect-processes — that would launch bare
 # binaries (without session IDs) and the post-restore hook would then type
 # resume commands into the running TUI. The hook handles all resuming.
