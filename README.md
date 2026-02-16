@@ -62,6 +62,12 @@ before hooks/plugins have fired.
 
 ## Installation
 
+Install [TPM](https://github.com/tmux-plugins/tpm) if you don't have it:
+
+```bash
+git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
+```
+
 Add to your `~/.tmux.conf`:
 
 ```bash
@@ -74,8 +80,8 @@ set -g @plugin 'timvw/tmux-assistant-resurrect'
 run '~/.tmux/plugins/tpm/tpm'
 ```
 
-Then press `prefix + I` inside tmux. TPM will clone the plugin and
-automatically set up:
+Then inside tmux, press `prefix + I` (capital I). TPM will clone the plugins
+and automatically set up:
 
 - tmux-resurrect + tmux-continuum settings
 - Claude Code hooks in `~/.claude/settings.json`
@@ -149,21 +155,10 @@ the normal TPM installation — no cloning or build tools needed.
 **Prerequisites**: tmux, jq, and at least one of claude / opencode / codex
 installed.
 
-#### 1. Install via TPM
+#### 1. Install
 
-Add to your `~/.tmux.conf` (if you haven't already):
-
-```bash
-set -g @plugin 'tmux-plugins/tpm'
-set -g @plugin 'tmux-plugins/tmux-resurrect'
-set -g @plugin 'tmux-plugins/tmux-continuum'
-set -g @plugin 'timvw/tmux-assistant-resurrect'
-
-run '~/.tmux/plugins/tpm/tpm'
-```
-
-Then inside tmux, press `prefix + I` (capital I). TPM will install the plugins
-and set up the Claude hooks and OpenCode plugin automatically.
+Follow the [Installation](#installation) steps above (install TPM, add the
+plugin lines to `~/.tmux.conf`, press `prefix + I` inside tmux).
 
 #### 2. Launch some assistants
 
