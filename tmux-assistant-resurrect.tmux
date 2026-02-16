@@ -46,7 +46,7 @@ install_claude_hooks() {
     # Install SessionStart hook if not present.
     # Use contains() for matching — tolerates quoting changes across versions
     # (e.g., upgrading from unquoted to quoted paths won't create duplicates).
-    if ! jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))' "$settings" >/dev/null 2>&1; then
+    if ! jq -e '.hooks.SessionStart[]?.hooks[]? | select((.command // "") | contains("claude-session-track"))' "$settings" >/dev/null 2>&1; then
         local tmp
         tmp=$(mktemp)
         jq --arg cmd "$track_cmd" '
@@ -60,7 +60,7 @@ install_claude_hooks() {
     fi
 
     # Install SessionEnd hook if not present
-    if ! jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))' "$settings" >/dev/null 2>&1; then
+    if ! jq -e '.hooks.SessionEnd[]?.hooks[]? | select((.command // "") | contains("claude-session-cleanup"))' "$settings" >/dev/null 2>&1; then
         local tmp
         tmp=$(mktemp)
         jq --arg cmd "$cleanup_cmd" '

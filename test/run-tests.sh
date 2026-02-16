@@ -1259,6 +1259,50 @@ assert_eq "Upgrade: uninstall removes old unquoted hooks" "0" "$upgrade_remainin
 upgrade_remaining_cleanup=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))] | length' "$HOME/.claude/settings.json" 2>/dev/null || echo "0")
 assert_eq "Upgrade: uninstall removes old unquoted cleanup hooks" "0" "$upgrade_remaining_cleanup"
 
+# --- Test 7c: Install/uninstall with malformed hook entries (null .command) ---
+#
+# If another tool adds hook entries without a .command field (or with null),
+# the jq contains() call must not crash. The (.command // "") null-coalescing
+# ensures graceful handling.
+
+echo ""
+echo "=== Test 7c: Install with malformed hook entries (null .command) ==="
+echo ""
+
+# Create a settings.json with a malformed hook entry (missing .command)
+cat >"$HOME/.claude/settings.json" <<'MALEOF'
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "",
+      "hooks": [{"type": "url", "url": "https://example.com/webhook"}]
+    }]
+  }
+}
+MALEOF
+
+# Install should not crash — the malformed entry has no .command at all
+install_malformed_exit=0
+bash "$REPO_DIR/tmux-assistant-resurrect.tmux" 2>&1 || install_malformed_exit=$?
+assert_eq "Install doesn't crash on hook entry without .command" "0" "$install_malformed_exit"
+
+# Our hook should be added alongside the existing malformed entry
+malformed_track=$(jq '[.hooks.SessionStart[]?.hooks[]? | select((.command // "") | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
+assert_eq "Install adds hook alongside malformed entry" "1" "$malformed_track"
+
+# The original malformed entry should still be there
+malformed_url=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.url == "https://example.com/webhook")] | length' "$HOME/.claude/settings.json")
+assert_eq "Install preserves existing malformed entries" "1" "$malformed_url"
+
+# Uninstall should not crash either
+uninstall_malformed_exit=0
+just uninstall 2>&1 || uninstall_malformed_exit=$?
+assert_eq "Uninstall doesn't crash on hook entry without .command" "0" "$uninstall_malformed_exit"
+
+# The malformed entry should survive uninstall (we only remove our hooks)
+malformed_url_after=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.url == "https://example.com/webhook")] | length' "$HOME/.claude/settings.json" 2>/dev/null || echo "0")
+assert_eq "Uninstall preserves non-matching entries" "1" "$malformed_url_after"
+
 # --- Summary ---
 
 echo ""

@@ -36,10 +36,11 @@ session IDs and restore them automatically.
   be a known shell, and (2) the pane must not already have a running assistant
   in its process tree. Both must pass. This prevents typing into TUIs or
   double-launching.
-- **Restore shell whitelist**: Guard 1 checks `pane_current_command` against a
-  hardcoded whitelist: `bash`, `zsh`, `fish`, `sh`, `dash`, `ksh`, `tcsh`,
-  `csh`, `nu`. If a user's shell isn't in this list, restore silently skips the
-  pane. Update the whitelist in `scripts/restore-assistant-sessions.sh` if needed.
+- **Restore shell whitelist**: Guard 1 strips a leading `-` (login shells report
+  as `-bash`, `-zsh`, etc.) then checks against a hardcoded whitelist: `bash`,
+  `zsh`, `fish`, `sh`, `dash`, `ksh`, `tcsh`, `csh`, `nu`. If a user's shell
+  isn't in this list, restore silently skips the pane. Update the whitelist in
+  `scripts/restore-assistant-sessions.sh` if needed.
 
 ## Detection approach
 
@@ -61,8 +62,10 @@ extraction methods.
 - Log files go to `~/.tmux/resurrect/assistant-{save,restore}.log` (truncated to 500 lines per run)
 - Process inspection uses `ps -eo pid=,ppid=` (not `pgrep -P` -- unreliable on macOS)
 - Agent detection matches binary names via `case` patterns in `detect_tool()`
-- Hook matching in jq uses `contains("claude-session-track")` (not exact `==`)
-  to tolerate quoting changes across versions and ensure backward compatibility
+- Hook matching in jq uses `(.command // "") | contains("claude-session-track")`
+  (not exact `==`) to tolerate quoting changes across versions and ensure backward
+  compatibility. The `// ""` null-coalescing prevents crashes on hook entries that
+  lack a `.command` field (e.g., URL-type hooks added by other tools)
 - Use `posix_quote()` from `lib-detect.sh` for any values sent to tmux panes
   via `send-keys` (safe for bash, zsh, fish, and other POSIX-ish shells)
 - Hook command paths use single quotes (`bash '${CURRENT_DIR}/hooks/...'`);

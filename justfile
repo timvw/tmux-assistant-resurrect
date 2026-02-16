@@ -60,7 +60,7 @@ install-claude-hook:
     fi
 
     # Install SessionStart hook (session tracking)
-    if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))' "$settings" >/dev/null 2>&1; then
+    if jq -e '.hooks.SessionStart[]?.hooks[]? | select((.command // "") | contains("claude-session-track"))' "$settings" >/dev/null 2>&1; then
         echo "Claude SessionStart hook already configured"
     else
         tmp=$(mktemp)
@@ -79,7 +79,7 @@ install-claude-hook:
     fi
 
     # Install SessionEnd hook (state file cleanup)
-    if jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))' "$settings" >/dev/null 2>&1; then
+    if jq -e '.hooks.SessionEnd[]?.hooks[]? | select((.command // "") | contains("claude-session-cleanup"))' "$settings" >/dev/null 2>&1; then
         echo "Claude SessionEnd hook already configured"
     else
         tmp=$(mktemp)
@@ -168,7 +168,7 @@ uninstall-claude-hook:
         (if .hooks.SessionStart then
             .hooks.SessionStart = [
                 .hooks.SessionStart[] |
-                .hooks = [.hooks[] | select(.command | contains("claude-session-track") | not)] |
+                .hooks = [.hooks[] | select((.command // "") | contains("claude-session-track") | not)] |
                 select(.hooks | length > 0)
             ] |
             if .hooks.SessionStart | length == 0 then del(.hooks.SessionStart) else . end
@@ -177,7 +177,7 @@ uninstall-claude-hook:
         (if .hooks.SessionEnd then
             .hooks.SessionEnd = [
                 .hooks.SessionEnd[] |
-                .hooks = [.hooks[] | select(.command | contains("claude-session-cleanup") | not)] |
+                .hooks = [.hooks[] | select((.command // "") | contains("claude-session-cleanup") | not)] |
                 select(.hooks | length > 0)
             ] |
             if .hooks.SessionEnd | length == 0 then del(.hooks.SessionEnd) else . end
@@ -250,12 +250,12 @@ status:
     fi
 
     # Claude hooks — use contains() matching to detect both old and new quoting forms
-    if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))' ~/.claude/settings.json >/dev/null 2>&1; then
+    if jq -e '.hooks.SessionStart[]?.hooks[]? | select((.command // "") | contains("claude-session-track"))' ~/.claude/settings.json >/dev/null 2>&1; then
         echo "[ok] Claude SessionStart hook installed"
     else
         echo "[--] Claude SessionStart hook not installed"
     fi
-    if jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))' ~/.claude/settings.json >/dev/null 2>&1; then
+    if jq -e '.hooks.SessionEnd[]?.hooks[]? | select((.command // "") | contains("claude-session-cleanup"))' ~/.claude/settings.json >/dev/null 2>&1; then
         echo "[ok] Claude SessionEnd hook installed"
     else
         echo "[--] Claude SessionEnd hook not installed"

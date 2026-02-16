@@ -77,6 +77,8 @@ while read -r entry; do
 	# or @resurrect-processes restored a non-assistant program), injecting
 	# send-keys would feed commands into the wrong program.
 	pane_cmd=$(tmux display-message -t "$pane" -p '#{pane_current_command}' 2>/dev/null || true)
+	# Strip leading '-' from login shells (e.g., -bash -> bash, -zsh -> zsh)
+	pane_cmd="${pane_cmd#-}"
 	case "$pane_cmd" in
 	bash | zsh | fish | sh | dash | ksh | tcsh | csh | nu) ;;
 	*)
