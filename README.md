@@ -2,7 +2,7 @@
 
 > **Disclaimer**: This project was entirely vibecoded (designed and implemented
 > through conversation with AI coding assistants). It has been end-to-end tested
-> in Docker with real CLI binaries (101 automated tests + full save/kill/restore
+> in Docker with real CLI binaries (100+ automated tests + full save/kill/restore
 > lifecycle smoke test), but has **limited real-world usage** so far. Expect
 > rough edges. Contributions and bug reports welcome.
 
@@ -128,7 +128,7 @@ scripts/
   restore-assistant-sessions.sh   # Resurrect post-restore hook (resumes assistants)
 test/
   Dockerfile                      # Docker image with tmux, jq, just, and real assistant CLIs
-  run-tests.sh                    # Integration test suite (101 tests)
+  run-tests.sh                    # Integration test suite
 justfile                          # Install/uninstall/status/save/restore/test recipes
 ```
 
@@ -144,9 +144,9 @@ just test
 
 This builds a Docker image with tmux, jq, just, and the real
 `@anthropic-ai/claude-code`, `opencode-ai`, and `@openai/codex` npm packages,
-then runs 91 tests covering install, save, restore, uninstall, hooks, cleanup,
-TPM plugin installation, session ID extraction, POSIX quoting, process tree
-detection, and regression scenarios. No API keys are needed — the tests exercise
+then runs the full test suite covering install, save, restore, uninstall, hooks,
+cleanup, TPM plugin installation, session ID extraction, POSIX quoting, process
+tree detection, upgrade-path migration, and regression scenarios. No API keys are needed — the tests exercise
 the process detection and session management layer, not the AI functionality.
 
 ### Try it yourself

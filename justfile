@@ -60,7 +60,7 @@ install-claude-hook:
     fi
 
     # Install SessionStart hook (session tracking)
-    if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command == "'"$track_cmd"'")' "$settings" >/dev/null 2>&1; then
+    if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))' "$settings" >/dev/null 2>&1; then
         echo "Claude SessionStart hook already configured"
     else
         tmp=$(mktemp)
@@ -79,7 +79,7 @@ install-claude-hook:
     fi
 
     # Install SessionEnd hook (state file cleanup)
-    if jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command == "'"$cleanup_cmd"'")' "$settings" >/dev/null 2>&1; then
+    if jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))' "$settings" >/dev/null 2>&1; then
         echo "Claude SessionEnd hook already configured"
     else
         tmp=$(mktemp)
@@ -153,31 +153,31 @@ uninstall-claude-hook:
     #!/usr/bin/env bash
     set -euo pipefail
     settings="$HOME/.claude/settings.json"
-    track_cmd="bash '{{repo_dir}}/hooks/claude-session-track.sh'"
-    cleanup_cmd="bash '{{repo_dir}}/hooks/claude-session-cleanup.sh'"
 
     if [ ! -f "$settings" ]; then
         echo "No Claude settings to modify"
         exit 0
     fi
 
-    # Remove both hooks in one pass
+    # Remove both hooks in one pass.
+    # Use contains() matching to remove both old (unquoted) and new (quoted)
+    # forms — ensures clean upgrade without leftover entries.
     tmp=$(mktemp)
-    jq --arg track "$track_cmd" --arg cleanup "$cleanup_cmd" '
-        # Remove SessionStart hook
+    jq '
+        # Remove SessionStart hook entries containing "claude-session-track"
         (if .hooks.SessionStart then
             .hooks.SessionStart = [
                 .hooks.SessionStart[] |
-                .hooks = [.hooks[] | select(.command != $track)] |
+                .hooks = [.hooks[] | select(.command | contains("claude-session-track") | not)] |
                 select(.hooks | length > 0)
             ] |
             if .hooks.SessionStart | length == 0 then del(.hooks.SessionStart) else . end
         else . end) |
-        # Remove SessionEnd hook
+        # Remove SessionEnd hook entries containing "claude-session-cleanup"
         (if .hooks.SessionEnd then
             .hooks.SessionEnd = [
                 .hooks.SessionEnd[] |
-                .hooks = [.hooks[] | select(.command != $cleanup)] |
+                .hooks = [.hooks[] | select(.command | contains("claude-session-cleanup") | not)] |
                 select(.hooks | length > 0)
             ] |
             if .hooks.SessionEnd | length == 0 then del(.hooks.SessionEnd) else . end
@@ -249,15 +249,13 @@ status:
         echo "[--] tmux.conf not configured"
     fi
 
-    # Claude hooks
-    track_cmd="bash '{{repo_dir}}/hooks/claude-session-track.sh'"
-    cleanup_cmd="bash '{{repo_dir}}/hooks/claude-session-cleanup.sh'"
-    if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command == "'"$track_cmd"'")' ~/.claude/settings.json >/dev/null 2>&1; then
+    # Claude hooks — use contains() matching to detect both old and new quoting forms
+    if jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))' ~/.claude/settings.json >/dev/null 2>&1; then
         echo "[ok] Claude SessionStart hook installed"
     else
         echo "[--] Claude SessionStart hook not installed"
     fi
-    if jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command == "'"$cleanup_cmd"'")' ~/.claude/settings.json >/dev/null 2>&1; then
+    if jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))' ~/.claude/settings.json >/dev/null 2>&1; then
         echo "[ok] Claude SessionEnd hook installed"
     else
         echo "[--] Claude SessionEnd hook not installed"

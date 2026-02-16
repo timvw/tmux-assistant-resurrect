@@ -1204,6 +1204,61 @@ bash "$REPO_DIR/tmux-assistant-resurrect.tmux"
 tpm_hook_count_after=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
 assert_eq "TPM: Idempotent (no duplicate hooks)" "1" "$tpm_hook_count_after"
 
+# --- Test 7b: Upgrade path — old unquoted hooks don't cause duplicates ---
+#
+# Before the contains() fix, the plugin used exact string matching. If a user
+# had the old unquoted form (bash /path/to/hook.sh) and upgraded to the new
+# quoted form (bash '/path/to/hook.sh'), the idempotency check would miss
+# the old entry and create a duplicate.
+
+echo ""
+echo "=== Test 7b: Upgrade path — unquoted-to-quoted hook migration ==="
+echo ""
+
+# Start fresh
+rm -f "$HOME/.claude/settings.json"
+echo '{}' >"$HOME/.claude/settings.json"
+
+# Simulate the OLD (pre-fix) unquoted hook format by injecting directly
+old_unquoted_track="bash $REPO_DIR/hooks/claude-session-track.sh"
+old_unquoted_cleanup="bash $REPO_DIR/hooks/claude-session-cleanup.sh"
+tmp_upgrade=$(mktemp)
+jq --arg track "$old_unquoted_track" --arg cleanup "$old_unquoted_cleanup" '
+    .hooks = {
+        "SessionStart": [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": $track}]
+        }],
+        "SessionEnd": [{
+            "matcher": "",
+            "hooks": [{"type": "command", "command": $cleanup}]
+        }]
+    }
+' "$HOME/.claude/settings.json" >"$tmp_upgrade" && mv "$tmp_upgrade" "$HOME/.claude/settings.json"
+
+# Verify old hooks are in place
+old_track_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
+assert_eq "Upgrade: old unquoted hook present before upgrade" "1" "$old_track_count"
+
+# Run the TPM plugin entry point (simulates upgrade to new quoted form)
+bash "$REPO_DIR/tmux-assistant-resurrect.tmux"
+
+# The plugin should detect the old entry via contains() and NOT add a duplicate
+upgrade_track_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
+assert_eq "Upgrade: no duplicate SessionStart hooks after upgrade" "1" "$upgrade_track_count"
+
+upgrade_cleanup_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))] | length' "$HOME/.claude/settings.json")
+assert_eq "Upgrade: no duplicate SessionEnd hooks after upgrade" "1" "$upgrade_cleanup_count"
+
+# Now test uninstall via justfile — it should remove both old and new forms
+just uninstall 2>&1 >/dev/null
+
+upgrade_remaining=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json" 2>/dev/null || echo "0")
+assert_eq "Upgrade: uninstall removes old unquoted hooks" "0" "$upgrade_remaining"
+
+upgrade_remaining_cleanup=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))] | length' "$HOME/.claude/settings.json" 2>/dev/null || echo "0")
+assert_eq "Upgrade: uninstall removes old unquoted cleanup hooks" "0" "$upgrade_remaining_cleanup"
+
 # --- Summary ---
 
 echo ""

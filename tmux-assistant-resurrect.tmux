@@ -10,6 +10,10 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Limitation: hook commands use single-quoted paths (bash '${CURRENT_DIR}/...').
+# If the plugin install path contains a single quote, the quoting breaks.
+# This is unlikely in practice (TPM installs to ~/.tmux/plugins/).
+
 # --- tmux settings ---
 
 tmux set-option -g @resurrect-capture-pane-contents 'on'
@@ -39,8 +43,10 @@ install_claude_hooks() {
         return
     fi
 
-    # Install SessionStart hook if not present
-    if ! jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command == "'"$track_cmd"'")' "$settings" >/dev/null 2>&1; then
+    # Install SessionStart hook if not present.
+    # Use contains() for matching — tolerates quoting changes across versions
+    # (e.g., upgrading from unquoted to quoted paths won't create duplicates).
+    if ! jq -e '.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))' "$settings" >/dev/null 2>&1; then
         local tmp
         tmp=$(mktemp)
         jq --arg cmd "$track_cmd" '
@@ -54,7 +60,7 @@ install_claude_hooks() {
     fi
 
     # Install SessionEnd hook if not present
-    if ! jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command == "'"$cleanup_cmd"'")' "$settings" >/dev/null 2>&1; then
+    if ! jq -e '.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))' "$settings" >/dev/null 2>&1; then
         local tmp
         tmp=$(mktemp)
         jq --arg cmd "$cleanup_cmd" '
