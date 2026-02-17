@@ -679,10 +679,12 @@ echo ""
 echo "=== Test 5: Claude hook scripts ==="
 echo ""
 
-# Test SessionStart hook: feed it JSON on stdin, verify state file
+# Test SessionStart hook: feed it rich JSON on stdin (matching Claude's actual
+# SessionStart payload), verify state file preserves all fields.
 export TMUX_ASSISTANT_RESURRECT_DIR="/tmp/tmux-assistant-resurrect-test5"
 mkdir -p "$TMUX_ASSISTANT_RESURRECT_DIR"
-echo '{"session_id": "ses_hook_test", "cwd": "/tmp/project"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
+export TMUX_PANE="%99"
+echo '{"session_id": "ses_hook_test", "cwd": "/tmp/project", "model": "claude-sonnet-4-5-20250929", "source": "startup", "permission_mode": "default", "transcript_path": "/tmp/transcript.jsonl", "hook_event_name": "SessionStart"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
 
 state_file="$TMUX_ASSISTANT_RESURRECT_DIR/claude-$$.json"
 assert_file_exists "SessionStart hook creates state file" "$state_file"
@@ -690,11 +692,75 @@ assert_file_exists "SessionStart hook creates state file" "$state_file"
 if [ -f "$state_file" ]; then
 	hook_sid=$(jq -r '.session_id' "$state_file")
 	assert_eq "SessionStart hook writes correct session ID" "ses_hook_test" "$hook_sid"
+
+	# Verify fields from Claude's stdin JSON are preserved (full merge)
+	hook_model=$(jq -r '.model' "$state_file")
+	assert_eq "SessionStart hook preserves model" "claude-sonnet-4-5-20250929" "$hook_model"
+	hook_source=$(jq -r '.source' "$state_file")
+	assert_eq "SessionStart hook preserves source" "startup" "$hook_source"
+	hook_perm=$(jq -r '.permission_mode' "$state_file")
+	assert_eq "SessionStart hook preserves permission_mode" "default" "$hook_perm"
+
+	# Verify our added fields
+	hook_tool=$(jq -r '.tool' "$state_file")
+	assert_eq "SessionStart hook adds tool field" "claude" "$hook_tool"
+	hook_ppid=$(jq -r '.ppid' "$state_file")
+	assert_eq "SessionStart hook adds ppid field" "$$" "$hook_ppid"
+	hook_ts=$(jq -r '.timestamp' "$state_file")
+	if [ -n "$hook_ts" ] && [ "$hook_ts" != "null" ]; then
+		pass "SessionStart hook adds timestamp"
+	else
+		fail "SessionStart hook missing timestamp"
+	fi
+
+	# Verify hardcoded env vars are captured
+	hook_env_pane=$(jq -r '.env.tmux_pane' "$state_file")
+	assert_eq "SessionStart hook captures TMUX_PANE" "%99" "$hook_env_pane"
+	hook_env_shell=$(jq -r '.env.shell' "$state_file")
+	if [ -n "$hook_env_shell" ] && [ "$hook_env_shell" != "null" ]; then
+		pass "SessionStart hook captures SHELL"
+	else
+		fail "SessionStart hook missing SHELL in env"
+	fi
 fi
 
 # Test SessionEnd hook: should remove the state file
 echo '{}' | bash "$REPO_DIR/hooks/claude-session-cleanup.sh"
 assert_file_not_exists "SessionEnd hook removes state file" "$state_file"
+
+# Test SessionStart hook with user-configured env var capture
+# (via tmux option @assistant-resurrect-capture-env)
+export MY_CUSTOM_VAR="custom_value_123"
+tmux set-option -g @assistant-resurrect-capture-env 'MY_CUSTOM_VAR' 2>/dev/null || true
+echo '{"session_id": "ses_envtest", "cwd": "/tmp"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
+env_state="$TMUX_ASSISTANT_RESURRECT_DIR/claude-$$.json"
+if [ -f "$env_state" ]; then
+	env_custom=$(jq -r '.env.MY_CUSTOM_VAR' "$env_state")
+	assert_eq "SessionStart hook captures user-configured env var" "custom_value_123" "$env_custom"
+	rm -f "$env_state"
+else
+	fail "SessionStart hook state file not created for env capture test"
+fi
+# Clean up tmux option
+tmux set-option -gu @assistant-resurrect-capture-env 2>/dev/null || true
+unset MY_CUSTOM_VAR
+
+# Test backward compatibility: minimal JSON (old format) still works
+echo '{"session_id": "ses_minimal_test", "cwd": "/tmp"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
+minimal_state="$TMUX_ASSISTANT_RESURRECT_DIR/claude-$$.json"
+if [ -f "$minimal_state" ]; then
+	minimal_sid=$(jq -r '.session_id' "$minimal_state")
+	assert_eq "Minimal input still produces valid session_id" "ses_minimal_test" "$minimal_sid"
+	# model should be absent (null) — not crash
+	minimal_model=$(jq -r '.model // "absent"' "$minimal_state")
+	assert_eq "Minimal input has no model field" "absent" "$minimal_model"
+	# tool field should still be present
+	minimal_tool=$(jq -r '.tool' "$minimal_state")
+	assert_eq "Minimal input still has tool field" "claude" "$minimal_tool"
+	rm -f "$minimal_state"
+else
+	fail "SessionStart hook state file not created for minimal input test"
+fi
 
 # Test SessionStart hook with special characters (JSON escaping)
 echo '{"session_id": "ses_quote\"test", "cwd": "/tmp/project'\''s dir"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
@@ -712,6 +778,8 @@ if [ -f "$special_state" ]; then
 else
 	fail "SessionStart hook state file not created for special chars test"
 fi
+
+unset TMUX_PANE
 
 # Restore the test-wide state dir
 export TMUX_ASSISTANT_RESURRECT_DIR="$TEST_STATE_DIR"

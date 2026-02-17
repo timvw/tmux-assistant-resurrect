@@ -308,6 +308,22 @@ IDs while tmux is active. The persistent sidecar JSON
 (`~/.tmux/resurrect/assistant-sessions.json`) is what survives reboots and lives
 in your home directory.
 
+### Environment variable capture
+
+By default, the plugin captures `TMUX_PANE` and `SHELL` in each assistant's
+state file. To capture additional environment variables, set a space-separated
+list in `tmux.conf`:
+
+```bash
+set -g @assistant-resurrect-capture-env 'VIRTUAL_ENV NODE_ENV CONDA_DEFAULT_ENV'
+```
+
+Captured variables are stored in the state file's `env` object. State files
+live in a user-only directory (mode 0700).
+
+> **Note:** Avoid capturing secrets (API keys, tokens). State files persist
+> to disk and may outlive the process they were captured from.
+
 ### Continuum save interval
 
 Edit `config/resurrect-assistants.conf`:
@@ -336,10 +352,11 @@ To add a new AI coding assistant:
 
 Two hooks configured in `~/.claude/settings.json`:
 
-- **`SessionStart`**: Claude Code passes JSON on stdin (including `session_id`).
-  The hook writes this to `$STATE_DIR/claude-<PID>.json`,
-  where PID is Claude Code's process ID (the hook's `$PPID`, since Claude
-  spawns the hook as a subprocess).
+- **`SessionStart`**: Claude Code passes JSON on stdin (including `session_id`,
+  `model`, `source`, `permission_mode`, `transcript_path`, and more). The hook
+  merges the full JSON payload with plugin metadata (`tool`, `ppid`, `timestamp`,
+  `env`) and writes it to `$STATE_DIR/claude-<PID>.json`. This means any new
+  fields Claude adds in future versions are captured automatically.
 - **`SessionEnd`**: Removes the state file when the Claude session exits,
   preventing stale entries.
 
@@ -350,7 +367,9 @@ only reliable source of session IDs for Claude.
 ### OpenCode plugin (`hooks/opencode-session-track.js`)
 
 An OpenCode plugin that listens for `session.created`, `session.updated`, and
-`session.idle` events. On each event, it writes the current session ID to
+`session.idle` events. On each event, it captures the full session object
+(including model, title, and other metadata) along with init-time context
+(`process.argv`, client API surface) and writes it to
 `$STATE_DIR/opencode-<PID>.json`. This handles the case where
 a user switches sessions at runtime (via `/sessions` or `Ctrl+x l`). The plugin
 also cleans up its state file on process exit (SIGINT, SIGTERM).
