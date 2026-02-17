@@ -85,7 +85,7 @@ assert_eq() {
 
 assert_contains() {
 	local desc="$1" haystack="$2" needle="$3"
-	if echo "$haystack" | grep -qF "$needle"; then
+	if echo "$haystack" | grep -qF -- "$needle"; then
 		pass "$desc"
 	else
 		fail "$desc (expected to contain '$needle')"
@@ -1576,6 +1576,414 @@ rm -rf "$strip_verify" "$STRIP_STATE_DIR" "$RESURRECT_DIR"
 # Restore variables for any subsequent tests
 RESURRECT_DIR="${HOME}/.tmux/resurrect"
 STATE_DIR="$TEST_STATE_DIR"
+
+# --- Test 9: extract_cli_args() unit tests ---
+
+suite "cli_args"
+echo ""
+echo "=== Test 9: extract_cli_args() unit tests ==="
+echo ""
+
+# Re-source save script to pick up extract_cli_args
+STATE_DIR="$TEST_STATE_DIR"
+source "$REPO_DIR/scripts/save-assistant-sessions.sh"
+
+# Claude: strip --resume <id>
+assert_eq "Claude strip --resume" "--dangerously-skip-permissions --model opus" \
+	"$(extract_cli_args "claude" "claude --dangerously-skip-permissions --model opus --resume ses_abc123")"
+
+# Claude: strip --resume=<id> (equals form)
+assert_eq "Claude strip --resume= (equals)" "--dangerously-skip-permissions" \
+	"$(extract_cli_args "claude" "claude --dangerously-skip-permissions --resume=ses_abc123")"
+
+# Claude: full path stripped
+assert_eq "Claude full path" "--dangerously-skip-permissions" \
+	"$(extract_cli_args "claude" "/usr/local/bin/claude --dangerously-skip-permissions --resume ses_abc")"
+
+# Claude: no flags (just binary + resume)
+assert_eq "Claude no extra flags" "" \
+	"$(extract_cli_args "claude" "claude --resume ses_abc")"
+
+# Claude: bare binary, no flags, no resume
+assert_eq "Claude bare binary" "" \
+	"$(extract_cli_args "claude" "claude")"
+
+# OpenCode: strip -s <id>
+assert_eq "OpenCode strip -s" "--verbose" \
+	"$(extract_cli_args "opencode" "opencode --verbose -s ses_abc")"
+
+# OpenCode: strip --session <id>
+assert_eq "OpenCode strip --session" "--verbose" \
+	"$(extract_cli_args "opencode" "opencode --verbose --session ses_abc")"
+
+# OpenCode: strip --session=<id> (equals form)
+assert_eq "OpenCode strip --session= (equals)" "--verbose" \
+	"$(extract_cli_args "opencode" "opencode --verbose --session=ses_abc")"
+
+# Codex: strip resume <id> (positional subcommand)
+assert_eq "Codex strip resume" "--full-auto" \
+	"$(extract_cli_args "codex" "codex --full-auto resume ses_abc")"
+
+# Codex: bare resume (no extra flags)
+assert_eq "Codex bare resume" "" \
+	"$(extract_cli_args "codex" "codex resume ses_abc")"
+
+# Edge: binary with path prefix
+assert_eq "Binary path prefix stripped" "--dangerously-skip-permissions" \
+	"$(extract_cli_args "claude" "/opt/homebrew/bin/claude --dangerously-skip-permissions")"
+
+# Edge: multiple spaces between args (normalize)
+assert_eq "Multiple spaces normalized" "--dangerously-skip-permissions --model opus" \
+	"$(extract_cli_args "claude" "claude  --dangerously-skip-permissions  --model  opus  --resume  ses_abc")"
+
+# Edge: Node.js double-binary (ps shows process name + script path)
+assert_eq "Node.js double-binary stripped" "--dangerously-skip-permissions" \
+	"$(extract_cli_args "claude" "claude /usr/local/bin/claude --dangerously-skip-permissions --resume ses_abc")"
+
+# Edge: Node.js double-binary with no extra flags
+assert_eq "Node.js double-binary no flags" "" \
+	"$(extract_cli_args "claude" "claude /usr/local/bin/claude --resume ses_abc")"
+
+# Edge: Node.js double-binary bare (no flags, no resume)
+assert_eq "Node.js double-binary bare" "" \
+	"$(extract_cli_args "codex" "codex /usr/local/bin/codex")"
+
+# --- Test 9b: enriched fields in assistant-sessions.json ---
+
+echo ""
+echo "=== Test 9b: enriched fields in assistant-sessions.json ==="
+echo ""
+
+# Re-install so save/restore use the updated scripts
+just install 2>&1 >/dev/null
+
+# Create a tmux session with claude running
+tmux new-session -d -s test-enrich-claude -c /tmp
+tmux send-keys -t test-enrich-claude "claude --dangerously-skip-permissions --resume ses_enrich_test" Enter
+enrich_shell_pid=$(tmux display-message -t test-enrich-claude -p '#{pane_pid}')
+wait_for_child "$enrich_shell_pid" "claude" 10 >/dev/null || echo "WARN: claude child not found for enrich test"
+enrich_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$enrich_shell_pid" '$2 == ppid && /claude/ {print $1; exit}')
+
+# Create an enriched state file (model, env) keyed by child PID
+mkdir -p "$TEST_STATE_DIR"
+cat >"$TEST_STATE_DIR/claude-${enrich_child_pid}.json" <<EEOF
+{
+  "session_id": "ses_enrich_test",
+  "model": "claude-opus-4-6",
+  "source": "startup",
+  "tool": "claude",
+  "ppid": $enrich_child_pid,
+  "timestamp": "2026-01-01T00:00:00Z",
+  "env": {
+    "tmux_pane": "%5",
+    "shell": "/bin/bash",
+    "ANTHROPIC_BASE_URL": "https://proxy.internal"
+  }
+}
+EEOF
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+STATE_DIR="$TEST_STATE_DIR"
+just save 2>&1
+
+SAVED="$HOME/.tmux/resurrect/assistant-sessions.json"
+enrich_entry=$(jq '.sessions[] | select(.pane | contains("test-enrich-claude"))' "$SAVED")
+
+# Verify cli_args present (stripped of --resume)
+enrich_cli_args=$(echo "$enrich_entry" | jq -r '.cli_args // empty')
+assert_contains "Enriched: cli_args has --dangerously-skip-permissions" "$enrich_cli_args" "--dangerously-skip-permissions"
+
+# Verify model from state file
+enrich_model=$(echo "$enrich_entry" | jq -r '.model // empty')
+assert_eq "Enriched: model from state file" "claude-opus-4-6" "$enrich_model"
+
+# Verify env from state file
+enrich_env=$(echo "$enrich_entry" | jq -r '.env.ANTHROPIC_BASE_URL // empty')
+assert_eq "Enriched: env from state file" "https://proxy.internal" "$enrich_env"
+
+# Verify env has tmux_pane and shell
+enrich_env_pane=$(echo "$enrich_entry" | jq -r '.env.tmux_pane // empty')
+assert_eq "Enriched: env has tmux_pane" "%5" "$enrich_env_pane"
+
+rm -f "$TEST_STATE_DIR/claude-${enrich_child_pid}.json"
+kill_pane_children test-enrich-claude true
+
+# --- Test 9c: Backward compat — missing enriched fields ---
+
+echo ""
+echo "=== Test 9c: backward compat — save with minimal state file ==="
+echo ""
+
+# Create a session with a MINIMAL state file (no model, no env — old format)
+tmux new-session -d -s test-enrich-minimal -c /tmp
+tmux send-keys -t test-enrich-minimal "claude --resume ses_minimal_enrich" Enter
+minimal_enrich_shell=$(tmux display-message -t test-enrich-minimal -p '#{pane_pid}')
+wait_for_child "$minimal_enrich_shell" "claude" 10 >/dev/null || echo "WARN"
+minimal_enrich_child=$(ps -eo pid=,ppid=,args= | awk -v ppid="$minimal_enrich_shell" '$2 == ppid && /claude/ {print $1; exit}')
+
+cat >"$TEST_STATE_DIR/claude-${minimal_enrich_child}.json" <<MEOF
+{
+  "session_id": "ses_minimal_enrich",
+  "tool": "claude",
+  "ppid": $minimal_enrich_child,
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+MEOF
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+SAVED="$HOME/.tmux/resurrect/assistant-sessions.json"
+minimal_entry=$(jq '.sessions[] | select(.pane | contains("test-enrich-minimal"))' "$SAVED")
+
+# session_id must still be present
+minimal_sid=$(echo "$minimal_entry" | jq -r '.session_id')
+assert_eq "Backward compat: session_id present" "ses_minimal_enrich" "$minimal_sid"
+
+# Should not crash with missing model/env — model should be empty string
+minimal_model=$(echo "$minimal_entry" | jq -r '.model')
+if [ -n "$minimal_model" ] || [ "$minimal_model" = "" ]; then
+	pass "Backward compat: no crash when model absent from state file"
+else
+	fail "Backward compat: unexpected model value '$minimal_model'"
+fi
+
+rm -f "$TEST_STATE_DIR/claude-${minimal_enrich_child}.json"
+kill_pane_children test-enrich-minimal true
+
+# --- Test 9d: model fallback from --model in CLI args ---
+
+echo ""
+echo "=== Test 9d: model fallback from CLI args ==="
+echo ""
+
+tmux new-session -d -s test-model-fallback -c /tmp
+tmux send-keys -t test-model-fallback "claude --model sonnet --resume ses_model_fb" Enter
+model_fb_shell=$(tmux display-message -t test-model-fallback -p '#{pane_pid}')
+wait_for_child "$model_fb_shell" "claude" 10 >/dev/null || echo "WARN"
+model_fb_child=$(ps -eo pid=,ppid=,args= | awk -v ppid="$model_fb_shell" '$2 == ppid && /claude/ {print $1; exit}')
+
+# State file WITHOUT model field (simulating old hook or missing field)
+cat >"$TEST_STATE_DIR/claude-${model_fb_child}.json" <<FBEOF
+{
+  "session_id": "ses_model_fb",
+  "tool": "claude",
+  "ppid": $model_fb_child,
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+FBEOF
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+SAVED="$HOME/.tmux/resurrect/assistant-sessions.json"
+fb_entry=$(jq '.sessions[] | select(.pane | contains("test-model-fallback"))' "$SAVED")
+fb_model=$(echo "$fb_entry" | jq -r '.model // empty')
+assert_eq "Model fallback: extracted from --model in CLI args" "sonnet" "$fb_model"
+
+rm -f "$TEST_STATE_DIR/claude-${model_fb_child}.json"
+kill_pane_children test-model-fallback true
+
+# --- Test 10: restore uses enriched fields ---
+
+suite "restore_enriched"
+echo ""
+echo "=== Test 10: restore uses enriched fields ==="
+echo ""
+
+# Ensure a clean test pane
+tmux new-session -d -s test-restore-enrich -c /tmp 2>/dev/null || true
+sleep 0.5
+
+# Create enriched sidecar JSON with cli_args
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RENRICH'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {
+      "pane": "test-restore-enrich:0.0",
+      "tool": "claude",
+      "session_id": "ses_restore_flags",
+      "cwd": "/tmp",
+      "pid": "99999",
+      "model": "claude-opus-4-6",
+      "cli_args": "--dangerously-skip-permissions --model claude-opus-4-6",
+      "env": {"tmux_pane": "%5", "shell": "/bin/bash", "ANTHROPIC_BASE_URL": "https://proxy.internal"}
+    }
+  ]
+}
+RENRICH
+
+RESTORE_LOG="$HOME/.tmux/resurrect/assistant-restore.log"
+>"$RESTORE_LOG"
+just restore 2>&1
+sleep 5
+
+restore_enrich_log=$(cat "$RESTORE_LOG")
+
+# The restore command should include the saved CLI flags
+assert_contains "Restore includes --dangerously-skip-permissions" "$restore_enrich_log" "--dangerously-skip-permissions"
+assert_contains "Restore includes --model" "$restore_enrich_log" "--model claude-opus-4-6"
+
+kill_pane_children test-restore-enrich true
+
+# --- Test 10b: restore with env vars ---
+
+echo ""
+echo "=== Test 10b: restore with env vars ==="
+echo ""
+
+tmux new-session -d -s test-restore-env -c /tmp 2>/dev/null || true
+sleep 0.5
+
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RENVEOF'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {
+      "pane": "test-restore-env:0.0",
+      "tool": "claude",
+      "session_id": "ses_restore_env",
+      "cwd": "/tmp",
+      "pid": "99999",
+      "cli_args": "",
+      "env": {"tmux_pane": "%5", "shell": "/bin/bash", "ANTHROPIC_BASE_URL": "https://proxy.internal"}
+    }
+  ]
+}
+RENVEOF
+
+# Set the capture-env option so restore knows ANTHROPIC_BASE_URL is user-configured
+tmux set-option -g @assistant-resurrect-capture-env 'ANTHROPIC_BASE_URL' 2>/dev/null || true
+
+>"$RESTORE_LOG"
+just restore 2>&1
+sleep 5
+
+restore_env_log=$(cat "$RESTORE_LOG")
+assert_contains "Restore includes ANTHROPIC_BASE_URL env prefix" "$restore_env_log" "ANTHROPIC_BASE_URL="
+
+tmux set-option -gu @assistant-resurrect-capture-env 2>/dev/null || true
+kill_pane_children test-restore-env true
+
+# --- Test 10c: Backward compat — restore with old-format sidecar JSON ---
+
+echo ""
+echo "=== Test 10c: restore backward compat — no enriched fields ==="
+echo ""
+
+tmux new-session -d -s test-restore-compat -c /tmp 2>/dev/null || true
+sleep 0.5
+
+# Old-format sidecar (no cli_args, no model, no env)
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RCOMPAT'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {
+      "pane": "test-restore-compat:0.0",
+      "tool": "claude",
+      "session_id": "ses_compat_test",
+      "cwd": "/tmp",
+      "pid": "99999"
+    }
+  ]
+}
+RCOMPAT
+
+>"$RESTORE_LOG"
+just restore 2>&1
+sleep 5
+
+compat_log=$(cat "$RESTORE_LOG")
+assert_contains "Backward compat: restore still works" "$compat_log" "ses_compat_test"
+assert_contains "Backward compat: bare resume command" "$compat_log" "restoring claude"
+
+kill_pane_children test-restore-compat true
+
+# --- Test 10d: Restore with empty cli_args ---
+
+echo ""
+echo "=== Test 10d: restore with empty cli_args ==="
+echo ""
+
+tmux new-session -d -s test-restore-empty -c /tmp 2>/dev/null || true
+sleep 0.5
+
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'REMPTY'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {
+      "pane": "test-restore-empty:0.0",
+      "tool": "opencode",
+      "session_id": "ses_empty_cli",
+      "cwd": "/tmp",
+      "pid": "99999",
+      "model": "",
+      "cli_args": "",
+      "env": {}
+    }
+  ]
+}
+REMPTY
+
+>"$RESTORE_LOG"
+just restore 2>&1
+sleep 5
+
+empty_log=$(cat "$RESTORE_LOG")
+assert_contains "Empty cli_args: restore still works" "$empty_log" "ses_empty_cli"
+assert_contains "Empty cli_args: tool identified" "$empty_log" "restoring opencode"
+
+kill_pane_children test-restore-empty true
+
+# --- Test 10e: Restore filters out tmux_pane and shell from env prefix ---
+
+echo ""
+echo "=== Test 10e: restore filters built-in env vars ==="
+echo ""
+
+tmux new-session -d -s test-restore-envfilter -c /tmp 2>/dev/null || true
+sleep 0.5
+
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RENVF'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {
+      "pane": "test-restore-envfilter:0.0",
+      "tool": "claude",
+      "session_id": "ses_envfilter",
+      "cwd": "/tmp",
+      "pid": "99999",
+      "cli_args": "",
+      "env": {"tmux_pane": "%99", "shell": "/bin/zsh", "MY_CUSTOM": "hello"}
+    }
+  ]
+}
+RENVF
+
+# Set the capture-env option so restore knows MY_CUSTOM is a user var
+tmux set-option -g @assistant-resurrect-capture-env 'MY_CUSTOM' 2>/dev/null || true
+
+>"$RESTORE_LOG"
+just restore 2>&1
+sleep 5
+
+envfilter_log=$(cat "$RESTORE_LOG")
+# MY_CUSTOM should be in the env prefix
+assert_contains "Env filter: MY_CUSTOM restored" "$envfilter_log" "MY_CUSTOM="
+
+# tmux_pane and shell should NOT be in the env prefix (they're built-in, not user-configured)
+if echo "$envfilter_log" | grep -q "tmux_pane="; then
+	fail "Env filter: tmux_pane should NOT be in restore command"
+else
+	pass "Env filter: tmux_pane correctly excluded"
+fi
+
+tmux set-option -gu @assistant-resurrect-capture-env 2>/dev/null || true
+kill_pane_children test-restore-envfilter true
 
 # --- Summary ---
 

@@ -157,6 +157,62 @@ get_codex_session() {
 	fi
 }
 
+# --- CLI args extraction ---
+
+# Extract CLI args from a process's full command line, stripping the binary
+# name/path and tool-specific session/resume arguments.
+#
+# Usage: extract_cli_args <tool> <full_args_from_ps>
+# Returns: the remaining flags/args as a single whitespace-normalized string.
+#
+# Per-tool stripping:
+#   claude:   --resume <id>, --resume=<id>
+#   opencode: -s <id>, --session <id>, --session=<id>
+#   codex:    resume <id> (positional subcommand)
+extract_cli_args() {
+	local tool="$1" raw_args="$2"
+
+	# Strip binary name/path: remove first token (which is the binary or /path/to/binary).
+	local args="${raw_args#* }"
+	# If there was no space (bare binary name), args equals raw_args — set to empty
+	if [ "$args" = "$raw_args" ]; then
+		echo ""
+		return
+	fi
+
+	# Node.js processes (claude, codex) may show a second token that is the
+	# script path, e.g. `claude /usr/local/bin/claude --resume ...`.
+	# Strip any leading token that is a path ending in the tool binary name.
+	local first_arg="${args%% *}"
+	case "$first_arg" in
+	*/"$tool")
+		args="${args#"$first_arg"}"
+		args="${args# }"
+		;;
+	esac
+
+	# Strip tool-specific session/resume args.
+	# Patterns use [= ] *  to handle both --flag=val and --flag val forms,
+	# and to tolerate multiple spaces between flag and value.
+	case "$tool" in
+	claude)
+		# --resume <id> or --resume=<id>
+		args=$(echo "$args" | sed -E 's/--resume[= ] *[^ ]*//')
+		;;
+	opencode)
+		# -s <id>, --session <id>, --session=<id>
+		args=$(echo "$args" | sed -E 's/--session[= ] *[^ ]*//; s/-s  *[^ ]*//')
+		;;
+	codex)
+		# resume <id> (positional)
+		args=$(echo "$args" | sed -E 's/resume  *[^ ]*//')
+		;;
+	esac
+
+	# Normalize whitespace: collapse multiple spaces, trim leading/trailing
+	echo "$args" | sed -E 's/  +/ /g; s/^ //; s/ $//'
+}
+
 # --- Main ---
 
 main() {
@@ -292,13 +348,37 @@ emit_session() {
 	esac
 
 	if [ -n "$session_id" ]; then
+		# Extract CLI args (flags without binary name and session/resume args)
+		local cli_args
+		cli_args=$(extract_cli_args "$tool" "$cargs")
+
+		# Read enriched fields from state file (if available)
+		local state_file="" model="" env_json="null"
+		case "$tool" in
+		claude) state_file="$STATE_DIR/claude-${cpid}.json" ;;
+		opencode) state_file="$STATE_DIR/opencode-${cpid}.json" ;;
+		esac
+
+		if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+			model=$(jq -r '.model // empty' "$state_file" 2>/dev/null || true)
+			env_json=$(jq '.env // null' "$state_file" 2>/dev/null || echo "null")
+		fi
+
+		# Fallback: parse --model from CLI args if not in state file
+		if [ -z "$model" ]; then
+			model=$(echo "$cargs" | sed -n 's/.*--model[= ] *\([^ ]*\).*/\1/p')
+		fi
+
 		jq -n \
 			--arg pane "$target" \
 			--arg tool "$tool" \
 			--arg sid "$session_id" \
 			--arg cwd "$cwd" \
 			--arg pid "$cpid" \
-			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid}' >>"$PARTS_FILE"
+			--arg model "$model" \
+			--arg cli_args "$cli_args" \
+			--argjson env "${env_json:-null}" \
+			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid, model: $model, cli_args: $cli_args, env: $env}' >>"$PARTS_FILE"
 		return 0
 	else
 		log "detected $tool in $target (pid $cpid) but no session ID available"

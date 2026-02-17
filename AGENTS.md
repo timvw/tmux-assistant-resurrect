@@ -11,8 +11,8 @@ session IDs and restore them automatically.
 - `tmux-assistant-resurrect.tmux` -- TPM plugin entry point (sets tmux options, installs hooks)
 - `hooks/` -- Native hooks/plugins for each assistant tool (write session IDs to state files)
 - `scripts/lib-detect.sh` -- Shared library: `detect_tool()`, `pane_has_assistant()`, `posix_quote()`
-- `scripts/save-assistant-sessions.sh` -- Resurrect post-save hook (process detection + session IDs)
-- `scripts/restore-assistant-sessions.sh` -- Resurrect post-restore hook (resumes assistants)
+- `scripts/save-assistant-sessions.sh` -- Resurrect post-save hook (process detection + session IDs + enriched fields via `extract_cli_args()`)
+- `scripts/restore-assistant-sessions.sh` -- Resurrect post-restore hook (resumes assistants with CLI flags + env vars)
 - `config/` -- tmux configuration snippet (used by `just install`, not TPM)
 - `docs/design-principles.md` -- Detection approach, session ID extraction, process title behavior
 - `justfile` -- Developer recipes (install, uninstall, status, test); end users use TPM
@@ -51,9 +51,10 @@ shells against known assistant binary names via `detect_tool()` in
 
 Session ID extraction uses tool-native mechanisms (state files, process args,
 JSONL lookup, SQLite database) -- this is infrastructure plumbing, not heuristic
-classification. Both Claude and OpenCode overwrite their process titles, so
-process args are unreliable; state files and database queries are the primary
-extraction methods.
+classification. Both Claude and OpenCode overwrite their process titles, but
+on macOS arm64 (v2.1.44+) process args are still visible via `ps -eo args=`.
+State files and database queries remain the primary extraction methods, with
+process args as a reliable fallback.
 
 ## Key conventions
 
@@ -62,9 +63,11 @@ extraction methods.
 - State files contain the full tool-provided context (merged from hook stdin /
   plugin events) plus plugin metadata (`tool`, `ppid`/`pid`, `timestamp`, `env`).
   The Claude hook merges Claude's entire SessionStart JSON; the OpenCode plugin
-  captures the full Session object. The save/restore scripts currently only read
-  `session_id` from state files; additional fields (model, source, etc.) are
-  available for future use.
+  captures the full Session object. The save script reads `session_id`, `model`,
+  and `env` from state files and `cli_args` from `ps` process args. The restore
+  script uses `cli_args` to reconstruct the original CLI invocation and restores
+  user-configured env vars (from `@assistant-resurrect-capture-env`) as a command
+  prefix.
 - The `env` object in state files captures `TMUX_PANE` and `SHELL` by default,
   plus user-configured vars via `@assistant-resurrect-capture-env` tmux option
   (space-separated list, set in tmux.conf)
@@ -79,6 +82,16 @@ extraction methods.
   via `send-keys` (safe for bash, zsh, fish, and other POSIX-ish shells)
 - Hook command paths use single quotes (`bash '${CURRENT_DIR}/hooks/...'`);
   this breaks if the install path contains a single quote (unlikely with TPM)
+- The sidecar JSON (`assistant-sessions.json`) entries include enriched fields:
+  `model` (from state file or `--model` in args), `cli_args` (from `ps` args
+  with binary name and session/resume args stripped), `env` (from state file).
+  All are optional for backward compatibility.
+- `extract_cli_args()` in `save-assistant-sessions.sh` strips per-tool session
+  args: Claude `--resume[= ]<id>`, OpenCode `--session[= ]<id>` and `-s <id>`,
+  Codex `resume <id>`. Returns normalized whitespace-trimmed string.
+- The restore script only restores env vars listed in
+  `@assistant-resurrect-capture-env` (not `tmux_pane` or `shell`), prepended
+  as `VAR='val'` prefix to the resume command
 
 ## Upstream assumptions to verify
 
@@ -87,7 +100,7 @@ changes after an upgrade, check the relevant source to confirm.
 
 | Assumption | Why it matters | Where to verify |
 |-----------|---------------|----------------|
-| **Claude overwrites process title** (`process.title = 'claude'`) | `--resume <id>` is NOT visible in `ps`; state file is the only reliable session ID source | Claude Code source: search for `process.title` |
+| **Claude sets `process.title = 'claude'`** | Node.js sets the process title, but on macOS arm64 (v2.1.44) `ps -eo args=` still shows full args (e.g., `claude --dangerously-skip-permissions`). The save script's `extract_cli_args()` relies on this. If a future version hides args, `cli_args` will be empty and restore falls back to bare `<binary> <resume_arg>`. | Run `ps -eo args=` on a running Claude process; Claude Code source: search for `process.title` |
 | **Claude hook spawns intermediate `sh -c`** | `$PPID` in the hook is NOT Claude's PID; hooks walk the process tree via `find_claude_pid()` (max 5 levels) | Run `ps -eo pid=,ppid=,args=` while a hook is executing |
 | **OpenCode plugins run in-process** | `process.pid` in the plugin IS the opencode binary's PID; state file is keyed by this PID | OpenCode source: search for `await import(` in the plugin loader (approx. `packages/opencode/src/plugin/index.ts` -- path may move) |
 | **OpenCode Go binary overwrites process title** | `-s <id>` is NOT visible in `ps`; plugin state file or SQLite DB are the reliable sources | Run `ps -eo args=` on a running `opencode -s <id>` process |
@@ -108,6 +121,8 @@ These are hard-won lessons. Do not "simplify" them away.
 | **`kill -0 0` succeeds** | Checks current process group, not PID 0. Always validate PIDs are numeric and > 1 before `kill -0` |
 | **npx wrapper chains** | `npx opencode` spawns npm → sh → node → opencode (4+ levels). Use `wait_for_descendant()` (full tree walk) not `wait_for_child()` (direct children only) |
 | **`tmux-resurrect execute_hook()` uses `eval`** | Hook stdout goes to the active pane. Log to stderr only |
+| **`process.title` vs `ps` args** | Claude Code sets `process.title = 'claude'` (Node.js), but `ps -eo args=` still shows full command line on macOS arm64 v2.1.44. This may not hold on Linux or future versions. `extract_cli_args()` degrades gracefully to empty string |
+| **Claude `permission_mode` not in SessionStart hooks** | Claude Code v2.1.44 passes `undefined` for `permission_mode` in `executeSessionStartHooks`. The save script works around this by extracting `--dangerously-skip-permissions` from `ps` args via `extract_cli_args()` |
 
 ## Testing
 

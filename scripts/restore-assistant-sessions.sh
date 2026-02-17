@@ -57,6 +57,8 @@ while read -r entry; do
 	tool=$(echo "$entry" | jq -r '.tool')
 	session_id=$(echo "$entry" | jq -r '.session_id')
 	cwd=$(echo "$entry" | jq -r '.cwd')
+	cli_args=$(echo "$entry" | jq -r '.cli_args // empty')
+	env_json=$(echo "$entry" | jq -c '.env // {}')
 
 	# Check if the target pane's session exists
 	tmux_session="${pane%%:*}"
@@ -101,6 +103,20 @@ while read -r entry; do
 		fi
 	fi
 
+	# Build env prefix: only restore user-configured vars from
+	# @assistant-resurrect-capture-env. Exclude built-in vars (tmux_pane, shell)
+	# which would be stale or already present in the shell environment.
+	env_prefix=""
+	if [ -n "$env_json" ] && [ "$env_json" != "null" ] && [ "$env_json" != "{}" ]; then
+		capture_env=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
+		for var in $capture_env; do
+			val=$(echo "$env_json" | jq -r --arg k "$var" '.[$k] // empty')
+			if [ -n "$val" ]; then
+				env_prefix="${env_prefix}${var}=$(posix_quote "$val") "
+			fi
+		done
+	fi
+
 	# Build the resume command for each tool.
 	# Apply posix_quote to session_id defensively — IDs are alphanumeric in
 	# practice, but a corrupt/tampered sidecar JSON could inject shell commands.
@@ -108,13 +124,25 @@ while read -r entry; do
 	resume_cmd=""
 	case "$tool" in
 	claude)
-		resume_cmd="claude --resume ${safe_sid}"
+		if [ -n "$cli_args" ]; then
+			resume_cmd="claude ${cli_args} --resume ${safe_sid}"
+		else
+			resume_cmd="claude --resume ${safe_sid}"
+		fi
 		;;
 	opencode)
-		resume_cmd="opencode -s ${safe_sid}"
+		if [ -n "$cli_args" ]; then
+			resume_cmd="opencode ${cli_args} -s ${safe_sid}"
+		else
+			resume_cmd="opencode -s ${safe_sid}"
+		fi
 		;;
 	codex)
-		resume_cmd="codex resume ${safe_sid}"
+		if [ -n "$cli_args" ]; then
+			resume_cmd="codex ${cli_args} resume ${safe_sid}"
+		else
+			resume_cmd="codex resume ${safe_sid}"
+		fi
 		;;
 	*)
 		log "unknown tool '$tool' for pane $pane, skipping"
@@ -122,7 +150,12 @@ while read -r entry; do
 		;;
 	esac
 
-	log "restoring $tool in $pane (session: $session_id)"
+	# Prepend env vars if present
+	if [ -n "$env_prefix" ]; then
+		resume_cmd="${env_prefix}${resume_cmd}"
+	fi
+
+	log "restoring $tool in $pane (session: $session_id, cmd: $resume_cmd)"
 
 	# Clear the pane before launching: tmux-resurrect may have restored old
 	# pane contents (captured terminal text from the previous session). Without
