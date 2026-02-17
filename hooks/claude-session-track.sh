@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Claude Code SessionStart hook — writes session ID to a trackable file.
-# Receives JSON on stdin with session_id, cwd, etc.
+# Claude Code SessionStart hook — writes session context to a trackable file.
+# Receives JSON on stdin with session_id, cwd, model, source, permission_mode,
+# transcript_path, hook_event_name, and optionally agent_type.
+#
+# The full stdin JSON is merged with our added fields (tool, ppid, timestamp,
+# env) so any new fields Claude adds in future versions are captured
+# automatically without code changes.
 #
 # Install: add to ~/.claude/settings.json under hooks.SessionStart
 
@@ -16,7 +21,6 @@ mkdir -p -m 0700 "$STATE_DIR"
 
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
 
 if [ -z "$SESSION_ID" ]; then
 	exit 0
@@ -24,16 +28,27 @@ fi
 
 CLAUDE_PID=$(find_claude_pid)
 
-# Write session file keyed by the Claude process PID.
-# Use jq to ensure proper JSON escaping of all values.
+# Build env object: always capture TMUX_PANE and SHELL, plus user-configured
+# vars from the tmux option @assistant-resurrect-capture-env (space-separated).
+ENV_JSON=$(jq -n --arg tmux_pane "${TMUX_PANE:-}" --arg shell "${SHELL:-}" \
+	'{tmux_pane: $tmux_pane, shell: $shell}')
+
+CAPTURE_ENV=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
+for var in $CAPTURE_ENV; do
+	# shellcheck disable=SC2086
+	ENV_JSON=$(echo "$ENV_JSON" | jq --arg k "$var" --arg v "${!var:-}" '. + {($k): $v}')
+done
+
+# Merge the full stdin JSON with our added fields + env.
+# This preserves all fields Claude sends (model, source, permission_mode, etc.)
+# and adds tool metadata for the save/restore scripts.
 STATE_FILE="$STATE_DIR/claude-$CLAUDE_PID.json"
-if ! jq -n \
+if ! echo "$INPUT" | jq \
 	--arg tool "claude" \
-	--arg session_id "$SESSION_ID" \
-	--arg cwd "$CWD" \
 	--argjson ppid "$CLAUDE_PID" \
 	--arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-	'{tool: $tool, session_id: $session_id, cwd: $cwd, ppid: $ppid, timestamp: $timestamp}' \
+	--argjson env "$ENV_JSON" \
+	'. + {tool: $tool, ppid: $ppid, timestamp: $timestamp, env: $env}' \
 	>"$STATE_FILE" 2>/dev/null; then
 	echo "tmux-assistant-resurrect: failed to write state file $STATE_FILE (permission denied?)" >&2
 fi

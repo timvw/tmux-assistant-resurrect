@@ -59,6 +59,15 @@ extraction methods.
 
 - All scripts use `set -euo pipefail`
 - State files go to `$TMUX_ASSISTANT_RESURRECT_DIR` (default: `$XDG_RUNTIME_DIR` or `$TMPDIR` + `/tmux-assistant-resurrect`)
+- State files contain the full tool-provided context (merged from hook stdin /
+  plugin events) plus plugin metadata (`tool`, `ppid`/`pid`, `timestamp`, `env`).
+  The Claude hook merges Claude's entire SessionStart JSON; the OpenCode plugin
+  captures the full Session object. The save/restore scripts currently only read
+  `session_id` from state files; additional fields (model, source, etc.) are
+  available for future use.
+- The `env` object in state files captures `TMUX_PANE` and `SHELL` by default,
+  plus user-configured vars via `@assistant-resurrect-capture-env` tmux option
+  (space-separated list, set in tmux.conf)
 - Log files go to `~/.tmux/resurrect/assistant-{save,restore}.log` (truncated to 500 lines per run)
 - Process inspection uses `ps -eo pid=,ppid=` (not `pgrep -P` -- unreliable on macOS)
 - Agent detection matches binary names via `case` patterns in `detect_tool()`
