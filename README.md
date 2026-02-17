@@ -2,7 +2,7 @@
 
 > **Disclaimer**: This project was entirely vibecoded (designed and implemented
 > through conversation with AI coding assistants). It has been end-to-end tested
-> in Docker with real CLI binaries (100+ automated tests + full save/kill/restore
+> in Docker with real CLI binaries (170+ automated tests + full save/kill/restore
 > lifecycle smoke test), but has **limited real-world usage** so far. Expect
 > rough edges. Contributions and bug reports welcome.
 
@@ -13,8 +13,8 @@ When your computer shuts down, tmux sessions are lost -- including any running
 [OpenCode](https://github.com/opencode-ai/opencode), or
 [Codex CLI](https://github.com/openai/codex) instances. This project hooks into
 [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) to
-automatically save assistant session IDs and re-launch them with the correct
-`--resume` flags after a restore.
+automatically save assistant session IDs, CLI flags, and environment variables,
+then re-launch them with the exact same configuration after a restore.
 
 ## How it works
 
@@ -29,10 +29,11 @@ SAVE (every 5 min + manual prefix+Ctrl-s)
 RESTORE (on tmux start or manual prefix+Ctrl-r)
   tmux-resurrect restores pane layouts
     -> post-restore hook reads assistant-sessions.json
-    -> sends resume commands to each pane:
-         claude --resume <session-id>
-         opencode -s <session-id>
-         codex resume <session-id>
+    -> reconstructs full CLI invocation with saved flags + env vars
+    -> sends resume commands to each pane, e.g.:
+         ANTHROPIC_BASE_URL='...' claude --dangerously-skip-permissions --resume <id>
+         opencode --verbose -s <session-id>
+         codex --full-auto resume <session-id>
 ```
 
 ## Design
@@ -209,14 +210,20 @@ Example output:
       "tool": "claude",
       "session_id": "01abc...",
       "cwd": "/home/user/src/my-project",
-      "pid": "12345"
+      "pid": "12345",
+      "model": "claude-opus-4-6",
+      "cli_args": "--dangerously-skip-permissions --model claude-opus-4-6",
+      "env": {"tmux_pane": "%1", "shell": "/bin/zsh", "ANTHROPIC_BASE_URL": "https://proxy.internal"}
     },
     {
       "pane": "other-project:0.0",
       "tool": "opencode",
       "session_id": "ses_xyz...",
       "cwd": "/home/user/src/other-project",
-      "pid": "12346"
+      "pid": "12346",
+      "model": "",
+      "cli_args": "",
+      "env": {"tmux_pane": "%2", "shell": "/bin/zsh"}
     }
   ]
 }
@@ -242,14 +249,16 @@ Then press `prefix + Ctrl-r` (the tmux-resurrect restore keybinding).
 
 tmux-resurrect recreates your sessions, windows, and panes. The post-restore
 hook then reads the saved assistant sessions and sends the correct resume
-command to each pane:
+command to each pane, preserving the original CLI flags and environment:
 
-- `claude --resume <session-id>` for Claude
-- `opencode -s <session-id>` for OpenCode
-- `codex resume <session-id>` for Codex
+- `claude --dangerously-skip-permissions --model opus --resume <session-id>`
+- `opencode -s <session-id>`
+- `ANTHROPIC_BASE_URL='...' codex resume <session-id>`
 
-Each assistant should launch in the correct working directory and resume its
-previous conversation.
+If the session was launched with flags like `--dangerously-skip-permissions` or
+`--model`, those flags are captured from `ps` at save time and replayed on
+restore. Environment variables configured via `@assistant-resurrect-capture-env`
+are prepended to the resume command.
 
 #### 6. Verify
 
@@ -263,8 +272,8 @@ You should see lines like:
 
 ```
 [2026-02-15T20:34:31Z] restoring 2 assistant session(s)...
-[2026-02-15T20:34:31Z] restoring claude in my-project:0.0 (session: 01abc...)
-[2026-02-15T20:34:32Z] restoring opencode in other-project:0.0 (session: ses_xyz...)
+[2026-02-15T20:34:31Z] restoring claude in my-project:0.0 (session: 01abc..., cmd: claude --dangerously-skip-permissions --resume '01abc...')
+[2026-02-15T20:34:32Z] restoring opencode in other-project:0.0 (session: ses_xyz..., cmd: opencode -s 'ses_xyz...')
 [2026-02-15T20:34:33Z] restored 2 of 2 assistant session(s)
 ```
 
@@ -308,7 +317,7 @@ IDs while tmux is active. The persistent sidecar JSON
 (`~/.tmux/resurrect/assistant-sessions.json`) is what survives reboots and lives
 in your home directory.
 
-### Environment variable capture
+### Environment variable capture and restoration
 
 By default, the plugin captures `TMUX_PANE` and `SHELL` in each assistant's
 state file. To capture additional environment variables, set a space-separated
@@ -318,11 +327,21 @@ list in `tmux.conf`:
 set -g @assistant-resurrect-capture-env 'VIRTUAL_ENV NODE_ENV CONDA_DEFAULT_ENV'
 ```
 
-Captured variables are stored in the state file's `env` object. State files
-live in a user-only directory (mode 0700).
+Captured variables are stored in the state file's `env` object and propagated
+to `assistant-sessions.json`. On restore, variables listed in
+`@assistant-resurrect-capture-env` are prepended to the resume command:
 
-> **Note:** Avoid capturing secrets (API keys, tokens). State files persist
-> to disk and may outlive the process they were captured from.
+```
+VIRTUAL_ENV='/home/user/.venv' claude --resume <session-id>
+```
+
+Built-in variables (`TMUX_PANE`, `SHELL`) are **not** restored — `TMUX_PANE`
+would be stale after restore, and `SHELL` is already in the environment.
+State files live in a user-only directory (mode 0700).
+
+> **Note:** Avoid capturing secrets (API keys, tokens). State files and the
+> sidecar JSON persist to disk and may outlive the process they were captured
+> from.
 
 ### Continuum save interval
 
@@ -360,9 +379,11 @@ Two hooks configured in `~/.claude/settings.json`:
 - **`SessionEnd`**: Removes the state file when the Claude session exits,
   preventing stale entries.
 
-**Note**: Claude Code overwrites its process title (`process.title = 'claude'`),
-so `--resume <session-id>` is not visible in `ps` output. The state file is the
-only reliable source of session IDs for Claude.
+**Note**: Claude Code sets `process.title = 'claude'`, but on macOS arm64
+(v2.1.44+) `ps -eo args=` still shows full args. The state file remains the
+primary source of session IDs, with process args as a fallback. CLI flags like
+`--dangerously-skip-permissions` are captured from `ps` by the save script's
+`extract_cli_args()` function.
 
 ### OpenCode plugin (`hooks/opencode-session-track.js`)
 
@@ -385,13 +406,21 @@ additional hook is needed.
 Runs after each tmux-resurrect save. Takes a single `ps` snapshot of all
 processes, finds children of each tmux pane's shell, and detects assistants by
 matching binary names. Then extracts session IDs using tool-specific methods
-(state files, process args, JSONL lookup). Writes results to
-`~/.tmux/resurrect/assistant-sessions.json`.
+(state files, process args, JSONL lookup). Also captures:
+
+- **CLI flags** (`cli_args`): extracted from `ps` args with the binary name and
+  session/resume args stripped (e.g., `--dangerously-skip-permissions --model opus`)
+- **Model** (`model`): from state file (preferred) or `--model` in args (fallback)
+- **Environment** (`env`): from state file (captured by hooks/plugins)
+
+Writes everything to `~/.tmux/resurrect/assistant-sessions.json`.
 
 ### Restore hook (`scripts/restore-assistant-sessions.sh`)
 
-Runs after each tmux-resurrect restore. Reads the sidecar JSON and sends the
-appropriate resume command to each pane via `tmux send-keys`.
+Runs after each tmux-resurrect restore. Reads the sidecar JSON and reconstructs
+the full CLI invocation for each assistant: `<env_prefix> <binary> <cli_args>
+<resume_arg>`. Sends the command to each pane via `tmux send-keys`. If enriched
+fields are missing (old-format JSON), falls back to bare resume commands.
 
 ## Limitations
 
@@ -401,9 +430,11 @@ appropriate resume command to each pane via `tmux send-keys`.
   IDs exist yet. Assistants must complete at least one session (triggering the
   hooks) before their IDs can be saved. For Codex and OpenCode with `-s`, this
   is not an issue since session IDs are visible in process args.
-- **Claude process title**: Claude Code overwrites its process title, so
-  `--resume` flags are not visible in `ps`. The `SessionStart` hook is the only
-  reliable source of Claude session IDs.
+- **Claude process title**: Claude Code sets `process.title = 'claude'`, but on
+  macOS arm64 (v2.1.44+) `ps -eo args=` still shows full args. CLI flags like
+  `--dangerously-skip-permissions` are captured from `ps` at save time. If a
+  future version hides args, `cli_args` will be empty and restore falls back to
+  bare resume commands.
 - **OpenCode without plugin**: If the OpenCode plugin isn't installed and the
   process was started without `-s`, the session ID cannot be detected.
 - **OpenCode DB fallback (same-cwd ambiguity)**: When the plugin state file is
