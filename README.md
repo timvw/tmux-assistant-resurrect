@@ -8,6 +8,8 @@
 
 Persist and restore AI coding assistant sessions across tmux restarts and reboots.
 
+![Save, kill, and restore — assistant sessions resume automatically](docs/images/demo-save-restore.gif)
+
 When your computer shuts down, tmux sessions are lost -- including any running
 [Claude Code](https://github.com/anthropics/claude-code),
 [OpenCode](https://github.com/opencode-ai/opencode), or
