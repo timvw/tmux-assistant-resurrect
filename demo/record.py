@@ -135,11 +135,27 @@ async def demo_save_restore(session, output_dir: str):
     # --- Start recording ---
     await call_tool(session, "shell_record_start", {"session_id": sid, "fps": 8})
 
-    # Step 1: Show running sessions
+    # Step 1: Show running sessions and active panes/windows
     await call_tool(
         session,
         "shell_send",
         {"session_id": sid, "input": "tmux list-sessions\r", "delay_ms": 1500},
+    )
+    await wait(1.5)
+    await call_tool(
+        session,
+        "shell_send",
+        {"session_id": sid, "input": "tmux list-windows -a\r", "delay_ms": 1000},
+    )
+    await wait(1)
+    await call_tool(
+        session,
+        "shell_send",
+        {
+            "session_id": sid,
+            "input": "tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} active=#{pane_active} cmd=#{pane_current_command}'\r",
+            "delay_ms": 1000,
+        },
     )
     await wait(1.5)
 
@@ -231,13 +247,48 @@ async def demo_save_restore(session, output_dir: str):
     # to send resume commands + agents to actually start.
     await wait(15)
 
-    # Step 8: Show sessions are restored
+    # Step 8: Remove bootstrap session
+    await call_tool(
+        session,
+        "shell_send",
+        {
+            "session_id": sid,
+            "input": "tmux kill-session -t main 2>/dev/null\r",
+            "delay_ms": 500,
+        },
+    )
+    await wait(0.5)
+
+    await call_tool(
+        session,
+        "shell_send",
+        {"session_id": sid, "input": "clear\r", "delay_ms": 500},
+    )
+    await wait(0.5)
+
+    # Step 9: Show sessions are restored and active panes/windows
     await call_tool(
         session,
         "shell_send",
         {"session_id": sid, "input": "tmux list-sessions\r", "delay_ms": 1500},
     )
     await wait(2)
+    await call_tool(
+        session,
+        "shell_send",
+        {"session_id": sid, "input": "tmux list-windows -a\r", "delay_ms": 1000},
+    )
+    await wait(1)
+    await call_tool(
+        session,
+        "shell_send",
+        {
+            "session_id": sid,
+            "input": "tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} active=#{pane_active} cmd=#{pane_current_command}'\r",
+            "delay_ms": 1000,
+        },
+    )
+    await wait(1.5)
 
     # Step 9: Show restore log — proves which assistants were resumed
     await call_tool(
