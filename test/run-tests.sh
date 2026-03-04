@@ -985,8 +985,60 @@ assert_eq "OpenCode DB fallback finds session by cwd" "ses_db_fallback_test" "$(
 assert_eq "OpenCode DB fallback picks most recent by time_updated" "ses_db_fallback_test" "$(get_opencode_session 99999 "opencode" "/tmp/oc-project")"
 assert_eq "OpenCode DB fallback returns empty for unknown cwd" "" "$(get_opencode_session 99999 "opencode" "/tmp/unknown-dir")"
 assert_eq "OpenCode DB other dir returns correct session" "ses_db_other_dir" "$(get_opencode_session 99999 "opencode" "/tmp/other-dir")"
+assert_eq "OpenCode DB fallback can be disabled" "" "$(get_opencode_session 99999 "opencode" "/tmp/oc-project" 0)"
 export HOME="$REAL_HOME"
 rm -rf "$OC_DB_DIR"
+
+# --- OpenCode: wrapper PID should not lock in DB fallback when disabled ---
+# Simulates pass 1/2 behavior in main(): first try PID-specific sources only,
+# then allow DB fallback if nothing matched.
+UNIT_STATE_DIR=$(mktemp -d)
+STATE_DIR="$UNIT_STATE_DIR"
+PARTS_FILE=$(mktemp)
+
+cat >"$UNIT_STATE_DIR/opencode-22222.json" <<WSEOF
+{"tool":"opencode","session_id":"ses_state_specific","pid":22222,"timestamp":"2026-01-01T00:00:00Z"}
+WSEOF
+
+WRAP_HOME=$(mktemp -d)
+WRAP_DB_DIR="$WRAP_HOME/.local/share/opencode"
+mkdir -p "$WRAP_DB_DIR"
+python3 -c "
+import sqlite3
+conn = sqlite3.connect('$WRAP_DB_DIR/opencode.db')
+conn.execute('''CREATE TABLE session (
+    id TEXT PRIMARY KEY,
+    slug TEXT,
+    project_id TEXT,
+    directory TEXT,
+    title TEXT,
+    version TEXT,
+    time_created INTEGER,
+    time_updated INTEGER
+)''')
+conn.execute('''INSERT INTO session (id, slug, project_id, directory, title, version, time_created, time_updated)
+    VALUES ('ses_db_wrong', 'wrong', 'global', '/tmp/wrapper-case', 'wrong winner', '1.2.5', 1000000, 999999999999)''')
+conn.commit()
+conn.close()
+"
+
+REAL_HOME="$HOME"
+export HOME="$WRAP_HOME"
+
+# Wrapper PID (no state file): should NOT emit when DB fallback is disabled.
+emit_session "wrapper-test:0.0" "opencode" "11111" "/usr/local/bin/bash -c /usr/local/bin/opencode" "/tmp/wrapper-case" 0 0 || true
+# Child PID (has state file): should emit the state-file session ID.
+emit_session "wrapper-test:0.0" "opencode" "22222" "/usr/local/bin/opencode" "/tmp/wrapper-case" 0 1 || true
+
+wrap_sessions=$(jq -s '.' "$PARTS_FILE")
+wrap_count=$(echo "$wrap_sessions" | jq 'length')
+wrap_sid=$(echo "$wrap_sessions" | jq -r '.[0].session_id // empty')
+assert_eq "Wrapper pass: only one OpenCode entry emitted" "1" "$wrap_count"
+assert_eq "Wrapper pass: state-file session beats DB fallback" "ses_state_specific" "$wrap_sid"
+
+export HOME="$REAL_HOME"
+rm -rf "$UNIT_STATE_DIR" "$WRAP_HOME"
+rm -f "$PARTS_FILE"
 
 # --- Test 5c3: Claude state file takes priority over --resume arg ---
 #

@@ -70,6 +70,7 @@ get_opencode_session() {
 	local child_pid="$1"
 	local args="$2"
 	local cwd="${3:-}"
+	local allow_db_fallback="${4:-1}"
 
 	# Method 1: -s flag in process args (fastest)
 	local sid
@@ -107,7 +108,7 @@ get_opencode_session() {
 	# both panes get the most recently updated session ID — one of them will be
 	# wrong. To avoid this, launch with explicit session IDs: opencode -s <id>.
 	local db_file="${HOME}/.local/share/opencode/opencode.db"
-	if [ -n "$cwd" ] && [ -f "$db_file" ] && command -v python3 >/dev/null 2>&1; then
+	if [ "$allow_db_fallback" = "1" ] && [ -n "$cwd" ] && [ -f "$db_file" ] && command -v python3 >/dev/null 2>&1; then
 		sid=$(python3 -c "
 import sqlite3, sys
 try:
@@ -233,33 +234,49 @@ main() {
 		while IFS='|' read -r target shell_pid cwd; do
 			>"$FOUND_FLAG"
 
-			# Check the pane PID itself (handles exec-replaced shells, e.g. exec claude)
-			pane_args=$(echo "$PS_SNAPSHOT" | awk -v pid="$shell_pid" '$1 == pid {print substr($0, index($0,$3)); exit}')
-			pane_tool=$(detect_tool "$pane_args")
-			if [ -n "$pane_tool" ]; then
-				if emit_session "$target" "$pane_tool" "$shell_pid" "$pane_args" "$cwd"; then
-					echo 1 >"$FOUND_FLAG"
+			# Two-pass resolution for OpenCode:
+			# pass 1: disable DB fallback and prefer PID-specific sources (-s/--session/state file)
+			# pass 2: allow DB fallback only if pass 1 found nothing
+			for pass in 1 2; do
+				[ -s "$FOUND_FLAG" ] && break
+
+				allow_opencode_db="1"
+				log_missing="1"
+				if [ "$pass" -eq 1 ]; then
+					allow_opencode_db="0"
+					log_missing="0"
 				fi
-			fi
 
-			# Walk the entire process tree under the pane shell to find assistants.
-			# This handles wrappers like npx, env, direnv exec, bash -lc, etc.
-			# We collect all descendant PIDs, then check each for an assistant match.
-			# NOTE: single-pass awk assumes ps output is PID-ascending (parents before
-			# children). See lib-detect.sh comment for rationale and limitations.
-			if [ ! -s "$FOUND_FLAG" ]; then
-				echo "$PS_SNAPSHOT" | awk -v root="$shell_pid" '
-					BEGIN { pids[root]=1 }
-					{ if ($2 in pids) { pids[$1]=1; print $1, $2, substr($0, index($0,$3)) } }
-				' |
-					while read -r cpid _ppid cargs; do
-						tool=$(detect_tool "$cargs")
-						[ -z "$tool" ] && continue
+				# Check the pane PID itself (handles exec-replaced shells, e.g. exec claude)
+				pane_args=$(echo "$PS_SNAPSHOT" | awk -v pid="$shell_pid" '$1 == pid {print substr($0, index($0,$3)); exit}')
+				pane_tool=$(detect_tool "$pane_args")
+				if [ -n "$pane_tool" ]; then
+					if emit_session "$target" "$pane_tool" "$shell_pid" "$pane_args" "$cwd" "$allow_opencode_db" "$log_missing"; then
+						echo 1 >"$FOUND_FLAG"
+					fi
+				fi
 
-						emit_session "$target" "$tool" "$cpid" "$cargs" "$cwd" || true
-						break # Only match the first assistant per pane
-					done
-			fi
+				# Walk the entire process tree under the pane shell to find assistants.
+				# This handles wrappers like npx, env, direnv exec, bash -lc, etc.
+				# We collect all descendant PIDs, then check each for an assistant match.
+				# NOTE: single-pass awk assumes ps output is PID-ascending (parents before
+				# children). See lib-detect.sh comment for rationale and limitations.
+				if [ ! -s "$FOUND_FLAG" ]; then
+					echo "$PS_SNAPSHOT" | awk -v root="$shell_pid" '
+						BEGIN { pids[root]=1 }
+						{ if ($2 in pids) { pids[$1]=1; print $1, $2, substr($0, index($0,$3)) } }
+					' |
+						while read -r cpid _ppid cargs; do
+							tool=$(detect_tool "$cargs")
+							[ -z "$tool" ] && continue
+
+							if emit_session "$target" "$tool" "$cpid" "$cargs" "$cwd" "$allow_opencode_db" "$log_missing"; then
+								echo 1 >"$FOUND_FLAG"
+								break
+							fi
+						done
+				fi
+			done
 		done
 
 	# Assemble final JSON
@@ -340,10 +357,12 @@ strip_assistant_pane_contents() {
 # Internal helper — called from main(). Requires PARTS_FILE to be set.
 emit_session() {
 	local target="$1" tool="$2" cpid="$3" cargs="$4" cwd="$5"
+	local allow_opencode_db="${6:-1}"
+	local log_missing="${7:-1}"
 	local session_id=""
 	case "$tool" in
 	claude) session_id=$(get_claude_session "$cpid" "$cargs") ;;
-	opencode) session_id=$(get_opencode_session "$cpid" "$cargs" "$cwd") ;;
+	opencode) session_id=$(get_opencode_session "$cpid" "$cargs" "$cwd" "$allow_opencode_db") ;;
 	codex) session_id=$(get_codex_session "$cpid" "$cargs") ;;
 	esac
 
@@ -381,7 +400,9 @@ emit_session() {
 			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid, model: $model, cli_args: $cli_args, env: $env}' >>"$PARTS_FILE"
 		return 0
 	else
-		log "detected $tool in $target (pid $cpid) but no session ID available"
+		if [ "$log_missing" = "1" ]; then
+			log "detected $tool in $target (pid $cpid) but no session ID available"
+		fi
 		return 1
 	fi
 }
