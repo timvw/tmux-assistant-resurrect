@@ -35,6 +35,8 @@ log() {
 	echo "$msg" >>"$LOG_FILE"
 }
 
+USED_CODEX_SESSION_IDS=""
+
 # --- Session ID extraction ---
 
 get_claude_session() {
@@ -134,6 +136,7 @@ except Exception:
 get_codex_session() {
 	local child_pid="$1"
 	local args="$2"
+	local cwd="${3:-}"
 
 	# Method 1: session-tags.jsonl (written by Codex at runtime)
 	local tags_file="${HOME}/.codex/session-tags.jsonl"
@@ -156,6 +159,103 @@ get_codex_session() {
 		echo "$sid"
 		return
 	fi
+
+	# Method 3: Codex rollout session files (newer Codex versions).
+	# Newer releases persist session metadata under ~/.codex/sessions/*/*.jsonl
+	# and include a session_meta record with both id and cwd.
+	# We rank candidates by:
+	# - matching cwd
+	# - preferring session IDs not already assigned during this save
+	# - preferring sessions created before the current process start time
+	# - preferring sessions closest to the current process start time
+	# - preferring recently modified rollout files
+	local sessions_root="${HOME}/.codex/sessions"
+	if [ -n "$cwd" ] && [ -d "$sessions_root" ] && command -v python3 >/dev/null 2>&1; then
+		local etimes
+		etimes=$(ps -o etimes= -p "$child_pid" 2>/dev/null | tr -d ' ' || true)
+		sid=$(USED_CODEX_SESSION_IDS="$USED_CODEX_SESSION_IDS" python3 - "$sessions_root" "$cwd" "$etimes" <<'PY'
+import datetime, json, os, sys, time
+
+sessions_root = sys.argv[1]
+cwd = sys.argv[2]
+etimes_raw = sys.argv[3].strip()
+used = {sid for sid in os.environ.get("USED_CODEX_SESSION_IDS", "").split("\t") if sid}
+
+process_start = None
+if etimes_raw.isdigit():
+    process_start = time.time() - int(etimes_raw)
+
+def parse_ts(value):
+    if not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+candidates = []
+for root, _, files in os.walk(sessions_root):
+    for name in files:
+        if not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(root, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                first = f.readline()
+            if not first:
+                continue
+            record = json.loads(first)
+            if record.get("type") != "session_meta":
+                continue
+            payload = record.get("payload") or {}
+            if payload.get("cwd") != cwd:
+                continue
+            sid = payload.get("id")
+            if not sid:
+                continue
+            candidates.append((sid, parse_ts(payload.get("timestamp")), os.path.getmtime(path)))
+        except Exception:
+            continue
+
+if not candidates:
+    sys.exit(0)
+
+def score(item):
+    sid, session_start, mtime = item
+    reused = sid in used
+    if process_start is None or session_start is None:
+        prior = 0
+        distance = float("inf")
+    else:
+        prior = 1 if session_start <= process_start + 120 else 0
+        distance = abs(process_start - session_start)
+    return (
+        0 if reused else 1,
+        prior,
+        -distance,
+        mtime,
+    )
+
+best = max(candidates, key=score)
+print(best[0])
+PY
+)
+		if [ -n "$sid" ]; then
+			echo "$sid"
+			return
+		fi
+	fi
+}
+
+register_codex_session_id() {
+	local sid="$1"
+	[ -z "$sid" ] && return
+	case "$USED_CODEX_SESSION_IDS" in
+	*"$sid"*) ;;
+	*)
+		USED_CODEX_SESSION_IDS="${USED_CODEX_SESSION_IDS}"$'\t'"$sid"
+		;;
+	esac
 }
 
 # --- CLI args extraction ---
@@ -230,8 +330,7 @@ main() {
 	# (like \x1f) to octal escapes in -F output, so we use a printable delimiter.
 	# Limitation: directory names containing | will break parsing. While | is a
 	# valid path character on Linux and macOS, it is extremely rare in practice.
-	tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}" |
-		while IFS='|' read -r target shell_pid cwd; do
+	while IFS='|' read -r target shell_pid cwd; do
 			>"$FOUND_FLAG"
 
 			# Two-pass resolution for OpenCode:
@@ -262,22 +361,23 @@ main() {
 				# NOTE: single-pass awk assumes ps output is PID-ascending (parents before
 				# children). See lib-detect.sh comment for rationale and limitations.
 				if [ ! -s "$FOUND_FLAG" ]; then
-					echo "$PS_SNAPSHOT" | awk -v root="$shell_pid" '
-						BEGIN { pids[root]=1 }
-						{ if ($2 in pids) { pids[$1]=1; print $1, $2, substr($0, index($0,$3)) } }
-					' |
-						while read -r cpid _ppid cargs; do
-							tool=$(detect_tool "$cargs")
-							[ -z "$tool" ] && continue
+					while read -r cpid _ppid cargs; do
+						tool=$(detect_tool "$cargs")
+						[ -z "$tool" ] && continue
 
-							if emit_session "$target" "$tool" "$cpid" "$cargs" "$cwd" "$allow_opencode_db" "$log_missing"; then
-								echo 1 >"$FOUND_FLAG"
-								break
-							fi
-						done
+						if emit_session "$target" "$tool" "$cpid" "$cargs" "$cwd" "$allow_opencode_db" "$log_missing"; then
+							echo 1 >"$FOUND_FLAG"
+							break
+						fi
+					done < <(
+						echo "$PS_SNAPSHOT" | awk -v root="$shell_pid" '
+							BEGIN { pids[root]=1 }
+							{ if ($2 in pids) { pids[$1]=1; print $1, $2, substr($0, index($0,$3)) } }
+						'
+					)
 				fi
 			done
-		done
+	done < <(tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}")
 
 	# Assemble final JSON
 	local sessions count
@@ -363,7 +463,7 @@ emit_session() {
 	case "$tool" in
 	claude) session_id=$(get_claude_session "$cpid" "$cargs") ;;
 	opencode) session_id=$(get_opencode_session "$cpid" "$cargs" "$cwd" "$allow_opencode_db") ;;
-	codex) session_id=$(get_codex_session "$cpid" "$cargs") ;;
+	codex) session_id=$(get_codex_session "$cpid" "$cargs" "$cwd") ;;
 	esac
 
 	if [ -n "$session_id" ]; then
@@ -398,6 +498,9 @@ emit_session() {
 			--arg cli_args "$cli_args" \
 			--argjson env "${env_json:-null}" \
 			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid, model: $model, cli_args: $cli_args, env: $env}' >>"$PARTS_FILE"
+		if [ "$tool" = "codex" ]; then
+			register_codex_session_id "$session_id"
+		fi
 		return 0
 	else
 		if [ "$log_missing" = "1" ]; then
