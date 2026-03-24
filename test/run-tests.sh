@@ -430,6 +430,11 @@ assert_contains "Restore sent claude --resume" "$restore_log_content" "ses_claud
 assert_contains "Restore sent opencode -s" "$restore_log_content" "ses_opencode_test_456"
 assert_contains "Restore sent codex resume" "$restore_log_content" "ses_codex_test_789"
 
+# Verify restore uses 'command' prefix to bypass shell aliases
+assert_contains "Restore uses 'command claude' prefix" "$restore_log_content" "command claude"
+assert_contains "Restore uses 'command opencode' prefix" "$restore_log_content" "command opencode"
+assert_contains "Restore uses 'command codex' prefix" "$restore_log_content" "command codex"
+
 # --- Test 3b: Restore skips panes with already-running assistants ---
 
 echo ""
@@ -941,6 +946,60 @@ assert_eq "Codex resume extraction" "ses_codex_789" "$(get_codex_session 99999 "
 assert_eq "Codex resume with path" "ses_codex_789" "$(get_codex_session 99999 "/usr/bin/codex resume ses_codex_789")"
 assert_eq "Codex bare (no resume)" "" "$(get_codex_session 99999 "codex")"
 
+# --- Codex: rollout session files (Method 3) ---
+# Newer Codex versions write session metadata to ~/.codex/sessions/*/*.jsonl
+# instead of session-tags.jsonl. Test that get_codex_session can find them.
+
+ROLLOUT_TEST_DIR=$(mktemp -d)
+mkdir -p "$ROLLOUT_TEST_DIR/.codex/sessions/2026/03/24"
+
+# Create a rollout file matching cwd=/tmp/test-project
+cat >"$ROLLOUT_TEST_DIR/.codex/sessions/2026/03/24/rollout-2026-03-24T10-00-00-ses_rollout_aaa.jsonl" <<'ROLLOUT'
+{"timestamp":"2026-03-24T10:00:00.000Z","type":"session_meta","payload":{"id":"ses_rollout_aaa","timestamp":"2026-03-24T10:00:00.000Z","cwd":"/tmp/test-project","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+ROLLOUT
+
+# Override HOME so get_codex_session looks in our test dir
+ORIG_HOME="$HOME"
+HOME="$ROLLOUT_TEST_DIR"
+
+# Should find session by cwd match (use $$ as a live PID so ps -o etimes= works)
+rollout_sid=$(get_codex_session $$ "codex" "/tmp/test-project")
+assert_eq "Codex rollout session file lookup by cwd" "ses_rollout_aaa" "$rollout_sid"
+
+# Should NOT match a different cwd
+rollout_sid_miss=$(get_codex_session $$ "codex" "/tmp/other-project")
+assert_eq "Codex rollout no match for different cwd" "" "$rollout_sid_miss"
+
+# --- Codex rollout: dedup across panes (USED_CODEX_SESSION_IDS) ---
+# When two panes share the same cwd, the second should get a different session.
+
+# Add a second rollout file for the same cwd
+cat >"$ROLLOUT_TEST_DIR/.codex/sessions/2026/03/24/rollout-2026-03-24T10-01-00-ses_rollout_bbb.jsonl" <<'ROLLOUT'
+{"timestamp":"2026-03-24T10:01:00.000Z","type":"session_meta","payload":{"id":"ses_rollout_bbb","timestamp":"2026-03-24T10:01:00.000Z","cwd":"/tmp/test-project","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+ROLLOUT
+
+# First call picks one session
+USED_CODEX_SESSION_IDS=""
+dedup_first=$(get_codex_session $$ "codex" "/tmp/test-project")
+
+# Register it (simulating what emit_session does)
+if type register_codex_session_id >/dev/null 2>&1; then
+	register_codex_session_id "$dedup_first"
+fi
+
+# Second call should pick the OTHER session
+dedup_second=$(get_codex_session $$ "codex" "/tmp/test-project")
+
+# They must both be non-empty and different
+if [ -n "$dedup_first" ] && [ -n "$dedup_second" ] && [ "$dedup_first" != "$dedup_second" ]; then
+	pass "Codex rollout dedup: two panes same cwd get distinct sessions"
+else
+	fail "Codex rollout dedup: expected distinct sessions, got '$dedup_first' and '$dedup_second'"
+fi
+
+HOME="$ORIG_HOME"
+rm -rf "$ROLLOUT_TEST_DIR"
+
 # --- OpenCode: -s and --session arg extraction ---
 assert_eq "OpenCode -s extraction" "ses_oc_456" "$(get_opencode_session 99999 "opencode -s ses_oc_456" "/tmp")"
 assert_eq "OpenCode --session extraction" "ses_oc_789" "$(get_opencode_session 99999 "opencode --session ses_oc_789" "/tmp")"
@@ -1100,6 +1159,95 @@ codex_resume_sid=$(jq -r '.sessions[] | select(.pane | contains("test-codex-resu
 assert_eq "Codex resume arg fallback extracts session ID" "ses_codex_from_args" "$codex_resume_sid"
 
 kill_pane_children test-codex-resume true
+
+# --- Test 5c4b: Codex rollout session files (e2e) ---
+#
+# When session-tags.jsonl is absent but rollout files exist under
+# ~/.codex/sessions/, the save script should extract the session ID
+# from the rollout file matching the pane's cwd.
+
+echo ""
+echo "=== Test 5c4b: Codex rollout session file (e2e) ==="
+echo ""
+
+ROLLOUT_CWD="/tmp/test-codex-rollout"
+mkdir -p "$ROLLOUT_CWD"
+
+tmux new-session -d -s test-codex-rollout -c "$ROLLOUT_CWD"
+tmux send-keys -t test-codex-rollout "codex resume ses_codex_rollout_e2e" Enter
+codex_rollout_shell_pid=$(tmux display-message -t test-codex-rollout -p '#{pane_pid}')
+wait_for_child "$codex_rollout_shell_pid" "codex" 10 >/dev/null || echo "WARN: codex child not found for rollout test"
+
+# Remove session-tags.jsonl so Method 1 cannot succeed
+rm -f "$HOME/.codex/session-tags.jsonl"
+
+# Create a rollout file that matches this pane's cwd
+mkdir -p "$HOME/.codex/sessions/2026/03/24"
+cat >"$HOME/.codex/sessions/2026/03/24/rollout-test-codex-rollout.jsonl" <<ROLLOUT
+{"timestamp":"2026-03-24T10:00:00.000Z","type":"session_meta","payload":{"id":"ses_codex_rollout_e2e","timestamp":"2026-03-24T10:00:00.000Z","cwd":"$ROLLOUT_CWD","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+ROLLOUT
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+codex_rollout_sid=$(jq -r '.sessions[] | select(.pane | contains("test-codex-rollout")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+assert_eq "Codex rollout e2e: session ID from rollout file" "ses_codex_rollout_e2e" "$codex_rollout_sid"
+
+# Clean up
+rm -f "$HOME/.codex/sessions/2026/03/24/rollout-test-codex-rollout.jsonl"
+kill_pane_children test-codex-rollout true
+rm -rf "$ROLLOUT_CWD"
+
+# --- Test 5c4c: Codex rollout dedup — two panes same cwd (e2e) ---
+#
+# Two codex panes in the same cwd should get distinct session IDs
+# when two rollout files exist for that cwd.
+
+echo ""
+echo "=== Test 5c4c: Codex rollout dedup — two panes same cwd (e2e) ==="
+echo ""
+
+DEDUP_CWD="/tmp/test-codex-dedup"
+mkdir -p "$DEDUP_CWD"
+
+tmux new-session -d -s test-codex-dedup1 -c "$DEDUP_CWD"
+tmux send-keys -t test-codex-dedup1 "codex resume ses_dedup_pane1" Enter
+tmux new-session -d -s test-codex-dedup2 -c "$DEDUP_CWD"
+tmux send-keys -t test-codex-dedup2 "codex resume ses_dedup_pane2" Enter
+
+dedup1_shell_pid=$(tmux display-message -t test-codex-dedup1 -p '#{pane_pid}')
+dedup2_shell_pid=$(tmux display-message -t test-codex-dedup2 -p '#{pane_pid}')
+wait_for_child "$dedup1_shell_pid" "codex" 10 >/dev/null || echo "WARN: codex child not found for dedup1"
+wait_for_child "$dedup2_shell_pid" "codex" 10 >/dev/null || echo "WARN: codex child not found for dedup2"
+
+# Remove session-tags.jsonl, provide two rollout files for same cwd
+rm -f "$HOME/.codex/session-tags.jsonl"
+mkdir -p "$HOME/.codex/sessions/2026/03/24"
+cat >"$HOME/.codex/sessions/2026/03/24/rollout-test-dedup-aaa.jsonl" <<ROLLOUT
+{"timestamp":"2026-03-24T10:00:00.000Z","type":"session_meta","payload":{"id":"ses_dedup_aaa","timestamp":"2026-03-24T10:00:00.000Z","cwd":"$DEDUP_CWD","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+ROLLOUT
+cat >"$HOME/.codex/sessions/2026/03/24/rollout-test-dedup-bbb.jsonl" <<ROLLOUT
+{"timestamp":"2026-03-24T10:01:00.000Z","type":"session_meta","payload":{"id":"ses_dedup_bbb","timestamp":"2026-03-24T10:01:00.000Z","cwd":"$DEDUP_CWD","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+ROLLOUT
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+dedup_sid1=$(jq -r '.sessions[] | select(.pane | contains("test-codex-dedup1")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+dedup_sid2=$(jq -r '.sessions[] | select(.pane | contains("test-codex-dedup2")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+
+if [ -n "$dedup_sid1" ] && [ -n "$dedup_sid2" ] && [ "$dedup_sid1" != "$dedup_sid2" ]; then
+	pass "Codex rollout dedup e2e: two panes same cwd get distinct sessions ($dedup_sid1 vs $dedup_sid2)"
+else
+	fail "Codex rollout dedup e2e: expected distinct sessions, got '$dedup_sid1' and '$dedup_sid2'"
+fi
+
+# Clean up
+rm -f "$HOME/.codex/sessions/2026/03/24/rollout-test-dedup-aaa.jsonl"
+rm -f "$HOME/.codex/sessions/2026/03/24/rollout-test-dedup-bbb.jsonl"
+kill_pane_children test-codex-dedup1 true
+kill_pane_children test-codex-dedup2 true
+rm -rf "$DEDUP_CWD"
 
 # --- Test 5c5: Corrupt/empty state file doesn't crash save ---
 #

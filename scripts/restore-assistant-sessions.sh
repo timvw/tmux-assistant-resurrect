@@ -125,23 +125,23 @@ while read -r entry; do
 	case "$tool" in
 	claude)
 		if [ -n "$cli_args" ]; then
-			resume_cmd="claude ${cli_args} --resume ${safe_sid}"
+			resume_cmd="command claude ${cli_args} --resume ${safe_sid}"
 		else
-			resume_cmd="claude --resume ${safe_sid}"
+			resume_cmd="command claude --resume ${safe_sid}"
 		fi
 		;;
 	opencode)
 		if [ -n "$cli_args" ]; then
-			resume_cmd="opencode ${cli_args} -s ${safe_sid}"
+			resume_cmd="command opencode ${cli_args} -s ${safe_sid}"
 		else
-			resume_cmd="opencode -s ${safe_sid}"
+			resume_cmd="command opencode -s ${safe_sid}"
 		fi
 		;;
 	codex)
 		if [ -n "$cli_args" ]; then
-			resume_cmd="codex ${cli_args} resume ${safe_sid}"
+			resume_cmd="command codex ${cli_args} resume ${safe_sid}"
 		else
-			resume_cmd="codex resume ${safe_sid}"
+			resume_cmd="command codex resume ${safe_sid}"
 		fi
 		;;
 	*)
