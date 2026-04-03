@@ -2023,7 +2023,7 @@ restore_enrich_log=$(cat "$RESTORE_LOG")
 
 # The restore command should include the saved CLI flags
 assert_contains "Restore includes --dangerously-skip-permissions" "$restore_enrich_log" "--dangerously-skip-permissions"
-assert_contains "Restore includes --model" "$restore_enrich_log" "--model claude-opus-4-6"
+assert_contains "Restore includes --model" "$restore_enrich_log" "'--model' 'claude-opus-4-6'"
 
 kill_pane_children test-restore-enrich true
 

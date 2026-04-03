@@ -122,17 +122,15 @@ while read -r entry; do
 	# practice, but a corrupt/tampered sidecar JSON could inject shell commands.
 	safe_sid=$(posix_quote "$session_id")
 
-	# Quote cli_args tokens that contain shell glob characters ([ ] * ?)
-	# so that e.g. model names like "claude-opus-4-6[1m]" are not
-	# interpreted by zsh as glob patterns (causing "no matches found").
+	# Quote cli_args tokens and disable glob expansion while splitting, so
+	# args like "claude-opus-4-6[1m]" are treated literally.
 	safe_cli_args=""
 	if [ -n "$cli_args" ]; then
+		set -f
 		for _arg in $cli_args; do
-			case "$_arg" in
-			*[*?[]*) safe_cli_args="${safe_cli_args} $(posix_quote "$_arg")" ;;
-			*)       safe_cli_args="${safe_cli_args} ${_arg}" ;;
-			esac
+			safe_cli_args="${safe_cli_args} $(posix_quote "$_arg")"
 		done
+		set +f
 	fi
 
 	resume_cmd=""
