@@ -2023,7 +2023,7 @@ restore_enrich_log=$(cat "$RESTORE_LOG")
 
 # The restore command should include the saved CLI flags
 assert_contains "Restore includes --dangerously-skip-permissions" "$restore_enrich_log" "--dangerously-skip-permissions"
-assert_contains "Restore includes --model" "$restore_enrich_log" "--model claude-opus-4-6"
+assert_contains "Restore includes --model" "$restore_enrich_log" "'--model' 'claude-opus-4-6'"
 
 kill_pane_children test-restore-enrich true
 
@@ -2184,6 +2184,48 @@ fi
 
 tmux set-option -gu @assistant-resurrect-capture-env 2>/dev/null || true
 kill_pane_children test-restore-envfilter true
+
+# --- Test 10f: Restore quotes cli_args containing shell-special chars (e.g., []) ---
+
+suite "restore_special_chars"
+echo ""
+echo "=== Test 10f: restore quotes cli_args with brackets (zsh glob safety) ==="
+echo ""
+
+tmux new-session -d -s test-restore-bracket -c /tmp 2>/dev/null || true
+sleep 0.5
+
+# Model name with brackets — this caused "zsh: no matches found" before the fix
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RBRACKET'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {
+      "pane": "test-restore-bracket:0.0",
+      "tool": "claude",
+      "session_id": "ses_bracket_test",
+      "cwd": "/tmp",
+      "pid": "99999",
+      "model": "claude-opus-4-6[1m]",
+      "cli_args": "--allow-dangerously-skip-permissions --model claude-opus-4-6[1m] -r"
+    }
+  ]
+}
+RBRACKET
+
+>"$RESTORE_LOG"
+restore_bracket_exit=0
+just restore 2>&1 || restore_bracket_exit=$?
+sleep 5
+
+bracket_log=$(cat "$RESTORE_LOG")
+assert_eq "Restore doesn't crash with bracket model name" "0" "$restore_bracket_exit"
+assert_contains "Bracket model: session ID present" "$bracket_log" "ses_bracket_test"
+# cli_args should be posix_quote'd so brackets are safe
+assert_contains "Bracket model: model name quoted" "$bracket_log" "'claude-opus-4-6[1m]'"
+assert_contains "Bracket model: uses command claude" "$bracket_log" "command claude"
+
+kill_pane_children test-restore-bracket true
 
 # --- Summary ---
 
