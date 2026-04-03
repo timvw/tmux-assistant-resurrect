@@ -121,25 +121,39 @@ while read -r entry; do
 	# Apply posix_quote to session_id defensively — IDs are alphanumeric in
 	# practice, but a corrupt/tampered sidecar JSON could inject shell commands.
 	safe_sid=$(posix_quote "$session_id")
+
+	# Quote cli_args tokens that contain shell glob characters ([ ] * ?)
+	# so that e.g. model names like "claude-opus-4-6[1m]" are not
+	# interpreted by zsh as glob patterns (causing "no matches found").
+	safe_cli_args=""
+	if [ -n "$cli_args" ]; then
+		for _arg in $cli_args; do
+			case "$_arg" in
+			*[*?[]*) safe_cli_args="${safe_cli_args} $(posix_quote "$_arg")" ;;
+			*)       safe_cli_args="${safe_cli_args} ${_arg}" ;;
+			esac
+		done
+	fi
+
 	resume_cmd=""
 	case "$tool" in
 	claude)
-		if [ -n "$cli_args" ]; then
-			resume_cmd="command claude ${cli_args} --resume ${safe_sid}"
+		if [ -n "$safe_cli_args" ]; then
+			resume_cmd="command claude${safe_cli_args} --resume ${safe_sid}"
 		else
 			resume_cmd="command claude --resume ${safe_sid}"
 		fi
 		;;
 	opencode)
-		if [ -n "$cli_args" ]; then
-			resume_cmd="command opencode ${cli_args} -s ${safe_sid}"
+		if [ -n "$safe_cli_args" ]; then
+			resume_cmd="command opencode${safe_cli_args} -s ${safe_sid}"
 		else
 			resume_cmd="command opencode -s ${safe_sid}"
 		fi
 		;;
 	codex)
-		if [ -n "$cli_args" ]; then
-			resume_cmd="command codex ${cli_args} resume ${safe_sid}"
+		if [ -n "$safe_cli_args" ]; then
+			resume_cmd="command codex${safe_cli_args} resume ${safe_sid}"
 		else
 			resume_cmd="command codex resume ${safe_sid}"
 		fi
