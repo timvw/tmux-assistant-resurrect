@@ -428,3 +428,16 @@ clean:
 test:
     docker build -t tmux-assistant-resurrect-test -f test/Dockerfile .
     docker run --rm tmux-assistant-resurrect-test
+
+# Run save-hook benchmark matrix in Docker (writes CSV + Markdown summary)
+benchmark runs='7' base_repo='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker build -t tmux-assistant-resurrect-test -f "{{repo_dir}}/test/Dockerfile" "{{repo_dir}}"
+    mkdir -p "{{repo_dir}}/test-results"
+    cmd=(bash "{{repo_dir}}/test/bench-matrix.sh" --head-repo "{{repo_dir}}" --runs "{{runs}}" --output-csv "{{repo_dir}}/test-results/benchmark.csv" --output-md "{{repo_dir}}/test-results/benchmark.md")
+    if [ -n "{{base_repo}}" ]; then
+        cmd+=(--base-repo "{{base_repo}}")
+    fi
+    "${cmd[@]}"
+    cat "{{repo_dir}}/test-results/benchmark.md"

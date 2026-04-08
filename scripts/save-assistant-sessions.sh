@@ -173,7 +173,8 @@ get_codex_session() {
 	if [ -n "$cwd" ] && [ -d "$sessions_root" ] && command -v python3 >/dev/null 2>&1; then
 		local etimes
 		etimes=$(ps -o etimes= -p "$child_pid" 2>/dev/null | tr -d ' ' || true)
-		sid=$(USED_CODEX_SESSION_IDS="$USED_CODEX_SESSION_IDS" python3 - "$sessions_root" "$cwd" "$etimes" <<'PY'
+		sid=$(
+			USED_CODEX_SESSION_IDS="$USED_CODEX_SESSION_IDS" python3 - "$sessions_root" "$cwd" "$etimes" <<'PY'
 import datetime, json, os, sys, time
 
 sessions_root = sys.argv[1]
@@ -239,7 +240,7 @@ def score(item):
 best = max(candidates, key=score)
 print(best[0])
 PY
-)
+		)
 		if [ -n "$sid" ]; then
 			echo "$sid"
 			return
@@ -314,85 +315,288 @@ extract_cli_args() {
 	echo "$args" | sed -E 's/  +/ /g; s/^ //; s/ $//'
 }
 
-# --- Main ---
+# Resolve all detected assistant candidates for one pane and emit at most one
+# session entry (first resolvable candidate in BFS order).
+#
+# Preserves legacy OpenCode behavior:
+#   pass 1: PID-specific only (no DB fallback)
+#   pass 2: OpenCode-only with DB fallback enabled
+resolve_pane_candidates() {
+	local pane_target="$1"
+	local pane_cwd="$2"
+	local pane_candidates="$3"
+	local us="$4"
+	local has_assoc_cache="$5"
+	local state_cache_file="$6"
+	local parts_file="$7"
 
-main() {
-	# Build a snapshot of all child processes once (avoid calling ps per pane)
-	PS_SNAPSHOT=$(ps -eo pid=,ppid=,args= 2>/dev/null)
+	local resolved=0 first_tool="" first_pid=""
+	for pass in 1 2; do
+		[ "$resolved" -eq 1 ] && break
+		local allow_opencode_db=0
+		[ "$pass" -eq 2 ] && allow_opencode_db=1
+		while IFS="$us" read -r cand_tool cand_pid cand_args; do
+			[ -z "$cand_tool" ] && continue
+			[ -z "$first_tool" ] && first_tool="$cand_tool" && first_pid="$cand_pid"
 
-	# Temp file for collecting entries (avoids subshell scoping issues)
-	PARTS_FILE=$(mktemp)
+			# Pass 2 is only for OpenCode DB fallback.
+			if [ "$pass" -eq 2 ] && [ "$cand_tool" != "opencode" ]; then
+				continue
+			fi
 
-	FOUND_FLAG=$(mktemp)
-	trap 'rm -f "$PARTS_FILE" "$FOUND_FLAG"' EXIT INT TERM
+			local cached="" cached_sid="" cached_model="" cached_env="null"
+			if [ "$has_assoc_cache" -eq 1 ]; then
+				cached="${STATE_CACHE[$cand_pid]:-}"
+			elif [ -s "$state_cache_file" ]; then
+				cached=$(awk -F"$us" -v p="$cand_pid" '$1 == p {print; exit}' "$state_cache_file")
+			fi
+			if [ -n "$cached" ]; then
+				cached_sid="${cached%%"$us"*}"
+				local _rest="${cached#*"$us"}"
+				cached_model="${_rest%%"$us"*}"
+				cached_env="${_rest#*"$us"}"
+				[ -z "$cached_env" ] && cached_env="null"
+			fi
 
-	# Delimiter: pipe (|) separates fields. tmux 3.4+ converts control characters
-	# (like \x1f) to octal escapes in -F output, so we use a printable delimiter.
-	# Limitation: directory names containing | will break parsing. While | is a
-	# valid path character on Linux and macOS, it is extremely rare in practice.
-	while IFS='|' read -r target shell_pid cwd; do
-			>"$FOUND_FLAG"
+			local session_id=""
+			case "$cand_tool" in
+			claude)
+				session_id="$cached_sid"
+				# Keep legacy fallback behavior when cache misses (state file + --resume).
+				[ -z "$session_id" ] && session_id=$(get_claude_session "$cand_pid" "$cand_args")
+				;;
+			opencode)
+				session_id="$cached_sid"
+				[ -z "$session_id" ] && session_id=$(get_opencode_session "$cand_pid" "$cand_args" "$pane_cwd" "$allow_opencode_db")
+				;;
+			codex) session_id=$(get_codex_session "$cand_pid" "$cand_args" "$pane_cwd") ;;
+			esac
 
-			# Two-pass resolution for OpenCode:
-			# pass 1: disable DB fallback and prefer PID-specific sources (-s/--session/state file)
-			# pass 2: allow DB fallback only if pass 1 found nothing
-			for pass in 1 2; do
-				[ -s "$FOUND_FLAG" ] && break
+			if [ -n "$session_id" ]; then
+				local cli_args model="" env_json="null" state_file=""
+				cli_args=$(extract_cli_args "$cand_tool" "$cand_args")
+				model="$cached_model"
+				env_json="$cached_env"
 
-				allow_opencode_db="1"
-				log_missing="1"
-				if [ "$pass" -eq 1 ]; then
-					allow_opencode_db="0"
-					log_missing="0"
-				fi
-
-				# Check the pane PID itself (handles exec-replaced shells, e.g. exec claude)
-				pane_args=$(echo "$PS_SNAPSHOT" | awk -v pid="$shell_pid" '$1 == pid {print substr($0, index($0,$3)); exit}')
-				pane_tool=$(detect_tool "$pane_args")
-				if [ -n "$pane_tool" ]; then
-					if emit_session "$target" "$pane_tool" "$shell_pid" "$pane_args" "$cwd" "$allow_opencode_db" "$log_missing"; then
-						echo 1 >"$FOUND_FLAG"
+				# If cache wasn't available, fall back to direct state-file enrichment.
+				case "$cand_tool" in
+				claude) state_file="$STATE_DIR/claude-${cand_pid}.json" ;;
+				opencode) state_file="$STATE_DIR/opencode-${cand_pid}.json" ;;
+				esac
+				if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+					[ -z "$model" ] && model=$(jq -r '.model // empty' "$state_file" 2>/dev/null || true)
+					if [ "$env_json" = "null" ]; then
+						env_json=$(jq '.env // null' "$state_file" 2>/dev/null || echo "null")
 					fi
 				fi
 
-				# Walk the entire process tree under the pane shell to find assistants.
-				# This handles wrappers like npx, env, direnv exec, bash -lc, etc.
-				# We collect all descendant PIDs, then check each for an assistant match.
-				# NOTE: single-pass awk assumes ps output is PID-ascending (parents before
-				# children). See lib-detect.sh comment for rationale and limitations.
-				if [ ! -s "$FOUND_FLAG" ]; then
-					while read -r cpid _ppid cargs; do
-						tool=$(detect_tool "$cargs")
-						[ -z "$tool" ] && continue
-
-						if emit_session "$target" "$tool" "$cpid" "$cargs" "$cwd" "$allow_opencode_db" "$log_missing"; then
-							echo 1 >"$FOUND_FLAG"
-							break
-						fi
-					done < <(
-						echo "$PS_SNAPSHOT" | awk -v root="$shell_pid" '
-							BEGIN { pids[root]=1 }
-							{ if ($2 in pids) { pids[$1]=1; print $1, $2, substr($0, index($0,$3)) } }
-						'
-					)
+				# Fallback: parse --model from CLI args if not in state file.
+				if [ -z "$model" ] && [[ "$cand_args" =~ --model[=\ ]([^\ ]+) ]]; then
+					model="${BASH_REMATCH[1]}"
 				fi
-			done
-	done < <(tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}")
 
-	# Assemble final JSON
-	local sessions count
-	if [ -s "$PARTS_FILE" ]; then
-		sessions=$(jq -s '.' "$PARTS_FILE")
+				# Write TSV for batch JSON conversion (replaces per-entry jq -n).
+				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+					"$pane_target" "$cand_tool" "$session_id" "$pane_cwd" "$cand_pid" "$model" "$cli_args" "$env_json" >>"$parts_file"
+
+				[ "$cand_tool" = "codex" ] && register_codex_session_id "$session_id"
+				resolved=1
+				break
+			fi
+		done <<<"$pane_candidates"
+	done
+
+	if [ "$resolved" -eq 0 ] && [ -n "$first_tool" ]; then
+		log "detected $first_tool in $pane_target (pid $first_pid) but no session ID available"
+	fi
+}
+
+# --- Main ---
+
+main() {
+	PS_FILE=$(mktemp)
+	PANE_FILE=$(mktemp)
+	PARTS_FILE=$(mktemp)
+	STATE_CACHE_FILE=$(mktemp)
+	trap 'rm -f "$PS_FILE" "$PANE_FILE" "$PARTS_FILE" "$STATE_CACHE_FILE"' EXIT INT TERM
+
+	# Timestamp for the JSON output envelope
+	local SAVE_TS
+	SAVE_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+	# Snapshot process table and pane info to temp files (each read once)
+	ps -eo pid=,ppid=,args= >"$PS_FILE" 2>/dev/null
+	if [ ! -s "$PS_FILE" ]; then
+		log "ps snapshot failed or empty, skipping save"
+		rm -f "$PS_FILE" "$PANE_FILE" "$PARTS_FILE"
+		return 1
+	fi
+	tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}" >"$PANE_FILE"
+
+	# --- Single awk pass: detect assistant tools across ALL pane process trees ---
+	# Replaces ~200 separate echo|awk pipe invocations with one pass.
+	# Reads pane list + ps snapshot, builds process tree in memory,
+	# BFS-walks descendants for each pane PID, detects tools.
+	# Output (tab-delimited): target\ttool\ttool_pid\ttool_args\tcwd
+	# NOTE: emit all candidates per pane (pane PID + descendants) in BFS order.
+	# The shell pass below preserves legacy two-pass OpenCode behavior:
+	# 1) PID-specific only, then 2) DB fallback.
+	local MATCHES
+	MATCHES=$(awk '
+		NR == FNR {
+			# First file: pane data (pipe-delimited)
+			split($0, p, "|")
+			pane_target[p[2]] = p[1]
+			pane_cwd[p[2]] = p[3]
+			pane_list[++pane_count] = p[2]
+			next
+		}
+		{
+			# Second file: ps output (whitespace-delimited)
+			pid = $1+0; ppid = $2+0
+			line = $0
+			sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]*/, "", line)
+			gsub(/\n/, " ", line)  # Normalize multi-line args (Linux prctl)
+
+			proc_args[pid] = line
+			# First child concatenation produces "" SUBSEP pid; the k > 0 guard
+			# in the BFS loop below filters the resulting empty first element.
+			child_list[ppid] = (ppid in child_list) ? child_list[ppid] SUBSEP pid : "" pid
+
+			# Detect tool in command args
+			# Keep patterns aligned with detect_tool() in lib-detect.sh:
+			# - bare binary at start, or path component (/tool)
+			# - opencode excludes "opencode run " subprocesses
+			if      (line ~ /(^claude( |$)|\/claude( |$))/)                                      proc_tool[pid] = "claude"
+			else if (line ~ /(^opencode( |$)|\/opencode( |$))/ && line !~ /opencode run /)       proc_tool[pid] = "opencode"
+			else if (line ~ /(^codex( |$)|\/codex( |$))/)                                        proc_tool[pid] = "codex"
+		}
+		END {
+			for (i = 1; i <= pane_count; i++) {
+				root = pane_list[i]+0
+				target = pane_target[pane_list[i]]
+				cwd = pane_cwd[pane_list[i]]
+
+				# Check pane PID itself (handles exec-replaced shells)
+				if (root in proc_tool && proc_tool[root] != "") {
+					printf "%s\t%s\t%d\t%s\t%s\n", target, proc_tool[root], root, proc_args[root], cwd
+				}
+
+				# BFS through descendant processes
+				delete queue
+				qs = 1; qe = 0
+				if (root in child_list) {
+					nc = split(child_list[root], kids, SUBSEP)
+					for (j = 1; j <= nc; j++) {
+						k = kids[j]+0
+						if (k > 0) { queue[++qe] = k }
+					}
+				}
+
+				while (qs <= qe) {
+					cur = queue[qs++]+0
+					if (cur in proc_tool && proc_tool[cur] != "") {
+						printf "%s\t%s\t%d\t%s\t%s\n", target, proc_tool[cur], cur, proc_args[cur], cwd
+					}
+					if (cur in child_list) {
+						nc = split(child_list[cur], kids, SUBSEP)
+						for (j = 1; j <= nc; j++) {
+							k = kids[j]+0
+							if (k > 0) { queue[++qe] = k }
+						}
+					}
+				}
+			}
+		}
+	' "$PANE_FILE" "$PS_FILE")
+
+	rm -f "$PS_FILE" "$PANE_FILE"
+
+	# --- Pre-cache all state files in one jq call (requires jq 1.7+) ---
+	# Replaces ~58 per-file jq invocations with one jq + bash associative array.
+	# Uses jq 1.7+ input_filename to map filenames to PIDs.
+	# Keys: PID. Values: session_id<US>model<US>env_json
+	# Delimiter: US (unit separator \x1f) instead of TAB because bash read
+	# collapses consecutive whitespace IFS characters (including TAB),
+	# silently merging empty fields with the next non-empty field.
+	#
+	# Tradeoff: jq aborts at the first parse error (jqlang/jq#1942), so a
+	# corrupt state file drops cache entries for files listed after it. Those
+	# sessions fall through to per-session extraction (--resume args, per-file
+	# jq in get_*_session) and still save correctly — just without the batch
+	# speedup. Corrupt files are rare (hooks write atomically) and transient
+	# (overwritten on next hook invocation). Pre-validating with `jq empty`
+	# per file costs ~190ms (60 files), which negates the entire batch gain.
+	local US=$'\x1f'
+	local HAS_ASSOC_CACHE=0
+	# Feature-detect jq 1.7+ (input_filename support). Use echo+pipe so jq
+	# has valid JSON input — /dev/null has no content and causes a parse error.
+	if echo '{}' | jq 'input_filename' >/dev/null 2>&1; then
+		local state_files=()
+		for _f in "$STATE_DIR"/claude-*.json "$STATE_DIR"/opencode-*.json; do
+			[ -f "$_f" ] && state_files+=("$_f")
+		done
+		if [ ${#state_files[@]} -gt 0 ]; then
+			jq -r '[
+					(input_filename | split("/") | .[-1] | split("-")[1:] | join("-") | rtrimstr(".json")),
+					(.session_id // ""),
+					(.model // ""),
+					((.env // null) | tojson)
+				] | join("\u001f")' "${state_files[@]}" 2>/dev/null >"$STATE_CACHE_FILE" || true
+
+			if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ] && [ -s "$STATE_CACHE_FILE" ]; then
+				HAS_ASSOC_CACHE=1
+				# shellcheck disable=SC2034
+				declare -A STATE_CACHE
+				while IFS="$US" read -r _pid _sid _model _env; do
+					STATE_CACHE["$_pid"]="$_sid$US$_model$US$_env"
+				done <"$STATE_CACHE_FILE"
+			elif [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [ -s "$STATE_CACHE_FILE" ]; then
+				log "bash < 4 detected; associative cache disabled (falling through to direct state-file reads)"
+			fi
+		fi
 	else
-		sessions="[]"
+		log "jq < 1.7 detected; state file cache disabled (falling through to per-file reads)"
 	fi
 
-	count=$(echo "$sessions" | jq 'length')
+	# Process only matched panes (those with a detected tool)
+	if [ -n "$MATCHES" ]; then
+		local current_target="" current_cwd="" pane_candidates=""
+		while IFS=$'\t' read -r target tool cpid cargs cwd; do
+			[ -z "$target" ] && continue
 
-	jq -n \
-		--argjson sessions "$sessions" \
-		--arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-		'{timestamp: $timestamp, sessions: $sessions}' >"$OUTPUT_FILE"
+			# If pane changed, process the previous pane's candidate list.
+			if [ -n "$current_target" ] && [ "$target" != "$current_target" ]; then
+				resolve_pane_candidates "$current_target" "$current_cwd" "$pane_candidates" "$US" "$HAS_ASSOC_CACHE" "$STATE_CACHE_FILE" "$PARTS_FILE"
+				pane_candidates=""
+			fi
+
+			current_target="$target"
+			current_cwd="$cwd"
+			# Candidate tuples are US-delimited; a literal \x1f inside process args
+			# would break parsing, but this is practically unlikely for CLI argv.
+			pane_candidates="${pane_candidates}${tool}${US}${cpid}${US}${cargs}"$'\n'
+		done <<<"$MATCHES"
+
+		# Process final pane candidate list.
+		if [ -n "$current_target" ] && [ -n "$pane_candidates" ]; then
+			resolve_pane_candidates "$current_target" "$current_cwd" "$pane_candidates" "$US" "$HAS_ASSOC_CACHE" "$STATE_CACHE_FILE" "$PARTS_FILE"
+		fi
+	fi
+
+	# Single jq: convert TSV to JSON array + build final output (replaces N+3 jq calls)
+	local count=0
+	if [ -s "$PARTS_FILE" ]; then
+		jq -Rs --arg ts "$SAVE_TS" '
+			split("\n") | map(select(length > 0) | split("\t") |
+			{pane:.[0], tool:.[1], session_id:.[2], cwd:.[3], pid:.[4], model:.[5], cli_args:.[6],
+			 env:(.[7] // "null" | try fromjson catch null)})
+			| {timestamp: $ts, sessions: .}
+		' "$PARTS_FILE" >"$OUTPUT_FILE"
+		count=$(jq '.sessions | length' "$OUTPUT_FILE")
+	else
+		jq -n --arg ts "$SAVE_TS" '{timestamp: $ts, sessions: []}' >"$OUTPUT_FILE"
+	fi
 
 	log "saved $count assistant session(s) to $OUTPUT_FILE"
 
@@ -454,7 +658,9 @@ strip_assistant_pane_contents() {
 	rm -rf "$tmpdir"
 }
 
-# Internal helper — called from main(). Requires PARTS_FILE to be set.
+# Retained for backward compatibility — main() no longer calls this directly
+# (batched processing replaced per-pane emit), but external scripts or tests
+# may source this file and call emit_session().
 emit_session() {
 	local target="$1" tool="$2" cpid="$3" cargs="$4" cwd="$5"
 	local allow_opencode_db="${6:-1}"
