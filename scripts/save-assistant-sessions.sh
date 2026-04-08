@@ -315,13 +315,110 @@ extract_cli_args() {
 	echo "$args" | sed -E 's/  +/ /g; s/^ //; s/ $//'
 }
 
+# Resolve all detected assistant candidates for one pane and emit at most one
+# session entry (first resolvable candidate in BFS order).
+#
+# Preserves legacy OpenCode behavior:
+#   pass 1: PID-specific only (no DB fallback)
+#   pass 2: OpenCode-only with DB fallback enabled
+resolve_pane_candidates() {
+	local pane_target="$1"
+	local pane_cwd="$2"
+	local pane_candidates="$3"
+	local us="$4"
+	local has_assoc_cache="$5"
+	local state_cache_file="$6"
+	local parts_file="$7"
+
+	local resolved=0 first_tool="" first_pid=""
+	for pass in 1 2; do
+		[ "$resolved" -eq 1 ] && break
+		local allow_opencode_db=0
+		[ "$pass" -eq 2 ] && allow_opencode_db=1
+		while IFS="$us" read -r cand_tool cand_pid cand_args; do
+			[ -z "$cand_tool" ] && continue
+			[ -z "$first_tool" ] && first_tool="$cand_tool" && first_pid="$cand_pid"
+
+			# Pass 2 is only for OpenCode DB fallback.
+			if [ "$pass" -eq 2 ] && [ "$cand_tool" != "opencode" ]; then
+				continue
+			fi
+
+			local cached="" cached_sid="" cached_model="" cached_env="null"
+			if [ "$has_assoc_cache" -eq 1 ]; then
+				cached="${STATE_CACHE[$cand_pid]:-}"
+			elif [ -s "$state_cache_file" ]; then
+				cached=$(awk -F"$us" -v p="$cand_pid" '$1 == p {print; exit}' "$state_cache_file")
+			fi
+			if [ -n "$cached" ]; then
+				cached_sid="${cached%%"$us"*}"
+				local _rest="${cached#*"$us"}"
+				cached_model="${_rest%%"$us"*}"
+				cached_env="${_rest#*"$us"}"
+				[ -z "$cached_env" ] && cached_env="null"
+			fi
+
+			local session_id=""
+			case "$cand_tool" in
+			claude)
+				session_id="$cached_sid"
+				# Keep legacy fallback behavior when cache misses (state file + --resume).
+				[ -z "$session_id" ] && session_id=$(get_claude_session "$cand_pid" "$cand_args")
+				;;
+			opencode)
+				session_id="$cached_sid"
+				[ -z "$session_id" ] && session_id=$(get_opencode_session "$cand_pid" "$cand_args" "$pane_cwd" "$allow_opencode_db")
+				;;
+			codex) session_id=$(get_codex_session "$cand_pid" "$cand_args" "$pane_cwd") ;;
+			esac
+
+			if [ -n "$session_id" ]; then
+				local cli_args model="" env_json="null" state_file=""
+				cli_args=$(extract_cli_args "$cand_tool" "$cand_args")
+				model="$cached_model"
+				env_json="$cached_env"
+
+				# If cache wasn't available, fall back to direct state-file enrichment.
+				case "$cand_tool" in
+				claude) state_file="$STATE_DIR/claude-${cand_pid}.json" ;;
+				opencode) state_file="$STATE_DIR/opencode-${cand_pid}.json" ;;
+				esac
+				if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+					[ -z "$model" ] && model=$(jq -r '.model // empty' "$state_file" 2>/dev/null || true)
+					if [ "$env_json" = "null" ]; then
+						env_json=$(jq '.env // null' "$state_file" 2>/dev/null || echo "null")
+					fi
+				fi
+
+				# Fallback: parse --model from CLI args if not in state file.
+				if [ -z "$model" ] && [[ "$cand_args" =~ --model[=\ ]([^\ ]+) ]]; then
+					model="${BASH_REMATCH[1]}"
+				fi
+
+				# Write TSV for batch JSON conversion (replaces per-entry jq -n).
+				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+					"$pane_target" "$cand_tool" "$session_id" "$pane_cwd" "$cand_pid" "$model" "$cli_args" "$env_json" >>"$parts_file"
+
+				[ "$cand_tool" = "codex" ] && register_codex_session_id "$session_id"
+				resolved=1
+				break
+			fi
+		done <<<"$pane_candidates"
+	done
+
+	if [ "$resolved" -eq 0 ] && [ -n "$first_tool" ]; then
+		log "detected $first_tool in $pane_target (pid $first_pid) but no session ID available"
+	fi
+}
+
 # --- Main ---
 
 main() {
 	PS_FILE=$(mktemp)
 	PANE_FILE=$(mktemp)
 	PARTS_FILE=$(mktemp)
-	trap 'rm -f "$PS_FILE" "$PANE_FILE" "$PARTS_FILE"' EXIT INT TERM
+	STATE_CACHE_FILE=$(mktemp)
+	trap 'rm -f "$PS_FILE" "$PANE_FILE" "$PARTS_FILE" "$STATE_CACHE_FILE"' EXIT INT TERM
 
 	# Timestamp for the JSON output envelope
 	local SAVE_TS
@@ -341,11 +438,9 @@ main() {
 	# Reads pane list + ps snapshot, builds process tree in memory,
 	# BFS-walks descendants for each pane PID, detects tools.
 	# Output (tab-delimited): target\ttool\ttool_pid\ttool_args\tcwd
-	# NOTE: awk regexes are slightly broader than detect_tool() — they also
-	# match tool names after whitespace (e.g., "env claude"), not just at
-	# start-of-string or after /. This catches more wrapper patterns and is
-	# acceptable because BFS still resolves session data via cache/regex
-	# fallbacks. If detect_tool changes, update the awk patterns to match.
+	# NOTE: emit all candidates per pane (pane PID + descendants) in BFS order.
+	# The shell pass below preserves legacy two-pass OpenCode behavior:
+	# 1) PID-specific only, then 2) DB fallback.
 	local MATCHES
 	MATCHES=$(awk '
 		NR == FNR {
@@ -369,9 +464,12 @@ main() {
 			child_list[ppid] = (ppid in child_list) ? child_list[ppid] SUBSEP pid : "" pid
 
 			# Detect tool in command args
-			if      (line ~ /(^|[ \t\/])claude( |$)/)                                      proc_tool[pid] = "claude"
-			else if (line ~ /(^|[ \t\/])opencode( |$)/ && line !~ /opencode run /)          proc_tool[pid] = "opencode"
-			else if (line ~ /(^|[ \t\/])codex( |$)/)                                       proc_tool[pid] = "codex"
+			# Keep patterns aligned with detect_tool() in lib-detect.sh:
+			# - bare binary at start, or path component (/tool)
+			# - opencode excludes "opencode run " subprocesses
+			if      (line ~ /(^claude( |$)|\/claude( |$))/)                                      proc_tool[pid] = "claude"
+			else if (line ~ /(^opencode( |$)|\/opencode( |$))/ && line !~ /opencode run /)       proc_tool[pid] = "opencode"
+			else if (line ~ /(^codex( |$)|\/codex( |$))/)                                        proc_tool[pid] = "codex"
 		}
 		END {
 			for (i = 1; i <= pane_count; i++) {
@@ -382,7 +480,6 @@ main() {
 				# Check pane PID itself (handles exec-replaced shells)
 				if (root in proc_tool && proc_tool[root] != "") {
 					printf "%s\t%s\t%d\t%s\t%s\n", target, proc_tool[root], root, proc_args[root], cwd
-					continue
 				}
 
 				# BFS through descendant processes
@@ -396,13 +493,12 @@ main() {
 					}
 				}
 
-				found = 0
-				while (qs <= qe && !found) {
+				while (qs <= qe) {
 					cur = queue[qs++]+0
 					if (cur in proc_tool && proc_tool[cur] != "") {
 						printf "%s\t%s\t%d\t%s\t%s\n", target, proc_tool[cur], cur, proc_args[cur], cwd
-						found = 1
-					} else if (cur in child_list) {
+					}
+					if (cur in child_list) {
 						nc = split(child_list[cur], kids, SUBSEP)
 						for (j = 1; j <= nc; j++) {
 							k = kids[j]+0
@@ -432,7 +528,7 @@ main() {
 	# (overwritten on next hook invocation). Pre-validating with `jq empty`
 	# per file costs ~190ms (60 files), which negates the entire batch gain.
 	local US=$'\x1f'
-	declare -A STATE_CACHE
+	local HAS_ASSOC_CACHE=0
 	# Feature-detect jq 1.7+ (input_filename support). Use echo+pipe so jq
 	# has valid JSON input — /dev/null has no content and causes a parse error.
 	if echo '{}' | jq 'input_filename' >/dev/null 2>&1; then
@@ -441,16 +537,23 @@ main() {
 			[ -f "$_f" ] && state_files+=("$_f")
 		done
 		if [ ${#state_files[@]} -gt 0 ]; then
-			while IFS="$US" read -r _pid _sid _model _env; do
-				STATE_CACHE["$_pid"]="$_sid$US$_model$US$_env"
-			done < <(
-				jq -r '[
+			jq -r '[
 					(input_filename | split("/") | .[-1] | split("-")[1:] | join("-") | rtrimstr(".json")),
 					(.session_id // ""),
 					(.model // ""),
 					((.env // null) | tojson)
-				] | join("\u001f")' "${state_files[@]}" 2>/dev/null
-			)
+				] | join("\u001f")' "${state_files[@]}" 2>/dev/null >"$STATE_CACHE_FILE" || true
+
+			if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ] && [ -s "$STATE_CACHE_FILE" ]; then
+				HAS_ASSOC_CACHE=1
+				# shellcheck disable=SC2034
+				declare -A STATE_CACHE
+				while IFS="$US" read -r _pid _sid _model _env; do
+					STATE_CACHE["$_pid"]="$_sid$US$_model$US$_env"
+				done <"$STATE_CACHE_FILE"
+			elif [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [ -s "$STATE_CACHE_FILE" ]; then
+				log "bash < 4 detected; associative cache disabled (falling through to direct state-file reads)"
+			fi
 		fi
 	else
 		log "jq < 1.7 detected; state file cache disabled (falling through to per-file reads)"
@@ -458,62 +561,27 @@ main() {
 
 	# Process only matched panes (those with a detected tool)
 	if [ -n "$MATCHES" ]; then
+		local current_target="" current_cwd="" pane_candidates=""
 		while IFS=$'\t' read -r target tool cpid cargs cwd; do
 			[ -z "$target" ] && continue
 
-			# One cache read per session (replaces 2-3 lookups)
-			local cached="${STATE_CACHE[$cpid]:-}"
-			local cached_sid="" cached_model="" cached_env="null"
-			if [ -n "$cached" ]; then
-				cached_sid="${cached%%"$US"*}"
-				local _rest="${cached#*"$US"}"
-				cached_model="${_rest%%"$US"*}"
-				cached_env="${_rest#*"$US"}"
-				[ -z "$cached_env" ] && cached_env="null"
+			# If pane changed, process the previous pane's candidate list.
+			if [ -n "$current_target" ] && [ "$target" != "$current_target" ]; then
+				resolve_pane_candidates "$current_target" "$current_cwd" "$pane_candidates" "$US" "$HAS_ASSOC_CACHE" "$STATE_CACHE_FILE" "$PARTS_FILE"
+				pane_candidates=""
 			fi
 
-			local session_id=""
-			case "$tool" in
-			claude)
-				# O(1) cache lookup (replaces jq per-file)
-				session_id="$cached_sid"
-				# Fallback: bash regex on --resume flag (replaces sed)
-				if [ -z "$session_id" ] && [[ "$cargs" =~ --resume[=\ ]([A-Za-z0-9_-]+) ]]; then
-					session_id="${BASH_REMATCH[1]}"
-				fi
-				;;
-			opencode)
-				session_id="$cached_sid"
-				if [ -z "$session_id" ]; then
-					session_id=$(get_opencode_session "$cpid" "$cargs" "$cwd" "0")
-					[ -z "$session_id" ] && session_id=$(get_opencode_session "$cpid" "$cargs" "$cwd" "1")
-				fi
-				;;
-			codex) session_id=$(get_codex_session "$cpid" "$cargs" "$cwd") ;;
-			esac
-
-			if [ -n "$session_id" ]; then
-				local cli_args model="" env_json="null"
-				cli_args=$(extract_cli_args "$tool" "$cargs")
-
-				# Use pre-destructured model+env from cache
-				model="$cached_model"
-				env_json="$cached_env"
-
-				# Fallback: bash regex for --model (replaces sed)
-				if [ -z "$model" ] && [[ "$cargs" =~ --model[=\ ]([^\ ]+) ]]; then
-					model="${BASH_REMATCH[1]}"
-				fi
-
-				# Write TSV for batch JSON conversion (replaces per-entry jq -n)
-				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-					"$target" "$tool" "$session_id" "$cwd" "$cpid" "$model" "$cli_args" "$env_json" >>"$PARTS_FILE"
-
-				[ "$tool" = "codex" ] && register_codex_session_id "$session_id"
-			else
-				log "detected $tool in $target (pid $cpid) but no session ID available"
-			fi
+			current_target="$target"
+			current_cwd="$cwd"
+			# Candidate tuples are US-delimited; a literal \x1f inside process args
+			# would break parsing, but this is practically unlikely for CLI argv.
+			pane_candidates="${pane_candidates}${tool}${US}${cpid}${US}${cargs}"$'\n'
 		done <<<"$MATCHES"
+
+		# Process final pane candidate list.
+		if [ -n "$current_target" ] && [ -n "$pane_candidates" ]; then
+			resolve_pane_candidates "$current_target" "$current_cwd" "$pane_candidates" "$US" "$HAS_ASSOC_CACHE" "$STATE_CACHE_FILE" "$PARTS_FILE"
+		fi
 	fi
 
 	# Single jq: convert TSV to JSON array + build final output (replaces N+3 jq calls)

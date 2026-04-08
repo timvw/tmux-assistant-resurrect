@@ -136,6 +136,8 @@ scripts/
   restore-assistant-sessions.sh   # Resurrect post-restore hook (resumes assistants)
 test/
   Dockerfile                      # Docker image with tmux, jq, just, and real assistant CLIs
+  bench-save-hook.sh              # Single-scenario save-hook benchmark runner (inside Docker)
+  bench-matrix.sh                 # Docker benchmark matrix + CSV/Markdown summary generator
   run-tests.sh                    # Integration test suite
 justfile                          # Install/uninstall/status/save/restore/test recipes
 ```
@@ -156,6 +158,30 @@ then runs the full test suite covering install, save, restore, uninstall, hooks,
 cleanup, TPM plugin installation, session ID extraction, POSIX quoting, process
 tree detection, upgrade-path migration, and regression scenarios. No API keys are needed — the tests exercise
 the process detection and session management layer, not the AI functionality.
+
+### Performance benchmarks (Docker)
+
+Run a benchmark matrix and capture results as CSV + Markdown:
+
+```bash
+just benchmark
+```
+
+To compare your current checkout against another repo path (for example a
+worktree on `main`):
+
+```bash
+just benchmark base_repo=/path/to/base/worktree
+```
+
+Results are written to:
+
+- `test-results/benchmark.csv`
+- `test-results/benchmark.md`
+
+On GitHub Actions (`.github/workflows/test.yml`), the benchmark matrix runs on
+every push/PR, publishes a step-summary table, and uploads the same CSV/Markdown
+files as the `benchmark-results` artifact.
 
 ### Try it yourself
 

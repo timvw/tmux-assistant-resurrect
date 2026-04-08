@@ -262,6 +262,7 @@ tmux new-session -d -s test-opencode -c /tmp
 tmux new-session -d -s test-codex -c /tmp
 tmux new-session -d -s test-opencode-nosid -c /tmp
 tmux new-session -d -s test-lsp -c /tmp
+tmux new-session -d -s test-false-positive -c /tmp
 
 # Launch mock assistants inside tmux panes
 # Claude: just a bare claude process (session ID comes from hook state file)
@@ -275,6 +276,8 @@ tmux send-keys -t test-codex "codex resume ses_codex_test_789" Enter
 tmux send-keys -t test-opencode-nosid "opencode" Enter
 # OpenCode LSP subprocess (should be excluded from detection)
 tmux send-keys -t test-lsp "opencode run pyright-langserver.js" Enter
+# Command line mentioning "codex" as a value (must NOT be detected as Codex)
+tmux send-keys -t test-false-positive "python3 -c 'import time; time.sleep(300)' --profile codex" Enter
 
 # Wait for each assistant to appear as a child process (replaces fixed sleep 4).
 # OpenCode spawns node → native binary chain, so it takes longer than claude/codex.
@@ -354,6 +357,10 @@ assert_eq "Codex session ID extracted from session-tags.jsonl" "ses_codex_test_7
 lsp_count=$(jq '[.sessions[] | select(.pane | contains("test-lsp"))] | length' "$SAVED")
 assert_eq "LSP subprocess excluded from detection" "0" "$lsp_count"
 
+# Verify non-tool arg value "codex" does not trigger false-positive detection
+false_positive_count=$(jq '[.sessions[] | select(.pane | contains("test-false-positive"))] | length' "$SAVED")
+assert_eq "Argument value 'codex' does not trigger false-positive detection" "0" "$false_positive_count"
+
 # Verify the log mentions the opencode without session ID
 LOG="$HOME/.tmux/resurrect/assistant-save.log"
 if grep -q "no session ID available" "$LOG"; then
@@ -388,6 +395,31 @@ if [ -n "$npx_oc_pid" ]; then
 NPXEOF
 fi
 
+# Seed DB fallback with a competing session for the same cwd. Save pass 1 should
+# still pick the PID-specific state-file session and never need this fallback.
+mkdir -p "$HOME/.local/share/opencode"
+rm -f "$HOME/.local/share/opencode/opencode.db"
+python3 - <<'PY'
+import os
+import sqlite3
+db = os.path.expanduser('~/.local/share/opencode/opencode.db')
+conn = sqlite3.connect(db)
+conn.execute('''CREATE TABLE session (
+    id TEXT PRIMARY KEY,
+    slug TEXT,
+    project_id TEXT,
+    directory TEXT,
+    title TEXT,
+    version TEXT,
+    time_created INTEGER,
+    time_updated INTEGER
+)''')
+conn.execute('''INSERT INTO session (id, slug, project_id, directory, title, version, time_created, time_updated)
+    VALUES ('ses_db_wrong_npx', 'wrong', 'global', '/tmp', 'wrong winner', '1.2.5', 1000000, 999999999999)''')
+conn.commit()
+conn.close()
+PY
+
 rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
 just save 2>&1
 
@@ -404,7 +436,7 @@ echo "=== Test 3: restore (resume commands) ==="
 echo ""
 
 # Kill all assistants first (so panes are empty shells)
-for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
+for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp test-false-positive; do
 	kill_pane_children "$sess"
 done
 sleep 1
@@ -1297,6 +1329,18 @@ echo ""
 # Source detect_tool from the shared library
 source "$REPO_DIR/scripts/lib-detect.sh"
 
+# Keep this in sync with the awk detector in save-assistant-sessions.sh.
+awk_detect_tool_save() {
+	local line="$1"
+	echo "$line" | awk '
+		{
+			if      ($0 ~ /(^claude( |$)|\/claude( |$))/)                                    print "claude"
+			else if ($0 ~ /(^opencode( |$)|\/opencode( |$))/ && $0 !~ /opencode run /)      print "opencode"
+			else if ($0 ~ /(^codex( |$)|\/codex( |$))/)                                      print "codex"
+		}
+	'
+}
+
 # Bare names (no path) — how native binaries appear on Linux
 assert_eq "detect bare 'claude'" "claude" "$(detect_tool "claude")"
 assert_eq "detect bare 'opencode'" "opencode" "$(detect_tool "opencode")"
@@ -1320,6 +1364,31 @@ assert_eq "exclude '/usr/bin/opencode run pyright'" "" "$(detect_tool "/usr/bin/
 assert_eq "ignore 'bash'" "" "$(detect_tool "bash")"
 assert_eq "ignore 'vim'" "" "$(detect_tool "vim")"
 assert_eq "ignore 'node server.js'" "" "$(detect_tool "node server.js")"
+
+# Parity guard: detect_tool() and save's awk detector should classify the same
+# representative command lines.
+parity_cases=(
+	"claude --resume ses_123|claude"
+	"/usr/local/bin/claude --resume ses_123|claude"
+	"opencode -s ses_456|opencode"
+	"/opt/homebrew/bin/opencode -s ses_456|opencode"
+	"bash /usr/local/bin/opencode -s ses_456|opencode"
+	"codex resume ses_789|codex"
+	"/usr/bin/codex resume ses_789|codex"
+	"opencode run pyright-langserver.js|"
+	"/usr/bin/opencode run pyright-langserver.js|"
+	"python3 -c 'import time; time.sleep(300)' --profile codex|"
+	"/tmp/tools/codex-helper --foo|"
+)
+
+for parity_case in "${parity_cases[@]}"; do
+	cmd_line="${parity_case%|*}"
+	expected_tool="${parity_case#*|}"
+	detect_tool_result="$(detect_tool "$cmd_line")"
+	awk_result="$(awk_detect_tool_save "$cmd_line")"
+	assert_eq "parity expected classification: $cmd_line" "$expected_tool" "$detect_tool_result"
+	assert_eq "parity save-awk matches detect_tool: $cmd_line" "$detect_tool_result" "$awk_result"
+done
 
 # --- Test 5e: posix_quote() unit tests ---
 
