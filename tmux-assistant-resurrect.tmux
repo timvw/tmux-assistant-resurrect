@@ -26,7 +26,10 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # resume commands into the running TUI. The hook handles all resuming.
 tmux set-option -g @resurrect-hook-post-save-all "bash '${CURRENT_DIR}/scripts/save-assistant-sessions.sh'"
 tmux set-option -g @resurrect-hook-post-restore-all "bash '${CURRENT_DIR}/scripts/restore-assistant-sessions.sh'"
-tmux set-option -g @continuum-save-interval '5'
+# Respect user's @continuum-save-interval if already set
+if [ -z "$(tmux show-option -gqv @continuum-save-interval)" ]; then
+    tmux set-option -g @continuum-save-interval '5'
+fi
 tmux set-option -g @continuum-restore 'on'
 
 # --- Claude Code hooks ---
