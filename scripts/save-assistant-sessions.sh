@@ -348,7 +348,7 @@ resolve_pane_candidates() {
 			if [ "$has_assoc_cache" -eq 1 ]; then
 				cached="${STATE_CACHE[$cand_pid]:-}"
 			elif [ -s "$state_cache_file" ]; then
-				cached=$(awk -F"$us" -v p="$cand_pid" '$1 == p {print; exit}' "$state_cache_file")
+				cached=$(awk -F"$us" -v p="$cand_pid" '$1 == p {for(i=2;i<=NF;i++) printf "%s%s",$i,(i<NF?FS:""); print ""; exit}' "$state_cache_file")
 			fi
 			if [ -n "$cached" ]; then
 				cached_sid="${cached%%"$us"*}"
