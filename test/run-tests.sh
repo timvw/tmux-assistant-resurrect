@@ -613,6 +613,27 @@ else
 	pass "@resurrect-processes does not include assistants"
 fi
 
+# --- Test 3d2: @continuum-save-interval respects user setting ---
+
+echo ""
+echo "=== Test 3d2: @continuum-save-interval respects user setting ==="
+echo ""
+
+# Case 1: No user value → plugin sets default of 5
+tmux set-option -gu @continuum-save-interval 2>/dev/null || true
+bash "$REPO_DIR/tmux-assistant-resurrect.tmux"
+interval_default=$(tmux show-option -gqv @continuum-save-interval)
+assert_eq "Default save interval is 5 when unset" "5" "$interval_default"
+
+# Case 2: User sets a custom value → plugin must NOT override it
+tmux set-option -g @continuum-save-interval '360'
+bash "$REPO_DIR/tmux-assistant-resurrect.tmux"
+interval_custom=$(tmux show-option -gqv @continuum-save-interval)
+assert_eq "User save interval preserved when already set" "360" "$interval_custom"
+
+# Clean up: reset to default for remaining tests
+tmux set-option -g @continuum-save-interval '5'
+
 # --- Test 3e: Restore logs unknown tool name ---
 #
 # Verify the `*` default branch in the restore script's case statement
