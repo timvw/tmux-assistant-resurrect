@@ -5,6 +5,9 @@ set -euo pipefail
 
 REPO_DIR="$HOME/tmux-assistant-resurrect"
 JUNIT_FILE="${JUNIT_FILE:-/tmp/test-results/junit.xml}"
+echo "Test harness bash: $BASH_VERSION"
+echo "Scripts under test: $(${TEST_BASH:-bash} --version | head -1)"
+echo ""
 PASS=0
 FAIL=0
 ERRORS=""

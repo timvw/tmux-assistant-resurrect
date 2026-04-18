@@ -348,7 +348,7 @@ resolve_pane_candidates() {
 			if [ "$has_assoc_cache" -eq 1 ]; then
 				cached="${STATE_CACHE[$cand_pid]:-}"
 			elif [ -s "$state_cache_file" ]; then
-				cached=$(awk -F"$us" -v p="$cand_pid" '$1 == p {print; exit}' "$state_cache_file")
+				cached=$(awk -F"$us" -v p="$cand_pid" '$1 == p {for(i=2;i<=NF;i++) printf "%s%s",$i,(i<NF?FS:""); print ""; exit}' "$state_cache_file")
 			fi
 			if [ -n "$cached" ]; then
 				cached_sid="${cached%%"$us"*}"
@@ -391,7 +391,9 @@ resolve_pane_candidates() {
 				fi
 
 				# Fallback: parse --model from CLI args if not in state file.
-				if [ -z "$model" ] && [[ "$cand_args" =~ --model[=\ ]([^\ ]+) ]]; then
+				# Regex stored in variable for bash 3.2 compat (inline capture groups fail).
+				local _model_re='--model[= ]([^ ]+)'
+				if [ -z "$model" ] && [[ "$cand_args" =~ $_model_re ]]; then
 					model="${BASH_REMATCH[1]}"
 				fi
 

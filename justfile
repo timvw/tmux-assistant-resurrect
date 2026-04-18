@@ -370,12 +370,13 @@ status:
     fi
 
 # Manually trigger a save of current assistant sessions
+# TEST_BASH overrides the interpreter (e.g. bash3.2 for compat testing).
 save:
-    @bash "{{repo_dir}}/scripts/save-assistant-sessions.sh"
+    @"${TEST_BASH:-bash}" "{{repo_dir}}/scripts/save-assistant-sessions.sh"
 
 # Manually trigger a restore of saved assistant sessions
 restore:
-    @bash "{{repo_dir}}/scripts/restore-assistant-sessions.sh"
+    @"${TEST_BASH:-bash}" "{{repo_dir}}/scripts/restore-assistant-sessions.sh"
 
 # Clean up stale state files (from dead processes)
 clean:

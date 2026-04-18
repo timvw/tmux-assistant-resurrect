@@ -13,18 +13,35 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bash: [bash, bash3.2]
+    name: test (bash ${{ matrix.bash == 'bash' && '5' || '3.2' }})
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build test image
-        run: docker build -t tmux-assistant-resurrect-test -f test/Dockerfile .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: test/Dockerfile
+          load: true
+          tags: tmux-assistant-resurrect-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Run tests
         run: |
           mkdir -p test-results
-          docker run --rm -v ${{ github.workspace }}/test-results:/tmp/test-results tmux-assistant-resurrect-test
+          docker run --rm \
+            -e TEST_BASH=${{ matrix.bash }} \
+            -v ${{ github.workspace }}/test-results:/tmp/test-results \
+            tmux-assistant-resurrect-test
 
       - name: Publish test results
         uses: EnricoMi/publish-unit-test-result-action@v2
@@ -32,6 +49,26 @@ jobs:
         with:
           files: test-results/junit.xml
           comment_mode: off
+          check_name: tests (${{ matrix.bash == 'bash' && 'bash 5' || 'bash 3.2' }})
+
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: test/Dockerfile
+          load: true
+          tags: tmux-assistant-resurrect-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Prepare benchmark baseline
         run: |
