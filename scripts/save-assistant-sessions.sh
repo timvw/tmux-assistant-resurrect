@@ -391,7 +391,9 @@ resolve_pane_candidates() {
 				fi
 
 				# Fallback: parse --model from CLI args if not in state file.
-				if [ -z "$model" ] && [[ "$cand_args" =~ --model[=\ ]([^\ ]+) ]]; then
+				# Regex stored in variable for bash 3.2 compat (inline capture groups fail).
+				local _model_re='--model[= ]([^ ]+)'
+				if [ -z "$model" ] && [[ "$cand_args" =~ $_model_re ]]; then
 					model="${BASH_REMATCH[1]}"
 				fi
 

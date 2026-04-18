@@ -2,7 +2,7 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Core tools
+# Core tools + build deps for bash 3.2
 RUN apt-get update && apt-get install -y \
     tmux \
     jq \
@@ -13,7 +13,19 @@ RUN apt-get update && apt-get install -y \
     nodejs \
     npm \
     python3 \
+    gcc \
+    make \
     && rm -rf /var/lib/apt/lists/*
+
+# Install bash 3.2 from source (macOS ships bash 3.2; needed for awk-fallback tests)
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in x86_64) TRIPLE="x86_64-pc-linux-gnu";; aarch64) TRIPLE="aarch64-unknown-linux-gnu";; *) TRIPLE="$ARCH-pc-linux-gnu";; esac && \
+    curl -sSfL https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz | tar xz -C /tmp \
+    && cd /tmp/bash-3.2 \
+    && ./configure --build="$TRIPLE" --prefix=/usr/local --without-bash-malloc >/dev/null 2>&1 \
+    && make -j"$(nproc)" >/dev/null 2>&1 \
+    && cp bash /usr/local/bin/bash3.2 \
+    && rm -rf /tmp/bash-3.2
 
 # Install just
 RUN curl -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
@@ -34,4 +46,8 @@ WORKDIR /home/testuser
 # Copy the repo in (done as testuser for correct ownership)
 COPY --chown=testuser:testuser . /home/testuser/tmux-assistant-resurrect
 
-ENTRYPOINT ["bash", "/home/testuser/tmux-assistant-resurrect/test/run-tests.sh"]
+# TEST_BASH: override bash used by scripts under test (save/restore).
+# "bash" (default) = system bash 5; "bash3.2" = bash 3.2 awk-fallback path.
+# The test harness itself always runs under bash 5 (explicit in ENTRYPOINT).
+ENV TEST_BASH="bash"
+ENTRYPOINT ["/bin/bash", "/home/testuser/tmux-assistant-resurrect/test/run-tests.sh"]
