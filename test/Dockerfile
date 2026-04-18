@@ -18,14 +18,18 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install bash 3.2 from source (macOS ships bash 3.2; needed for awk-fallback tests)
-RUN ARCH=$(uname -m) && \
-    case "$ARCH" in x86_64) TRIPLE="x86_64-pc-linux-gnu";; aarch64) TRIPLE="aarch64-unknown-linux-gnu";; *) TRIPLE="$ARCH-pc-linux-gnu";; esac && \
-    curl -sSfL https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz | tar xz -C /tmp \
+# SHA256 pinned for reproducibility (GPG sig also at bash-3.2.tar.gz.sig on ftp.gnu.org).
+RUN BASH32_SHA256="26c99025b59e30779300b68adb764f824974d267a4d7cc1b347d14a2393f9fb4" && \
+    curl -sSfL -o /tmp/bash-3.2.tar.gz https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz \
+    && echo "$BASH32_SHA256  /tmp/bash-3.2.tar.gz" | sha256sum -c - \
+    && tar xz -C /tmp -f /tmp/bash-3.2.tar.gz \
+    && ARCH=$(uname -m) \
+    && case "$ARCH" in x86_64) TRIPLE="x86_64-pc-linux-gnu";; aarch64) TRIPLE="aarch64-unknown-linux-gnu";; *) TRIPLE="$ARCH-pc-linux-gnu";; esac \
     && cd /tmp/bash-3.2 \
     && ./configure --build="$TRIPLE" --prefix=/usr/local --without-bash-malloc >/dev/null 2>&1 \
     && make -j"$(nproc)" >/dev/null 2>&1 \
     && cp bash /usr/local/bin/bash3.2 \
-    && rm -rf /tmp/bash-3.2
+    && rm -rf /tmp/bash-3.2 /tmp/bash-3.2.tar.gz
 
 # Install just
 RUN curl -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
