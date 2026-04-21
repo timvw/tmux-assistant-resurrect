@@ -160,9 +160,87 @@ get_codex_session() {
 		return
 	fi
 
-	# Method 3: Codex rollout session files (newer Codex versions).
-	# Newer releases persist session metadata under ~/.codex/sessions/*/*.jsonl
-	# and include a session_meta record with both id and cwd.
+	# Method 3: Codex thread state DB (Codex >= ~0.118 persist state in
+	# SQLite: ~/.codex/state_5.sqlite, table `threads`, columns id/cwd/
+	# updated_at/archived).  This is the canonical current source — codex
+	# writes a `threads` row per session and bumps `updated_at` on every
+	# user turn.  A long-lived session that started on an earlier day
+	# keeps its same `id` in this table even though no new rollout JSONL
+	# is ever written, which is exactly the case Method 4 misses.
+	#
+	# Strategy: among threads matching our process's cwd that are unarchived
+	# and have been updated during this process's lifetime, pick the most
+	# recently updated one that isn't already assigned to another pane.
+	#
+	# The DB file is versioned (state_5.sqlite, bumping on schema changes).
+	# Resolve to the newest `state_*.sqlite` so a future bump doesn't
+	# silently disable this method.
+	local state_db
+	state_db=$(ls -t "${HOME}/.codex"/state_*.sqlite 2>/dev/null | head -1 || true)
+	if [ -n "$cwd" ] && [ -n "$state_db" ] && [ -f "$state_db" ] && command -v python3 >/dev/null 2>&1; then
+		local etimes
+		etimes=$(ps -o etimes= -p "$child_pid" 2>/dev/null | tr -d ' ' || true)
+		sid=$(
+			USED_CODEX_SESSION_IDS="$USED_CODEX_SESSION_IDS" python3 - "$state_db" "$cwd" "$etimes" <<'PY'
+import os, sqlite3, sys, time
+
+state_db = sys.argv[1]
+cwd = sys.argv[2]
+etimes_raw = sys.argv[3].strip()
+used = {sid for sid in os.environ.get("USED_CODEX_SESSION_IDS", "").split("\t") if sid}
+
+process_start = None
+if etimes_raw.isdigit():
+    process_start = time.time() - int(etimes_raw)
+
+# Open read-only so we never conflict with a running codex writer.
+try:
+    con = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+except sqlite3.Error:
+    sys.exit(0)
+
+try:
+    cur = con.cursor()
+    # updated_at is stored in seconds since epoch.
+    cur.execute(
+        "SELECT id, updated_at FROM threads "
+        "WHERE cwd = ? AND archived = 0 "
+        "ORDER BY updated_at DESC",
+        (cwd,),
+    )
+    rows = cur.fetchall()
+finally:
+    con.close()
+
+# Prefer threads whose last update happened after the process started
+# (rules out stale threads in the same cwd). Fall back to most-recent
+# overall if nothing qualifies — covers the edge case where a session
+# was spawned but hasn't had any user turns yet.
+def pick(rows, require_after_start):
+    for sid, updated_at in rows:
+        if sid in used:
+            continue
+        if require_after_start and process_start is not None and updated_at < process_start:
+            continue
+        return sid
+    return None
+
+sid = pick(rows, require_after_start=True) or pick(rows, require_after_start=False)
+if sid:
+    print(sid)
+PY
+		)
+		if [ -n "$sid" ]; then
+			echo "$sid"
+			return
+		fi
+	fi
+
+	# Method 4: Codex rollout session files (Codex ~0.100-0.117 wrote
+	# these; newer versions have moved to SQLite, see Method 3).
+	# Releases in that window persisted session metadata under
+	# ~/.codex/sessions/*/*.jsonl and included a session_meta record
+	# with both id and cwd.
 	# We rank candidates by:
 	# - matching cwd
 	# - preferring session IDs not already assigned during this save
