@@ -1,4 +1,21 @@
 #!/usr/bin/env bash
+# The tmux server may have been started with a limited PATH (e.g. via a
+# systemd user service with a whitelisted runtime environment). That PATH
+# is inherited by every hook this script runs in, so utilities like
+# python3 — needed by Methods 3 and 4 of get_codex_session — can be
+# missing even though they are installed and work fine from an
+# interactive shell. Augment PATH with common system locations so the
+# hook context sees what the rest of the system sees.
+if ! command -v python3 >/dev/null 2>&1; then
+	for _dir in /run/current-system/sw/bin /usr/local/bin /usr/bin; do
+		if [ -x "$_dir/python3" ]; then
+			PATH="$_dir:$PATH"
+			break
+		fi
+	done
+	unset _dir
+fi
+
 # tmux-resurrect save hook — collects assistant session IDs from all tmux panes.
 # Writes a sidecar JSON file alongside resurrect's save files.
 #
