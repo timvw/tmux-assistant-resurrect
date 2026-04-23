@@ -318,6 +318,7 @@ cat ~/.tmux/resurrect/assistant-save.log
 | Save finds 0 sessions | Run `ps -eo pid=,ppid=,args= \| grep -E 'claude\|opencode\|codex'` to verify assistants are running |
 | Session ID missing for Claude | Verify the hook is installed: `jq '.hooks.SessionStart' ~/.claude/settings.json` |
 | Session ID missing for OpenCode | Launch with `-s <id>`, or verify the plugin: `ls ~/.config/opencode/plugins/session-tracker.js` |
+| Codex/OpenCode session ID missing (python3 methods) | The save hook auto-detects `python3` in common locations. If your setup uses a non-standard path, set it in tmux: `set-environment -g PATH "/your/python3/dir:$PATH"` |
 | Restore launches but assistant says "session not found" | The session ID may have expired. This is normal — start a fresh session and the next save will pick up the new ID |
 | Assistants launch twice after restore | Make sure assistants are **not** listed in `@resurrect-processes` — the plugin handles all resuming via the post-restore hook |
 | `just test` fails with Docker errors | Ensure Docker is running and you have network access (the image pulls npm packages) |
@@ -370,6 +371,30 @@ State files live in a user-only directory (mode 0700).
 > **Note:** Avoid capturing secrets (API keys, tokens). State files and the
 > sidecar JSON persist to disk and may outlive the process they were captured
 > from.
+
+### PATH in restricted environments (NixOS, systemd services)
+
+When tmux runs as a systemd user service, the server inherits a stripped-down
+`PATH` that may not include `python3`. The save hook automatically checks common
+system locations (`/run/current-system/sw/bin`, `/opt/homebrew/bin`,
+`/usr/local/bin`, `/usr/bin`) and augments `PATH` if needed. This is a no-op
+when `python3` is already on `PATH`.
+
+If your `python3` is in a non-standard location, the recommended fix is at the
+tmux level:
+
+```bash
+# In tmux.conf — ensures all hooks and plugins see the right PATH:
+set-environment -g PATH "/your/custom/bin:/usr/local/bin:/usr/bin:/bin"
+```
+
+Or fix it in the systemd unit:
+
+```ini
+# ~/.config/systemd/user/tmux.service.d/override.conf
+[Service]
+Environment=PATH=/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
+```
 
 ### Continuum save interval
 

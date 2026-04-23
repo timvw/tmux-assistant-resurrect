@@ -7,7 +7,7 @@
 # interactive shell. Augment PATH with common system locations so the
 # hook context sees what the rest of the system sees.
 if ! command -v python3 >/dev/null 2>&1; then
-	for _dir in /run/current-system/sw/bin /usr/local/bin /usr/bin; do
+	for _dir in /run/current-system/sw/bin /opt/homebrew/bin /usr/local/bin /usr/bin; do
 		if [ -x "$_dir/python3" ]; then
 			PATH="$_dir:$PATH"
 			break

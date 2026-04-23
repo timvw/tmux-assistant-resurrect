@@ -1056,6 +1056,54 @@ fi
 HOME="$ORIG_HOME"
 rm -rf "$ROLLOUT_TEST_DIR"
 
+# --- Codex rollout: restricted PATH (regression for PATH augmentation) ---
+# When the tmux server inherits a stripped PATH (e.g. systemd user service),
+# python3 may not be found. The save script augments PATH at startup so that
+# python3-based methods (Codex rollout, OpenCode DB) still work.
+
+echo ""
+echo "=== PATH augmentation: Codex rollout works under restricted PATH ==="
+echo ""
+
+PATH_TEST_DIR=$(mktemp -d)
+mkdir -p "$PATH_TEST_DIR/.codex/sessions/2026/04/23"
+cat >"$PATH_TEST_DIR/.codex/sessions/2026/04/23/rollout-path-test.jsonl" <<'PATHROLLOUT'
+{"timestamp":"2026-04-23T10:00:00.000Z","type":"session_meta","payload":{"id":"ses_path_repro","timestamp":"2026-04-23T10:00:00.000Z","cwd":"/tmp/path-repro","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+PATHROLLOUT
+
+# Build a minimal PATH that has the coreutils the script needs but NOT python3
+rbin=$(mktemp -d)
+for _c in dirname mkdir sed ps tr tail mv cat date jq awk gzip tar md5sum; do
+	_p=$(command -v "$_c" 2>/dev/null || true)
+	[ -n "$_p" ] && ln -sf "$_p" "$rbin/$_c"
+done
+# Also need bash itself for the subshell
+ln -sf "$(command -v bash)" "$rbin/bash"
+
+# Run the save script's preamble + get_codex_session under the restricted PATH.
+# The PATH augmentation block should find python3 and make Method 3 work.
+ORIG_HOME_PATH="$HOME"
+HOME="$PATH_TEST_DIR"
+path_aug_sid=$(PATH="$rbin" ${TEST_BASH:-bash} -c '
+	source "'"$REPO_DIR"'/scripts/save-assistant-sessions.sh"
+	get_codex_session $$ "codex" "/tmp/path-repro"
+')
+HOME="$ORIG_HOME_PATH"
+
+assert_eq "Codex rollout lookup works with restricted hook PATH" "ses_path_repro" "$path_aug_sid"
+
+# Verify that when python3 IS already on PATH, the augmentation is a no-op
+path_before="$PATH"
+# Re-source the script (it guards with command -v python3)
+source "$REPO_DIR/scripts/save-assistant-sessions.sh"
+if [ "$PATH" = "$path_before" ]; then
+	pass "PATH unchanged when python3 already available"
+else
+	fail "PATH was modified even though python3 was already on PATH"
+fi
+
+rm -rf "$PATH_TEST_DIR" "$rbin"
+
 # --- OpenCode: -s and --session arg extraction ---
 assert_eq "OpenCode -s extraction" "ses_oc_456" "$(get_opencode_session 99999 "opencode -s ses_oc_456" "/tmp")"
 assert_eq "OpenCode --session extraction" "ses_oc_789" "$(get_opencode_session 99999 "opencode --session ses_oc_789" "/tmp")"
