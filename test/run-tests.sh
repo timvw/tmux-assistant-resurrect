@@ -1170,8 +1170,11 @@ for _c in dirname mkdir sed ps tr tail mv cat date jq awk gzip tar md5sum; do
 	_p=$(command -v "$_c" 2>/dev/null || true)
 	[ -n "$_p" ] && ln -sf "$_p" "$rbin/$_c"
 done
-# Also need bash itself for the subshell
+# Also need bash itself for the subshell (and TEST_BASH variant like bash3.2)
 ln -sf "$(command -v bash)" "$rbin/bash"
+if [ -n "${TEST_BASH:-}" ] && [ "$TEST_BASH" != "bash" ] && command -v "$TEST_BASH" >/dev/null 2>&1; then
+	ln -sf "$(command -v "$TEST_BASH")" "$rbin/$TEST_BASH"
+fi
 
 # Run the save script's preamble + get_codex_session under the restricted PATH.
 # The PATH augmentation block should find python3 and make Method 3 work.
