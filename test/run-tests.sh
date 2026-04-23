@@ -1002,9 +1002,102 @@ assert_eq "Codex resume extraction" "ses_codex_789" "$(get_codex_session 99999 "
 assert_eq "Codex resume with path" "ses_codex_789" "$(get_codex_session 99999 "/usr/bin/codex resume ses_codex_789")"
 assert_eq "Codex bare (no resume)" "" "$(get_codex_session 99999 "codex")"
 
-# --- Codex: rollout session files (Method 3) ---
-# Newer Codex versions write session metadata to ~/.codex/sessions/*/*.jsonl
-# instead of session-tags.jsonl. Test that get_codex_session can find them.
+# --- Codex: state_*.sqlite thread DB (Method 3) ---
+# Codex >= ~0.118 persists thread state in SQLite. The save script queries
+# the threads table by cwd, preferring recently-updated unarchived threads.
+
+echo ""
+echo "=== Codex state DB: thread lookup via state_*.sqlite ==="
+echo ""
+
+STATEDB_TEST_DIR=$(mktemp -d)
+mkdir -p "$STATEDB_TEST_DIR/.codex"
+
+# Create a test state DB with the threads table
+python3 - "$STATEDB_TEST_DIR/.codex/state_5.sqlite" <<'DBSETUP'
+import sqlite3, sys, time
+db = sys.argv[1]
+conn = sqlite3.connect(db)
+conn.execute('''CREATE TABLE threads (
+    id TEXT PRIMARY KEY,
+    rollout_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    model_provider TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    title TEXT NOT NULL,
+    sandbox_policy TEXT NOT NULL,
+    approval_mode TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    has_user_event INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    archived_at INTEGER
+)''')
+now = int(time.time())
+# Active thread matching test cwd — updated recently
+conn.execute('''INSERT INTO threads (id, rollout_path, created_at, updated_at, source,
+    model_provider, cwd, title, sandbox_policy, approval_mode)
+    VALUES (?, '', ?, ?, 'cli', 'openai', '/tmp/statedb-project', 'active', 'relaxed', 'auto')''',
+    ('ses_statedb_active', now - 3600, now - 10))
+# Older thread same cwd — should lose to the active one
+conn.execute('''INSERT INTO threads (id, rollout_path, created_at, updated_at, source,
+    model_provider, cwd, title, sandbox_policy, approval_mode)
+    VALUES (?, '', ?, ?, 'cli', 'openai', '/tmp/statedb-project', 'old', 'relaxed', 'auto')''',
+    ('ses_statedb_old', now - 86400, now - 86400))
+# Archived thread same cwd — should be excluded
+conn.execute('''INSERT INTO threads (id, rollout_path, created_at, updated_at, source,
+    model_provider, cwd, title, sandbox_policy, approval_mode, archived, archived_at)
+    VALUES (?, '', ?, ?, 'cli', 'openai', '/tmp/statedb-project', 'archived', 'relaxed', 'auto', 1, ?)''',
+    ('ses_statedb_archived', now - 7200, now - 5, now - 5))
+# Thread in different cwd — should not match
+conn.execute('''INSERT INTO threads (id, rollout_path, created_at, updated_at, source,
+    model_provider, cwd, title, sandbox_policy, approval_mode)
+    VALUES (?, '', ?, ?, 'cli', 'openai', '/tmp/other-project', 'other', 'relaxed', 'auto')''',
+    ('ses_statedb_other', now - 100, now - 1))
+conn.commit()
+conn.close()
+DBSETUP
+
+ORIG_HOME="$HOME"
+HOME="$STATEDB_TEST_DIR"
+
+# Should find the most recently updated active thread for the matching cwd
+statedb_sid=$(get_codex_session $$ "codex" "/tmp/statedb-project")
+assert_eq "Codex state DB: finds active thread by cwd" "ses_statedb_active" "$statedb_sid"
+
+# Should NOT match a different cwd
+statedb_miss=$(get_codex_session $$ "codex" "/tmp/nonexistent")
+assert_eq "Codex state DB: no match for different cwd" "" "$statedb_miss"
+
+# Dedup: after claiming ses_statedb_active, next call should get ses_statedb_old
+USED_CODEX_SESSION_IDS=""
+statedb_first=$(get_codex_session $$ "codex" "/tmp/statedb-project")
+register_codex_session_id "$statedb_first"
+statedb_second=$(get_codex_session $$ "codex" "/tmp/statedb-project")
+
+if [ -n "$statedb_first" ] && [ -n "$statedb_second" ] && [ "$statedb_first" != "$statedb_second" ]; then
+	pass "Codex state DB dedup: two calls get distinct sessions ($statedb_first vs $statedb_second)"
+else
+	fail "Codex state DB dedup: expected distinct sessions, got '$statedb_first' and '$statedb_second'"
+fi
+USED_CODEX_SESSION_IDS=""
+
+# Should prefer state DB (Method 3) over rollout JSONL (Method 4) when both exist
+mkdir -p "$STATEDB_TEST_DIR/.codex/sessions/2026/04/23"
+cat >"$STATEDB_TEST_DIR/.codex/sessions/2026/04/23/rollout-statedb-test.jsonl" <<'ROLLOUT'
+{"timestamp":"2026-04-23T10:00:00.000Z","type":"session_meta","payload":{"id":"ses_rollout_loser","timestamp":"2026-04-23T10:00:00.000Z","cwd":"/tmp/statedb-project","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+ROLLOUT
+
+statedb_priority=$(get_codex_session $$ "codex" "/tmp/statedb-project")
+assert_eq "Codex state DB takes priority over rollout JSONL" "ses_statedb_active" "$statedb_priority"
+
+HOME="$ORIG_HOME"
+rm -rf "$STATEDB_TEST_DIR"
+
+# --- Codex: rollout session files (Method 4) ---
+# Codex ~0.100-0.117 wrote session metadata to ~/.codex/sessions/*/*.jsonl.
+# Newer versions use SQLite (Method 3). Test the JSONL fallback.
 
 ROLLOUT_TEST_DIR=$(mktemp -d)
 mkdir -p "$ROLLOUT_TEST_DIR/.codex/sessions/2026/03/24"
@@ -1077,8 +1170,11 @@ for _c in dirname mkdir sed ps tr tail mv cat date jq awk gzip tar md5sum; do
 	_p=$(command -v "$_c" 2>/dev/null || true)
 	[ -n "$_p" ] && ln -sf "$_p" "$rbin/$_c"
 done
-# Also need bash itself for the subshell
+# Also need bash itself for the subshell (and TEST_BASH variant like bash3.2)
 ln -sf "$(command -v bash)" "$rbin/bash"
+if [ -n "${TEST_BASH:-}" ] && [ "$TEST_BASH" != "bash" ] && command -v "$TEST_BASH" >/dev/null 2>&1; then
+	ln -sf "$(command -v "$TEST_BASH")" "$rbin/$TEST_BASH"
+fi
 
 # Run the save script's preamble + get_codex_session under the restricted PATH.
 # The PATH augmentation block should find python3 and make Method 3 work.
