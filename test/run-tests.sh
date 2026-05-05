@@ -15,6 +15,9 @@ ERRORS=""
 # Pin state directory to a known path for tests (overrides the per-user default)
 export TMUX_ASSISTANT_RESURRECT_DIR="/tmp/tmux-assistant-resurrect-test"
 TEST_STATE_DIR="$TMUX_ASSISTANT_RESURRECT_DIR"
+# The broad Docker integration suite drives detached tmux sessions with no real
+# client. Keep those tests fast; restore-client-wait-test.sh covers the wait.
+export TMUX_ASSISTANT_RESURRECT_CLIENT_WAIT_ATTEMPTS="${TMUX_ASSISTANT_RESURRECT_CLIENT_WAIT_ATTEMPTS:-0}"
 
 # --- JUnit XML tracking ---
 
@@ -115,6 +118,19 @@ assert_file_not_exists() {
 
 # Source shared detection library early (needed by wait_for_descendant and other helpers)
 source "$REPO_DIR/scripts/lib-detect.sh"
+
+# --- Focused restore client-wait regression tests ---
+
+suite "restore_client_wait"
+echo ""
+echo "=== Test 0: restore waits for attached session client ==="
+echo ""
+
+if bash "$REPO_DIR/test/restore-client-wait-test.sh"; then
+	pass "Restore waits once per session client and skips guarded panes"
+else
+	fail "Restore client-wait regression test failed"
+fi
 
 # --- Process lifecycle helpers ---
 

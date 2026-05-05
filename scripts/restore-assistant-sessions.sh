@@ -15,6 +15,9 @@ source "$SCRIPT_DIR/lib-detect.sh"
 RESURRECT_DIR="${HOME}/.tmux/resurrect"
 INPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
 LOG_FILE="${RESURRECT_DIR}/assistant-restore.log"
+INITIAL_RESTORE_SLEEP_SECONDS="${TMUX_ASSISTANT_RESURRECT_INITIAL_SLEEP_SECONDS:-2}"
+CLIENT_WAIT_ATTEMPTS="${TMUX_ASSISTANT_RESURRECT_CLIENT_WAIT_ATTEMPTS:-50}"
+CLIENT_WAIT_INTERVAL_SECONDS="${TMUX_ASSISTANT_RESURRECT_CLIENT_WAIT_INTERVAL_SECONDS:-0.1}"
 
 # Rotate log: keep only the most recent 500 lines
 if [ -f "$LOG_FILE" ]; then
@@ -25,6 +28,32 @@ log() {
 	local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
 	echo "$msg" >&2
 	echo "$msg" >>"$LOG_FILE"
+}
+
+session_client_count() {
+	local tmux_session="$1"
+	{ tmux list-clients -t "$tmux_session" 2>/dev/null || true; } | wc -l | tr -d '[:space:]'
+}
+
+wait_for_session_client() {
+	local tmux_session="$1"
+	local attempts=0
+
+	if [ "$CLIENT_WAIT_ATTEMPTS" -le 0 ]; then
+		return 0
+	fi
+
+	while :; do
+		if [ "$(session_client_count "$tmux_session")" -gt 0 ]; then
+			return 0
+		fi
+		if [ "$attempts" -ge "$CLIENT_WAIT_ATTEMPTS" ]; then
+			log "no client attached to session '$tmux_session' before timeout; replaying anyway (TUI startup queries may miss responses)"
+			return 1
+		fi
+		attempts=$((attempts + 1))
+		sleep "$CLIENT_WAIT_INTERVAL_SECONDS"
+	done
 }
 
 if [ ! -f "$INPUT_FILE" ]; then
@@ -42,13 +71,14 @@ if [ "$count" -eq 0 ]; then
 fi
 
 # Wait for panes to be fully initialized after resurrect restore
-sleep 2
+sleep "$INITIAL_RESTORE_SLEEP_SECONDS"
 
 log "restoring $count assistant session(s)..."
 
 # Use a temp file to avoid subshell variable scoping issues with pipes
 tmpfile=$(mktemp)
-trap 'rm -f "$tmpfile"' EXIT INT TERM
+waited_sessions_file=$(mktemp)
+trap 'rm -f "$tmpfile" "$waited_sessions_file"' EXIT INT TERM
 echo "$sessions" | jq -c '.[]' >"$tmpfile"
 
 restored=0
@@ -165,6 +195,15 @@ while read -r entry; do
 	# Prepend env vars if present
 	if [ -n "$env_prefix" ]; then
 		resume_cmd="${env_prefix}${resume_cmd}"
+	fi
+
+	# Best-effort mitigation for boot flows where tmux-continuum restores the
+	# server before any terminal client has attached. A session client does not
+	# prove this pane is visible, but without any client, startup terminal
+	# capability probes cannot receive replies at all.
+	if ! grep -Fxq -- "$tmux_session" "$waited_sessions_file"; then
+		wait_for_session_client "$tmux_session" || true
+		printf '%s\n' "$tmux_session" >>"$waited_sessions_file"
 	fi
 
 	log "restoring $tool in $pane (session: $session_id, cmd: $resume_cmd)"
