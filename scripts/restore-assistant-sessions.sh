@@ -73,6 +73,31 @@ while read -r entry; do
 		continue
 	fi
 
+	# Wait for at least one client to attach to this pane's session before
+	# replaying. TUI tools that query the terminal at startup (OSC 11
+	# background-color for theme detection, cursor-shape, hyperlinks, etc.)
+	# get a null response if no terminal is attached when the query fires
+	# — tmux silently drops the query because there's no client to forward
+	# it to. crossterm-based tools cache that null response in a OnceLock
+	# and never retry, so a single bad startup permanently locks the tool
+	# to its fallback state for the lifetime of the process. Symptom seen
+	# in the wild: codex's diff palette permanently dark on a light
+	# terminal after every reboot, requiring a manual `codex resume` to
+	# clear.
+	#
+	# Poll every 100ms, cap at 5s so we don't hang the rest of the restore
+	# if the user never attaches a client. In normal boot flows where a
+	# kitty/wezterm/etc auto-attaches via `tmux new-session -A`, the wait
+	# resolves in < 200ms.
+	client_wait=0
+	while [ "$(tmux list-clients -t "$tmux_session" 2>/dev/null | wc -l)" -eq 0 ] && [ $client_wait -lt 50 ]; do
+		sleep 0.1
+		client_wait=$((client_wait + 1))
+	done
+	if [ $client_wait -ge 50 ]; then
+		log "no client attached to session '$tmux_session' after 5s; replaying anyway (TUI startup queries may miss responses)"
+	fi
+
 	# Guard 1: skip if the pane is not running a shell.
 	# After tmux-resurrect restore, panes should be running a shell (bash, zsh,
 	# etc.). If something else is running (e.g., the user manually started vim,
