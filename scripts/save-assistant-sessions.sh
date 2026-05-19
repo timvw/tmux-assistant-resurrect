@@ -396,8 +396,17 @@ extract_cli_args() {
 	# and to tolerate multiple spaces between flag and value.
 	case "$tool" in
 	claude)
-		# --resume <id> or --resume=<id>
-		args=$(echo "$args" | sed -E 's/--resume[= ] *[^ ]*//')
+		# Strip --resume <id>, --resume=<id>, bare `--resume` (end-of-args or
+		# before next flag). Old regex required `[= ]` after --resume, so bare
+		# --resume (from `claude --resume` interactive-picker invocations or
+		# the /resume slash command) survived and corrupted later restores.
+		# The value branch requires the first char to be non-dash so a
+		# following flag (e.g. `--resume --foo`) isn't consumed as the value.
+		args=$(echo "$args" | sed -E 's/--resume(=[^ ]*| +[^- ][^ ]*)?//g')
+		# Strip --continue/-c. Once we provide --resume <uuid> the plugin's
+		# intent is unambiguous; --continue would either conflict or fall back
+		# to "most recent in cwd" if --resume fails to resolve.
+		args=$(echo "$args" | sed -E 's/(^| )(--continue|-c)( |$)/ /g')
 		;;
 	opencode)
 		# -s <id>, --session <id>, --session=<id>
