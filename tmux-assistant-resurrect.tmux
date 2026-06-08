@@ -7,6 +7,7 @@
 # 2. Post-save/restore hooks for assistant session tracking
 # 3. Claude Code hooks in ~/.claude/settings.json
 # 4. OpenCode session-tracker plugin in ~/.config/opencode/plugins/
+# 5. Pi support via ~/.pi/agent/sessions lookup (no hook required)
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

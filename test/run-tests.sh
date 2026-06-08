@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Integration tests for tmux-assistant-resurrect.
-# Runs inside Docker with real assistant CLI binaries.
+# Runs inside Docker with real assistant CLI binaries (claude/opencode/codex)
+# plus mocked pi-process coverage.
 set -euo pipefail
 
 REPO_DIR="$HOME/tmux-assistant-resurrect"
@@ -272,6 +273,9 @@ tmux new-session -d -s test-codex -c /tmp
 tmux new-session -d -s test-opencode-nosid -c /tmp
 tmux new-session -d -s test-lsp -c /tmp
 tmux new-session -d -s test-false-positive -c /tmp
+PI_TEST_CWD="/tmp/pi-session-test-cwd"
+mkdir -p "$PI_TEST_CWD"
+tmux new-session -d -s test-pi -c "$PI_TEST_CWD"
 
 # Launch mock assistants inside tmux panes
 # Claude: just a bare claude process (session ID comes from hook state file)
@@ -287,6 +291,8 @@ tmux send-keys -t test-opencode-nosid "opencode" Enter
 tmux send-keys -t test-lsp "opencode run pyright-langserver.js" Enter
 # Command line mentioning "codex" as a value (must NOT be detected as Codex)
 tmux send-keys -t test-false-positive "python3 -c 'import time; time.sleep(300)' --profile codex" Enter
+# Pi: mock a long-running process named "pi" (argv[0])
+tmux send-keys -t test-pi "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
 
 # Wait for each assistant to appear as a child process (replaces fixed sleep 4).
 # OpenCode spawns node → native binary chain, so it takes longer than claude/codex.
@@ -294,11 +300,17 @@ claude_pane_shell_pid=$(tmux display-message -t test-claude -p '#{pane_pid}')
 opencode_pane_shell_pid=$(tmux display-message -t test-opencode -p '#{pane_pid}')
 codex_pane_shell_pid=$(tmux display-message -t test-codex -p '#{pane_pid}')
 nosid_pane_shell_pid=$(tmux display-message -t test-opencode-nosid -p '#{pane_pid}')
+pi_pane_shell_pid=$(tmux display-message -t test-pi -p '#{pane_pid}')
 
 wait_for_child "$claude_pane_shell_pid" "claude" 10 >/dev/null || echo "WARN: claude child not found (may still work via tree walk)"
 wait_for_child "$opencode_pane_shell_pid" "opencode" 10 >/dev/null || echo "WARN: opencode child not found"
 wait_for_child "$codex_pane_shell_pid" "codex" 10 >/dev/null || echo "WARN: codex child not found"
 wait_for_child "$nosid_pane_shell_pid" "opencode" 10 >/dev/null || echo "WARN: opencode-nosid child not found"
+if wait_for_child "$pi_pane_shell_pid" "(^| )pi( |$)" 10 >/dev/null; then
+	pass "Pi mock process is running in test-pi pane"
+else
+	fail "Pi mock process not found in test-pi pane"
+fi
 
 # Create a Claude hook state file keyed by the Claude child PID
 # (When Claude runs the hook, hook's $PPID = Claude PID, so the save script
@@ -333,6 +345,18 @@ codex_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$codex_pane_shell_pid" 
 mkdir -p "$HOME/.codex"
 echo "{\"pid\": ${codex_child_pid}, \"session\": \"ses_codex_test_789\", \"host\": \"test\", \"started_at\": \"2026-01-01T00:00:00Z\"}" >"$HOME/.codex/session-tags.jsonl"
 
+# Create a Pi session file in the cwd-scoped sessions directory
+pi_sid="019e99pi-test-0001"
+pi_safe_cwd=$(echo "$PI_TEST_CWD" | sed -e 's#^[\\/]*##' -e 's#[/\\:]#-#g')
+pi_session_dir="$HOME/.pi/agent/sessions/--${pi_safe_cwd}--"
+mkdir -p "$pi_session_dir"
+rm -f "$pi_session_dir"/*.jsonl 2>/dev/null || true
+pi_session_file="$pi_session_dir/$(date -u +%Y-%m-%dT%H-%M-%S)-${pi_sid}.jsonl"
+cat >"$pi_session_file" <<EOF
+{"type":"session","version":3,"id":"${pi_sid}","timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","cwd":"${PI_TEST_CWD}"}
+{"type":"message","id":"pi-msg-1","parentId":null,"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}
+EOF
+
 # Run save
 just save 2>&1
 
@@ -341,13 +365,13 @@ SAVED="$HOME/.tmux/resurrect/assistant-sessions.json"
 assert_file_exists "assistant-sessions.json created" "$SAVED"
 
 session_count=$(jq '.sessions | length' "$SAVED")
-# We expect: claude (1) + opencode with -s (1) + codex (1) = 3 with session IDs
+# We expect: claude (1) + opencode with -s (1) + codex (1) + pi (1) = 4 with session IDs
 # opencode-nosid detected but no session ID, so excluded from sessions array
 # lsp subprocess should be excluded entirely
-if [ "$session_count" -ge 3 ]; then
-	pass "Detected at least 3 assistant sessions (got $session_count)"
+if [ "$session_count" -ge 4 ]; then
+	pass "Detected at least 4 assistant sessions (got $session_count)"
 else
-	fail "Expected at least 3 sessions, got $session_count"
+	fail "Expected at least 4 sessions, got $session_count"
 fi
 
 # Verify Claude was detected with correct session ID
@@ -361,6 +385,10 @@ assert_eq "OpenCode session ID extracted from plugin state file" "ses_opencode_t
 # Verify Codex was detected with correct session ID (from session-tags.jsonl)
 codex_sid=$(jq -r '.sessions[] | select(.tool == "codex") | .session_id' "$SAVED")
 assert_eq "Codex session ID extracted from session-tags.jsonl" "ses_codex_test_789" "$codex_sid"
+
+# Verify Pi was detected with correct session ID (from ~/.pi session file)
+pi_detected_sid=$(jq -r '.sessions[] | select(.tool == "pi") | .session_id' "$SAVED")
+assert_eq "Pi session ID extracted from session file" "$pi_sid" "$pi_detected_sid"
 
 # Verify LSP subprocess was excluded
 lsp_count=$(jq '[.sessions[] | select(.pane | contains("test-lsp"))] | length' "$SAVED")
@@ -445,7 +473,7 @@ echo "=== Test 3: restore (resume commands) ==="
 echo ""
 
 # Kill all assistants first (so panes are empty shells)
-for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp test-false-positive; do
+for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp test-false-positive test-pi; do
 	kill_pane_children "$sess"
 done
 sleep 1
@@ -464,17 +492,20 @@ restore_log_content=$(cat "$RESTORE_LOG")
 assert_contains "Restore log mentions claude" "$restore_log_content" "restoring claude"
 assert_contains "Restore log mentions opencode" "$restore_log_content" "restoring opencode"
 assert_contains "Restore log mentions codex" "$restore_log_content" "restoring codex"
+assert_contains "Restore log mentions pi" "$restore_log_content" "restoring pi"
 
 # Verify the restore log contains the correct resume commands
 # (pane content is unreliable — real CLIs take over the terminal and clear it)
 assert_contains "Restore sent claude --resume" "$restore_log_content" "ses_claude_test_123"
 assert_contains "Restore sent opencode -s" "$restore_log_content" "ses_opencode_test_456"
 assert_contains "Restore sent codex resume" "$restore_log_content" "ses_codex_test_789"
+assert_contains "Restore sent pi --session" "$restore_log_content" "$pi_sid"
 
 # Verify restore uses 'command' prefix to bypass shell aliases
 assert_contains "Restore uses 'command claude' prefix" "$restore_log_content" "command claude"
 assert_contains "Restore uses 'command opencode' prefix" "$restore_log_content" "command opencode"
 assert_contains "Restore uses 'command codex' prefix" "$restore_log_content" "command codex"
+assert_contains "Restore uses 'command pi' prefix" "$restore_log_content" "command pi"
 
 # --- Test 3b: Restore skips panes with already-running assistants ---
 
@@ -509,7 +540,7 @@ echo "=== Test 3b2: restore Guard 2 — skips panes with background assistant ==
 echo ""
 
 # Kill existing assistants so panes return to shells
-for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
+for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp test-pi; do
 	kill_pane_children "$sess"
 done
 sleep 1
@@ -558,7 +589,7 @@ echo "=== Test 3c: restore handles tricky cwd values ==="
 echo ""
 
 # Kill assistants so panes are clean shells
-for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp; do
+for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp test-pi; do
 	kill_pane_children "$sess"
 done
 sleep 1
@@ -616,7 +647,7 @@ echo ""
 bash "$REPO_DIR/tmux-assistant-resurrect.tmux"
 
 resurrect_procs=$(tmux show-option -gv @resurrect-processes 2>/dev/null || echo "")
-if echo "$resurrect_procs" | grep -qiE "claude|opencode|codex"; then
+if echo "$resurrect_procs" | grep -qiE "claude|opencode|codex|pi"; then
 	fail "@resurrect-processes still contains assistants (double-launch risk!)"
 else
 	pass "@resurrect-processes does not include assistants"
@@ -1215,6 +1246,44 @@ assert_eq "OpenCode bare (no -s, no DB)" "" "$(get_opencode_session 99999 "openc
 assert_eq "Claude --resume=id (equals form)" "ses_equals_test" "$(get_claude_session 99999 "claude --resume=ses_equals_test")"
 assert_eq "OpenCode --session=id (equals form)" "ses_oc_eq" "$(get_opencode_session 99999 "opencode --session=ses_oc_eq" "/tmp")"
 
+# --- Pi: --session arg + session-file lookup ---
+assert_eq "Pi --session extraction" "019e99pi_args" "$(get_pi_session 99999 "pi --session 019e99pi_args" "/tmp/pi-project")"
+assert_eq "Pi --session=id (equals form)" "019e99pi_eq" "$(get_pi_session 99999 "pi --session=019e99pi_eq" "/tmp/pi-project")"
+
+PI_UNIT_HOME=$(mktemp -d)
+REAL_HOME="$HOME"
+export HOME="$PI_UNIT_HOME"
+PI_UNIT_CWD="/tmp/pi-project"
+pi_unit_safe=$(echo "$PI_UNIT_CWD" | sed -e 's#^[\\/]*##' -e 's#[/\\:]#-#g')
+pi_unit_dir="$HOME/.pi/agent/sessions/--${pi_unit_safe}--"
+mkdir -p "$pi_unit_dir"
+
+cat >"$pi_unit_dir/2026-01-01T00-00-00Z_019e99pi_unit_old.jsonl" <<'PIEOF'
+{"type":"session","version":3,"id":"019e99pi_unit_old","timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/pi-project"}
+PIEOF
+sleep 1
+cat >"$pi_unit_dir/2026-01-01T00-00-01Z_019e99pi_unit_new.jsonl" <<'PIEOF'
+{"type":"session","version":3,"id":"019e99pi_unit_new","timestamp":"2026-01-01T00:00:01Z","cwd":"/tmp/pi-project"}
+PIEOF
+
+pi_file_sid=$(get_pi_session $$ "pi" "$PI_UNIT_CWD")
+assert_eq "Pi session-file lookup by cwd" "019e99pi_unit_new" "$pi_file_sid"
+assert_eq "Pi session-file lookup misses unknown cwd" "" "$(get_pi_session $$ "pi" "/tmp/pi-other")"
+
+USED_PI_SESSION_IDS=""
+pi_first=$(get_pi_session $$ "pi" "$PI_UNIT_CWD")
+register_pi_session_id "$pi_first"
+pi_second=$(get_pi_session $$ "pi" "$PI_UNIT_CWD")
+if [ -n "$pi_first" ] && [ -n "$pi_second" ] && [ "$pi_first" != "$pi_second" ]; then
+	pass "Pi dedup: two panes same cwd get distinct sessions"
+else
+	fail "Pi dedup: expected distinct sessions, got '$pi_first' and '$pi_second'"
+fi
+USED_PI_SESSION_IDS=""
+
+export HOME="$REAL_HOME"
+rm -rf "$PI_UNIT_HOME"
+
 # --- OpenCode: SQLite database fallback ---
 # When no -s flag and no plugin state file, fall back to the OpenCode DB.
 OC_DB_DIR=$(mktemp -d)
@@ -1511,6 +1580,7 @@ awk_detect_tool_save() {
 			if      ($0 ~ /(^claude( |$)|\/claude( |$))/)                                    print "claude"
 			else if ($0 ~ /(^opencode( |$)|\/opencode( |$))/ && $0 !~ /opencode run /)      print "opencode"
 			else if ($0 ~ /(^codex( |$)|\/codex( |$))/)                                      print "codex"
+			else if ($0 ~ /(^pi( |$)|\/pi( |$))/)                                            print "pi"
 		}
 	'
 }
@@ -1519,16 +1589,19 @@ awk_detect_tool_save() {
 assert_eq "detect bare 'claude'" "claude" "$(detect_tool "claude")"
 assert_eq "detect bare 'opencode'" "opencode" "$(detect_tool "opencode")"
 assert_eq "detect bare 'codex'" "codex" "$(detect_tool "codex")"
+assert_eq "detect bare 'pi'" "pi" "$(detect_tool "pi")"
 
 # Bare names with arguments
 assert_eq "detect 'claude --resume ses_123'" "claude" "$(detect_tool "claude --resume ses_123")"
 assert_eq "detect 'opencode -s ses_456'" "opencode" "$(detect_tool "opencode -s ses_456")"
 assert_eq "detect 'codex resume ses_789'" "codex" "$(detect_tool "codex resume ses_789")"
+assert_eq "detect 'pi --session 019e99-test'" "pi" "$(detect_tool "pi --session 019e99-test")"
 
 # Full paths (how they appear on macOS or via shebang)
 assert_eq "detect '/usr/local/bin/claude'" "claude" "$(detect_tool "/usr/local/bin/claude")"
 assert_eq "detect '/opt/homebrew/bin/opencode -s ses_456'" "opencode" "$(detect_tool "/opt/homebrew/bin/opencode -s ses_456")"
 assert_eq "detect '/bin/bash /usr/local/bin/opencode -s ses_456'" "opencode" "$(detect_tool "/bin/bash /usr/local/bin/opencode -s ses_456")"
+assert_eq "detect '/usr/local/bin/pi --session 019e99-test'" "pi" "$(detect_tool "/usr/local/bin/pi --session 019e99-test")"
 
 # LSP subprocess exclusion
 assert_eq "exclude 'opencode run pyright'" "" "$(detect_tool "opencode run pyright-langserver.js")"
@@ -1549,9 +1622,12 @@ parity_cases=(
 	"bash /usr/local/bin/opencode -s ses_456|opencode"
 	"codex resume ses_789|codex"
 	"/usr/bin/codex resume ses_789|codex"
+	"pi --session 019e99-test|pi"
+	"/usr/local/bin/pi --session 019e99-test|pi"
 	"opencode run pyright-langserver.js|"
 	"/usr/bin/opencode run pyright-langserver.js|"
 	"python3 -c 'import time; time.sleep(300)' --profile codex|"
+	"python3 -c 'import time; time.sleep(300)' --profile pi|"
 	"/tmp/tools/codex-helper --foo|"
 )
 
@@ -2304,6 +2380,14 @@ assert_eq "Codex strip resume" "--full-auto" \
 assert_eq "Codex bare resume" "" \
 	"$(extract_cli_args "codex" "codex resume ses_abc")"
 
+# Pi: strip --session <id>
+assert_eq "Pi strip --session" "--model sonnet" \
+	"$(extract_cli_args "pi" "pi --model sonnet --session 019e99pi_test")"
+
+# Pi: strip --session=<id> (equals form)
+assert_eq "Pi strip --session= (equals)" "--model sonnet" \
+	"$(extract_cli_args "pi" "pi --model sonnet --session=019e99pi_test")"
+
 # Edge: binary with path prefix
 assert_eq "Binary path prefix stripped" "--dangerously-skip-permissions" \
 	"$(extract_cli_args "claude" "/opt/homebrew/bin/claude --dangerously-skip-permissions")"
@@ -2398,6 +2482,34 @@ assert_eq "OpenCode bare -s" "--verbose" \
 assert_eq "OpenCode -s before flag" "--verbose" \
 	"$(extract_cli_args "opencode" "opencode -s --verbose")"
 
+# Pi: bare --session (no id)
+assert_eq "Pi bare --session" "--model sonnet" \
+	"$(extract_cli_args "pi" "pi --model sonnet --session")"
+
+# Pi: --resume (interactive selector) stripped
+assert_eq "Pi strip --resume" "--model sonnet" \
+	"$(extract_cli_args "pi" "pi --model sonnet --resume")"
+
+# Pi: -r stripped
+assert_eq "Pi strip -r" "--model sonnet" \
+	"$(extract_cli_args "pi" "pi --model sonnet -r")"
+
+# Pi: --continue stripped
+assert_eq "Pi strip --continue" "--model sonnet" \
+	"$(extract_cli_args "pi" "pi --model sonnet --continue")"
+
+# Pi: -c stripped
+assert_eq "Pi strip -c" "--model sonnet" \
+	"$(extract_cli_args "pi" "pi --model sonnet -c")"
+
+# Pi: --fork stripped
+assert_eq "Pi strip --fork" "--model sonnet" \
+	"$(extract_cli_args "pi" "pi --model sonnet --fork 019e99pi_old")"
+
+# Pi: preserve non-session flags
+assert_eq "Pi preserve --session-dir" "--session-dir /tmp/pi-sessions --model sonnet" \
+	"$(extract_cli_args "pi" "pi --session-dir /tmp/pi-sessions --model sonnet --session 019e99pi_test")"
+
 # Codex: bare resume (no id)
 assert_eq "Codex bare resume" "" \
 	"$(extract_cli_args "codex" "codex resume")"
@@ -2466,6 +2578,14 @@ if echo "$_OPENCODE_DISCOVERED" | grep -q -- '--session'; then
 	pass "OpenCode discovery finds --session"
 else
 	fail "OpenCode discovery missed --session"
+fi
+
+# Pi: discovery must find --session
+_PI_DISCOVERED=$(_discover_session_flags pi "$SESSION_FLAG_PATTERN_pi")
+if echo "$_PI_DISCOVERED" | grep -q -- '--session'; then
+	pass "Pi discovery finds --session"
+else
+	fail "Pi discovery missed --session"
 fi
 
 # Codex: resume/fork subcommands must appear in --help

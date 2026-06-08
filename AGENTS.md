@@ -3,8 +3,8 @@
 ## Project overview
 
 tmux-assistant-resurrect persists AI coding assistant sessions (Claude Code,
-OpenCode, Codex CLI) across tmux restarts. It hooks into tmux-resurrect to save
-session IDs and restore them automatically.
+OpenCode, Codex CLI, Pi) across tmux restarts. It hooks into tmux-resurrect to
+save session IDs and restore them automatically.
 
 ## Architecture
 
@@ -21,7 +21,7 @@ session IDs and restore them automatically.
 ## Design constraints
 
 - **No wrapper scripts**: Do not create wrapper functions/aliases around `claude`,
-  `opencode`, or `codex`. Use native hook/plugin systems instead.
+  `opencode`, `codex`, or `pi`. Use native hook/plugin systems instead.
 - **Restore hook is the sole launcher**: Assistants must NOT be listed in
   `@resurrect-processes`. The post-restore hook handles all resuming with correct
   session IDs. Adding them to `@resurrect-processes` causes double-launch.
@@ -93,7 +93,7 @@ process args as a reliable fallback.
   All are optional for backward compatibility.
 - `extract_cli_args()` in `save-assistant-sessions.sh` strips per-tool session
   args: Claude `--resume[= ]<id>`, OpenCode `--session[= ]<id>` and `-s <id>`,
-  Codex `resume <id>`. Returns normalized whitespace-trimmed string.
+  Codex `resume <id>`, Pi `--session[= ]<id>`. Returns normalized whitespace-trimmed string.
 - The restore script only restores env vars listed in
   `@assistant-resurrect-capture-env` (not `tmux_pane` or `shell`), prepended
   as `VAR='val'` prefix to the resume command
@@ -111,6 +111,7 @@ changes after an upgrade, check the relevant source to confirm.
 | **OpenCode Go binary overwrites process title** | `-s <id>` is NOT visible in `ps`; plugin state file or SQLite DB are the reliable sources | Run `ps -eo args=` on a running `opencode -s <id>` process |
 | **OpenCode SQLite DB** at `~/.local/share/opencode/opencode.db` | Fallback session ID extraction when plugin state file and args are unavailable; matches by cwd + most recent `time_updated` | Check DB schema: `sqlite3 ~/.local/share/opencode/opencode.db ".schema session"` |
 | **Codex writes `~/.codex/session-tags.jsonl`** | Primary session ID source for Codex (PID → session mapping) | Run Codex and check `cat ~/.codex/session-tags.jsonl` |
+| **Pi session files live in `~/.pi/agent/sessions/--<cwd>--/*.jsonl`** | Primary session ID source for Pi when `--session` is absent in args; save script reads header `type=id/cwd/timestamp` and scores candidates by process lifetime + mtime | Run Pi and inspect `~/.pi/agent/sessions`, verify first JSONL line has `{"type":"session","id":"..."}` |
 | **tmux-resurrect pane content archive** layout: `./pane_contents/pane-{session}:{window}.{pane}` inside `pane_contents.tar.gz` | `strip_assistant_pane_contents()` removes assistant pane files from this archive to prevent stale TUI flash on restore | tmux-resurrect source: `scripts/helpers.sh:pane_contents_file()` |
 
 ## Platform gotchas

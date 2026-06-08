@@ -199,6 +199,13 @@ while read -r entry; do
 			resume_cmd="command codex resume ${safe_sid}"
 		fi
 		;;
+	pi)
+		if [ -n "$safe_cli_args" ]; then
+			resume_cmd="command pi${safe_cli_args} --session ${safe_sid}"
+		else
+			resume_cmd="command pi --session ${safe_sid}"
+		fi
+		;;
 	*)
 		log "unknown tool '$tool' for pane $pane, skipping"
 		continue

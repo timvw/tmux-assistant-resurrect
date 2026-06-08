@@ -2,8 +2,8 @@
 # The tmux server may have been started with a limited PATH (e.g. via a
 # systemd user service with a whitelisted runtime environment). That PATH
 # is inherited by every hook this script runs in, so utilities like
-# python3 — needed by Methods 3 and 4 of get_codex_session — can be
-# missing even though they are installed and work fine from an
+# python3 — needed by Python-based session lookup methods (Codex + pi) —
+# can be missing even though they are installed and work fine from an
 # interactive shell. Augment PATH with common system locations so the
 # hook context sees what the rest of the system sees.
 if ! command -v python3 >/dev/null 2>&1; then
@@ -56,6 +56,7 @@ log() {
 }
 
 USED_CODEX_SESSION_IDS=""
+USED_PI_SESSION_IDS=""
 
 # --- Session ID extraction ---
 
@@ -349,6 +350,115 @@ PY
 	fi
 }
 
+get_pi_session() {
+	local child_pid="$1"
+	local args="$2"
+	local cwd="${3:-}"
+
+	# Method 1: --session flag in process args (chicken-and-egg fallback)
+	# After restore, pi is launched as `pi --session <session_id>`.
+	# Supports both `--session <id>` and `--session=<id>` forms.
+	local sid
+	sid=$(echo "$args" | sed -n 's/.*--session[= ] *\([A-Za-z0-9_-]*\).*/\1/p')
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return
+	fi
+
+	# Method 2: session files under ~/.pi/agent/sessions/--<cwd>--.
+	# pi stores one JSONL file per session and writes a header line with
+	# {type:"session", id:"...", cwd:"...", timestamp:"..."}.
+	#
+	# Strategy: among sessions for this cwd, prefer IDs not already assigned
+	# in this save run, prefer files touched during this process lifetime,
+	# then prefer header timestamps closest to process start.
+	#
+	# Limitation: this is not PID-specific. If multiple pi processes run in the
+	# same cwd and all session files are equally plausible, one pane may map to
+	# the wrong session. We minimize this via dedup + process-time scoring.
+	local sessions_root="${PI_CODING_AGENT_SESSION_DIR:-${HOME}/.pi/agent/sessions}"
+	if [ -n "$cwd" ] && [ -d "$sessions_root" ] && command -v python3 >/dev/null 2>&1; then
+		local safe_cwd
+		safe_cwd=$(echo "$cwd" | sed -e 's#^[\\/]*##' -e 's#[/\\:]#-#g')
+		local session_dir="${sessions_root}/--${safe_cwd}--"
+		if [ -d "$session_dir" ]; then
+			local etimes
+			etimes=$(ps -o etimes= -p "$child_pid" 2>/dev/null | tr -d ' ' || true)
+			sid=$(
+				USED_PI_SESSION_IDS="$USED_PI_SESSION_IDS" python3 - "$session_dir" "$cwd" "$etimes" <<'PY'
+import datetime, glob, json, os, sys, time
+
+session_dir = sys.argv[1]
+cwd = sys.argv[2]
+etimes_raw = sys.argv[3].strip()
+used = {sid for sid in os.environ.get("USED_PI_SESSION_IDS", "").split("\t") if sid}
+
+process_start = None
+if etimes_raw.isdigit():
+    process_start = time.time() - int(etimes_raw)
+
+def parse_ts(value):
+    if not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+candidates = []
+for path in glob.glob(os.path.join(session_dir, "*.jsonl")):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            first = f.readline()
+        if not first:
+            continue
+        header = json.loads(first)
+        if header.get("type") != "session":
+            continue
+        sid = header.get("id")
+        if not sid:
+            continue
+        header_cwd = header.get("cwd")
+        if isinstance(header_cwd, str) and header_cwd and header_cwd != cwd:
+            continue
+        candidates.append((sid, parse_ts(header.get("timestamp")), os.path.getmtime(path)))
+    except Exception:
+        continue
+
+if not candidates:
+    sys.exit(0)
+
+def score(item):
+    sid, created_at, mtime = item
+    reused = sid in used
+    if process_start is None:
+        active = 0
+        prior = 0
+        distance = float("inf")
+    else:
+        active = 1 if mtime >= process_start - 300 else 0
+        prior = 1 if created_at is not None and created_at <= process_start + 120 else 0
+        distance = abs(process_start - created_at) if created_at is not None else float("inf")
+    return (
+        0 if reused else 1,
+        active,
+        prior,
+        -distance,
+        mtime,
+    )
+
+best = max(candidates, key=score)
+print(best[0])
+PY
+			)
+			if [ -n "$sid" ]; then
+				echo "$sid"
+				return
+			fi
+		fi
+	fi
+}
+
 register_codex_session_id() {
 	local sid="$1"
 	[ -z "$sid" ] && return
@@ -356,6 +466,17 @@ register_codex_session_id() {
 	*"$sid"*) ;;
 	*)
 		USED_CODEX_SESSION_IDS="${USED_CODEX_SESSION_IDS}"$'\t'"$sid"
+		;;
+	esac
+}
+
+register_pi_session_id() {
+	local sid="$1"
+	[ -z "$sid" ] && return
+	case "$USED_PI_SESSION_IDS" in
+	*"$sid"*) ;;
+	*)
+		USED_PI_SESSION_IDS="${USED_PI_SESSION_IDS}"$'\t'"$sid"
 		;;
 	esac
 }
@@ -463,6 +584,7 @@ _discover_session_flags() {
 # auto-discovered without script changes.
 SESSION_FLAG_PATTERN_claude='^--(resume|continue|session-id|fork-session|from-pr)$'
 SESSION_FLAG_PATTERN_opencode='^--session$'
+SESSION_FLAG_PATTERN_pi='^--(session|resume|continue|fork)$'
 # codex uses subcommands (resume, fork), not --flags — handled separately.
 SESSION_SUBCMD_PATTERN_codex='resume|fork'
 # Codex resume/fork have subcommand-specific picker flags that must also
@@ -477,6 +599,10 @@ SESSION_FLAGS_FALLBACK_claude="--continue -c
 --resume -r
 --session-id"
 SESSION_FLAGS_FALLBACK_opencode="--session -s"
+SESSION_FLAGS_FALLBACK_pi="--continue -c
+--fork
+--resume -r
+--session"
 
 # --- CLI args extraction ---
 
@@ -611,6 +737,7 @@ resolve_pane_candidates() {
 				[ -z "$session_id" ] && session_id=$(get_opencode_session "$cand_pid" "$cand_args" "$pane_cwd" "$allow_opencode_db")
 				;;
 			codex) session_id=$(get_codex_session "$cand_pid" "$cand_args" "$pane_cwd") ;;
+			pi) session_id=$(get_pi_session "$cand_pid" "$cand_args" "$pane_cwd") ;;
 			esac
 
 			if [ -n "$session_id" ]; then
@@ -642,7 +769,10 @@ resolve_pane_candidates() {
 				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 					"$pane_target" "$cand_tool" "$session_id" "$pane_cwd" "$cand_pid" "$model" "$cli_args" "$env_json" >>"$parts_file"
 
-				[ "$cand_tool" = "codex" ] && register_codex_session_id "$session_id"
+				case "$cand_tool" in
+				codex) register_codex_session_id "$session_id" ;;
+				pi) register_pi_session_id "$session_id" ;;
+				esac
 				resolved=1
 				break
 			fi
@@ -713,6 +843,7 @@ main() {
 			if      (line ~ /(^claude( |$)|\/claude( |$))/)                                      proc_tool[pid] = "claude"
 			else if (line ~ /(^opencode( |$)|\/opencode( |$))/ && line !~ /opencode run /)       proc_tool[pid] = "opencode"
 			else if (line ~ /(^codex( |$)|\/codex( |$))/)                                        proc_tool[pid] = "codex"
+			else if (line ~ /(^pi( |$)|\/pi( |$))/)                                              proc_tool[pid] = "pi"
 		}
 		END {
 			for (i = 1; i <= pane_count; i++) {
@@ -913,6 +1044,7 @@ emit_session() {
 	claude) session_id=$(get_claude_session "$cpid" "$cargs") ;;
 	opencode) session_id=$(get_opencode_session "$cpid" "$cargs" "$cwd" "$allow_opencode_db") ;;
 	codex) session_id=$(get_codex_session "$cpid" "$cargs" "$cwd") ;;
+	pi) session_id=$(get_pi_session "$cpid" "$cargs" "$cwd") ;;
 	esac
 
 	if [ -n "$session_id" ]; then
@@ -947,9 +1079,10 @@ emit_session() {
 			--arg cli_args "$cli_args" \
 			--argjson env "${env_json:-null}" \
 			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid, model: $model, cli_args: $cli_args, env: $env}' >>"$PARTS_FILE"
-		if [ "$tool" = "codex" ]; then
-			register_codex_session_id "$session_id"
-		fi
+		case "$tool" in
+		codex) register_codex_session_id "$session_id" ;;
+		pi) register_pi_session_id "$session_id" ;;
+		esac
 		return 0
 	else
 		if [ "$log_missing" = "1" ]; then

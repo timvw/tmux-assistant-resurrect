@@ -2,8 +2,9 @@
 
 > **Disclaimer**: This project was entirely vibecoded (designed and implemented
 > through conversation with AI coding assistants). It has been end-to-end tested
-> in Docker with real CLI binaries (170+ automated tests + full save/kill/restore
-> lifecycle smoke test), but has **limited real-world usage** so far. Expect
+> in Docker with real CLI binaries (Claude/OpenCode/Codex) plus Pi fixture
+> coverage (170+ automated tests + full save/kill/restore lifecycle smoke test),
+> but has **limited real-world usage** so far. Expect
 > rough edges. Contributions and bug reports welcome.
 
 Persist and restore AI coding assistant sessions across tmux restarts and reboots.
@@ -12,8 +13,9 @@ Persist and restore AI coding assistant sessions across tmux restarts and reboot
 
 When your computer shuts down, tmux sessions are lost -- including any running
 [Claude Code](https://github.com/anthropics/claude-code),
-[OpenCode](https://github.com/opencode-ai/opencode), or
-[Codex CLI](https://github.com/openai/codex) instances. This project hooks into
+[OpenCode](https://github.com/opencode-ai/opencode),
+[Codex CLI](https://github.com/openai/codex), or
+[Pi](https://github.com/mariozechner/pi) instances. This project hooks into
 [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) to
 automatically save assistant session IDs, CLI flags, and environment variables,
 then re-launch them with the exact same configuration after a restore.
@@ -24,7 +26,7 @@ then re-launch them with the exact same configuration after a restore.
 SAVE (every 5 min + manual prefix+Ctrl-s)
   tmux-resurrect saves pane layouts
     -> post-save hook inspects child processes of each pane
-    -> detects assistants by binary name (claude, opencode, codex)
+    -> detects assistants by binary name (claude, opencode, codex, pi)
     -> extracts session IDs via native hooks/plugins/process args
     -> writes assistant-sessions.json in tmux-resurrect's save dir
 
@@ -36,13 +38,14 @@ RESTORE (on tmux start or manual prefix+Ctrl-r)
          ANTHROPIC_BASE_URL='...' claude --dangerously-skip-permissions --resume <id>
          opencode --verbose -s <session-id>
          codex --full-auto resume <session-id>
+         pi --model sonnet --session <session-id>
 ```
 
 ## Design
 
 Detection is done via direct process inspection: the save script takes a
 single `ps` snapshot of all processes, finds children of each tmux pane shell,
-and matches known assistant binary names (`claude`, `opencode`, `codex`).
+and matches known assistant binary names (`claude`, `opencode`, `codex`, `pi`).
 
 Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 
@@ -51,6 +54,7 @@ Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 | **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` in process args | - | Claude overwrites its process title, so args fallback only works if args are visible |
 | **OpenCode** | `-s` / `--session` in process args | Plugin state file | SQLite DB query (`~/.local/share/opencode/opencode.db`) | Go binary overwrites process title; DB fallback matches most recent session by cwd |
 | **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | - | Codex runs via Node.js, so args are always visible in `ps` |
+| **Pi** | Session header lookup in `~/.pi/agent/sessions/--<cwd>--/*.jsonl` | `--session` in process args | - | Session-file lookup is cwd-scoped and uses process-time scoring + dedup |
 
 Each tool has a primary and fallback extraction method. Fallbacks address the
 chicken-and-egg problem: after a restore, session IDs are in process args even
@@ -62,7 +66,7 @@ version-resilient session ID extraction even when the plugin hasn't fired.
 - [tmux](https://github.com/tmux/tmux) (tested with 3.x)
 - [TPM](https://github.com/tmux-plugins/tpm) (Tmux Plugin Manager)
 - [jq](https://jqlang.github.io/jq/) (used by save/restore scripts)
-- At least one of: Claude Code, OpenCode, Codex CLI
+- At least one of: Claude Code, OpenCode, Codex CLI, Pi
 
 ## Installation
 
@@ -95,6 +99,7 @@ and automatically set up:
 - tmux-resurrect + tmux-continuum settings
 - Claude Code hooks in `~/.claude/settings.json`
 - OpenCode session-tracker plugin in `~/.config/opencode/plugins/`
+- Pi support via session-file lookup in `~/.pi/agent/sessions` (no hook/plugin required)
 
 ## Uninstallation
 
@@ -156,8 +161,10 @@ This builds a Docker image with tmux, jq, just, and the real
 `@anthropic-ai/claude-code`, `opencode-ai`, and `@openai/codex` npm packages,
 then runs the full test suite covering install, save, restore, uninstall, hooks,
 cleanup, TPM plugin installation, session ID extraction, POSIX quoting, process
-tree detection, upgrade-path migration, and regression scenarios. No API keys are needed — the tests exercise
-the process detection and session management layer, not the AI functionality.
+tree detection, upgrade-path migration, and regression scenarios. Pi coverage
+uses mocked `argv[0]=pi` processes plus real `~/.pi/agent/sessions` fixtures.
+No API keys are needed — the tests exercise the process detection and session
+management layer, not the AI functionality.
 
 ### Performance benchmarks (Docker)
 
@@ -188,7 +195,7 @@ files as the `benchmark-results` artifact.
 You can verify the full save → kill → restore cycle on your own machine using
 the normal TPM installation — no cloning or build tools needed.
 
-**Prerequisites**: tmux, jq, and at least one of claude / opencode / codex
+**Prerequisites**: tmux, jq, and at least one of claude / opencode / codex / pi
 installed.
 
 #### 1. Install
@@ -209,6 +216,10 @@ claude
 # In another window:
 cd ~/src/other-project
 opencode
+
+# Or in another window:
+cd ~/src/yet-another-project
+pi
 ```
 
 Work with them for a bit so the session hooks fire (Claude's `SessionStart`
@@ -288,6 +299,7 @@ command to each pane, preserving the original CLI flags and environment:
 - `claude --dangerously-skip-permissions --model opus --resume <session-id>`
 - `opencode -s <session-id>`
 - `ANTHROPIC_BASE_URL='...' codex resume <session-id>`
+- `pi --model sonnet --session <session-id>`
 
 If the session was launched with flags like `--dangerously-skip-permissions` or
 `--model`, those flags are captured from `ps` at save time and replayed on
@@ -321,10 +333,11 @@ cat ~/.local/share/tmux/resurrect/assistant-save.log
 
 | Symptom | Check |
 |---------|-------|
-| Save finds 0 sessions | Run `ps -eo pid=,ppid=,args= \| grep -E 'claude\|opencode\|codex'` to verify assistants are running |
+| Save finds 0 sessions | Run `ps -eo pid=,ppid=,args= \| grep -E 'claude\|opencode\|codex\|pi'` to verify assistants are running |
 | Session ID missing for Claude | Verify the hook is installed: `jq '.hooks.SessionStart' ~/.claude/settings.json` |
 | Session ID missing for OpenCode | Launch with `-s <id>`, or verify the plugin: `ls ~/.config/opencode/plugins/session-tracker.js` |
-| Codex/OpenCode session ID missing (python3 methods) | The save hook auto-detects `python3` in common locations. If your setup uses a non-standard path, set it in tmux: `set-environment -g PATH "/your/python3/dir:$PATH"` |
+| Session ID missing for Pi | Verify session files exist under `~/.pi/agent/sessions/--<cwd>--/*.jsonl` and that pane cwd matches the Pi session cwd |
+| Codex/OpenCode/Pi session ID missing (python3 methods) | The save hook auto-detects `python3` in common locations. If your setup uses a non-standard path, set it in tmux: `set-environment -g PATH "/your/python3/dir:$PATH"` |
 | Restore launches but assistant says "session not found" | The session ID may have expired. This is normal — start a fresh session and the next save will pick up the new ID |
 | Assistants launch twice after restore | Make sure assistants are **not** listed in `@resurrect-processes` — the plugin handles all resuming via the post-restore hook |
 | `just test` fails with Docker errors | Ensure Docker is running and you have network access (the image pulls npm packages) |
@@ -354,9 +367,9 @@ location** above) is what survives reboots.
 
 ### Environment variable capture and restoration
 
-By default, the plugin captures `TMUX_PANE` and `SHELL` in each assistant's
-state file. To capture additional environment variables, set a space-separated
-list in `tmux.conf`:
+By default, the plugin captures `TMUX_PANE` and `SHELL` in hook/plugin-backed
+assistant state files (Claude/OpenCode). To capture additional environment
+variables, set a space-separated list in `tmux.conf`:
 
 ```bash
 set -g @assistant-resurrect-capture-env 'VIRTUAL_ENV NODE_ENV CONDA_DEFAULT_ENV'
@@ -415,7 +428,7 @@ set -g @continuum-save-interval '5'  # minutes
 To add a new AI coding assistant:
 
 1. **Detection**: Add a `case` pattern in `detect_tool()` in
-   `scripts/save-assistant-sessions.sh` matching the tool's binary name
+   `scripts/lib-detect.sh` matching the tool's binary name
 2. **Session ID extraction**: Add a `get_<tool>_session()` function
 3. **Restore command**: Add a `case` branch in
    `scripts/restore-assistant-sessions.sh` with the tool's resume command
@@ -460,12 +473,20 @@ Codex natively writes PID-to-session mappings in
 `~/.codex/session-tags.jsonl`. The save script reads this file directly -- no
 additional hook is needed.
 
+### Pi
+
+Pi stores sessions as JSONL files under `~/.pi/agent/sessions/--<cwd>--/`.
+The save hook reads session headers (`type: "session"`, `id`, `cwd`,
+`timestamp`) and scores candidates by process lifetime + file mtime, with
+dedup across panes. If a pane was launched via restore, `--session <id>` in
+process args is used as a direct fallback.
+
 ### Save hook (`scripts/save-assistant-sessions.sh`)
 
 Runs after each tmux-resurrect save. Takes a single `ps` snapshot of all
 processes, finds children of each tmux pane's shell, and detects assistants by
 matching binary names. Then extracts session IDs using tool-specific methods
-(state files, process args, JSONL lookup). Also captures:
+(state files, process args, JSONL lookup, session-file lookup). Also captures:
 
 - **CLI flags** (`cli_args`): extracted from `ps` args with the binary name and
   session/resume args stripped (e.g., `--dangerously-skip-permissions --model opus`)
@@ -488,8 +509,9 @@ fields are missing (old-format JSON), falls back to bare resume commands.
   history loaded, but any in-flight tool calls or pending operations are lost.
 - **First save after install (chicken-and-egg)**: On initial install, no session
   IDs exist yet. Assistants must complete at least one session (triggering the
-  hooks) before their IDs can be saved. For Codex and OpenCode with `-s`, this
-  is not an issue since session IDs are visible in process args.
+  hooks) before their IDs can be saved. For Codex/OpenCode (`-s`) and Pi
+  (`--session`), this is less of an issue since IDs are available in args after
+  a restored launch.
 - **Claude process title**: Claude Code sets `process.title = 'claude'`, but on
   macOS arm64 (v2.1.44+) `ps -eo args=` still shows full args. CLI flags like
   `--dangerously-skip-permissions` are captured from `ps` at save time. If a
@@ -502,6 +524,9 @@ fields are missing (old-format JSON), falls back to bare resume commands.
   OpenCode SQLite database, matching sessions by working directory. If multiple
   sessions share the same cwd, the most recently updated one is picked — which
   may not be the correct one for that specific pane.
+- **Pi session-file fallback (same-cwd ambiguity)**: Pi session lookup is cwd-
+  scoped (`~/.pi/agent/sessions/--<cwd>--`). If multiple live Pi sessions share
+  a cwd and look equally recent, one pane may be matched to the wrong ID.
 - **Process inspection on macOS**: Uses `ps -eo pid=,ppid=` instead of `pgrep -P`
   due to reliability issues with `pgrep` on macOS.
 - **Pane matching after restore**: tmux-resurrect preserves pane indices, so the

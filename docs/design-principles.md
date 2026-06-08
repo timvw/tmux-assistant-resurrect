@@ -7,7 +7,7 @@ classification or screen content analysis. The save script:
 
 1. Takes a single `ps -eo pid=,ppid=,args=` snapshot (efficient, no per-pane calls)
 2. For each tmux pane, finds direct child processes of the pane's shell
-3. Matches binary names via `case` patterns (`*/claude`, `*/opencode`, `*/codex`)
+3. Matches binary names via `case` patterns (`*/claude`, `*/opencode`, `*/codex`, `*/pi`)
 4. Excludes known false positives (e.g., `opencode run ...` LSP subprocesses)
 
 This is simple, fast, and deterministic. No API calls, no LLM costs, no
@@ -38,6 +38,8 @@ before hooks/plugins have fired):
   resilient fallback when the plugin hasn't fired)
 - **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary);
   `resume <id>` in process args (fallback)
+- **Pi**: `--session <id>` in process args (fallback); session header lookup in
+  `~/.pi/agent/sessions/--<cwd>--/*.jsonl` (primary for fresh sessions)
 
 ## Adding a new assistant
 
@@ -60,6 +62,9 @@ To add support for a new tool:
   or installed via `opencode upgrade`). Like Claude, the Go binary overwrites
   its process title, so `-s <id>` is NOT visible in `ps`. The plugin state
   file and SQLite database fallback are the reliable sources of session IDs.
+- **Pi** stores sessions as JSONL files under `~/.pi/agent/sessions` keyed by
+  encoded cwd. Session IDs are in the header line (`type: "session"`, `id`).
+  Process args remain a useful fallback when launched with `--session`.
 
 ## macOS considerations
 
