@@ -290,10 +290,8 @@ tmux send-keys -t test-opencode-nosid "opencode" Enter
 tmux send-keys -t test-lsp "opencode run pyright-langserver.js" Enter
 # Command line mentioning "codex" as a value (must NOT be detected as Codex)
 tmux send-keys -t test-false-positive "python3 -c 'import time; time.sleep(300)' --profile codex" Enter
-# Pi: mock a long-running process named "pi" (argv[0]).
-# The real pi binary exits immediately without API key setup, so we use a mock
-# for process detection. The real binary is installed for --help discovery tests.
-tmux send-keys -t test-pi "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
+# Pi: real pi binary in offline mode (stays alive as TUI without API key)
+tmux send-keys -t test-pi "pi --offline" Enter
 
 # Wait for each assistant to appear as a child process (replaces fixed sleep 4).
 # OpenCode spawns node → native binary chain, so it takes longer than claude/codex.
@@ -1566,8 +1564,7 @@ PI_E2E_CWD="/tmp/test-pi-sessfile"
 mkdir -p "$PI_E2E_CWD"
 
 tmux new-session -d -s test-pi-sessfile -c "$PI_E2E_CWD"
-# Mock a bare pi process (no --session arg) — session ID comes from file lookup
-tmux send-keys -t test-pi-sessfile "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
+tmux send-keys -t test-pi-sessfile "pi --offline" Enter
 pi_sessfile_shell_pid=$(tmux display-message -t test-pi-sessfile -p '#{pane_pid}')
 wait_for_child "$pi_sessfile_shell_pid" "(^| )pi( |$)" 10 >/dev/null || echo "WARN: pi child not found for sessfile test"
 
@@ -1603,9 +1600,9 @@ PI_DEDUP_CWD="/tmp/test-pi-dedup"
 mkdir -p "$PI_DEDUP_CWD"
 
 tmux new-session -d -s test-pi-dedup1 -c "$PI_DEDUP_CWD"
-tmux send-keys -t test-pi-dedup1 "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
+tmux send-keys -t test-pi-dedup1 "pi --offline" Enter
 tmux new-session -d -s test-pi-dedup2 -c "$PI_DEDUP_CWD"
-tmux send-keys -t test-pi-dedup2 "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
+tmux send-keys -t test-pi-dedup2 "pi --offline" Enter
 
 pi_dedup1_shell_pid=$(tmux display-message -t test-pi-dedup1 -p '#{pane_pid}')
 pi_dedup2_shell_pid=$(tmux display-message -t test-pi-dedup2 -p '#{pane_pid}')
@@ -1815,7 +1812,7 @@ fi
 
 # Test 3: Pi direct child — should find it
 tmux new-session -d -s test-guard-pi -c /tmp
-tmux send-keys -t test-guard-pi "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
+tmux send-keys -t test-guard-pi "pi --offline" Enter
 guard_pi_pid=$(tmux display-message -t test-guard-pi -p '#{pane_pid}')
 wait_for_child "$guard_pi_pid" "(^| )pi( |$)" 10 >/dev/null || echo "WARN: pi child not found for guard test"
 

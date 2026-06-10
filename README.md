@@ -2,9 +2,8 @@
 
 > **Disclaimer**: This project was entirely vibecoded (designed and implemented
 > through conversation with AI coding assistants). It has been end-to-end tested
-> in Docker with real CLI binaries (Claude/OpenCode/Codex) plus Pi (real binary
-> for `--help` discovery, mock processes for integration)
-> (170+ automated tests + full save/kill/restore lifecycle smoke test),
+> in Docker with real CLI binaries (Claude/OpenCode/Codex/Pi)
+> (300+ automated tests + full save/kill/restore lifecycle smoke test),
 > but has **limited real-world usage** so far. Expect
 > rough edges. Contributions and bug reports welcome.
 
@@ -163,9 +162,8 @@ This builds a Docker image with tmux, jq, just, and the real
 `@earendil-works/pi-coding-agent` npm packages, then runs the full test suite
 covering install, save, restore, uninstall, hooks, cleanup, TPM plugin
 installation, session ID extraction, POSIX quoting, process tree detection,
-upgrade-path migration, and regression scenarios. Pi uses mocked `argv[0]=pi`
-processes for integration tests (the real binary exits without API setup) but
-the real binary for `--help` flag discovery tests. No API keys are needed — the
+upgrade-path migration, and regression scenarios. Pi runs with `--offline` flag
+(stays alive as TUI without API key). No API keys are needed — the
 tests exercise the process detection and session management layer, not the AI
 functionality.
 
