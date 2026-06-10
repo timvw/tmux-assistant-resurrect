@@ -486,7 +486,7 @@ register_pi_session_id() {
 # Strip a long option: --flag, --flag=val, or --flag val.
 # Value (if space-separated) must not start with "-" to avoid consuming next flag.
 _strip_long_opt() {
-	echo "$2" | sed -E "s/$1(=[^ ]*| +[^- ][^ ]*)?//g"
+	echo "$2" | sed -E "s/(^| )$1(=[^ ]*| +[^- ][^ ]*)?( |$)/ /g"
 }
 
 # Strip a short option: -X or -X val.
@@ -568,7 +568,8 @@ _discover_session_flags() {
 	while IFS= read -r line; do
 		long=$(echo "$line" | grep -oE -- '--[a-z][-a-z]*' | head -1) || continue
 		echo "$long" | grep -qE "$pattern" || continue
-		short=$(echo "$line" | grep -oE '^\s*-[a-zA-Z]' | tr -d ' ' || true)
+		# Extract short flag: handles both "-X, --long" and "--long, -X" formats
+		short=$(echo "$line" | grep -oE '(^|\s|,\s*)-[a-zA-Z](\s|,|$)' | grep -oE '\-[a-zA-Z]' | head -1 || true)
 		result="${result}${long}${short:+ ${short}}
 "
 	done <<< "$(echo "$help_out" | grep -E '^\s+(-[a-zA-Z],\s+)?--')"

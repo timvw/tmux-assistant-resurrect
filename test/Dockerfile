@@ -10,11 +10,15 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     procps \
-    nodejs \
-    npm \
     python3 \
     gcc \
     make \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 22.x (Pi requires >= 22.19.0; Ubuntu 24.04 ships Node 18)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install bash 3.2 from source (macOS ships bash 3.2; needed for awk-fallback tests)
@@ -36,11 +40,12 @@ RUN curl -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
 
 # Install real assistant CLIs (no mocks)
 # Pin major versions to prevent upstream breaking changes from failing CI.
-# codex is pre-1.0 (0.x), so pin to ~0 (any 0.x); claude-code is 2.x; opencode-ai is 1.x.
-RUN npm install -g "@anthropic-ai/claude-code@^2" "@openai/codex@^0" "opencode-ai@^1"
+# codex is pre-1.0 (0.x), so pin to ~0 (any 0.x); claude-code is 2.x; opencode-ai is 1.x;
+# pi-coding-agent is 0.x (requires Node >= 22.19.0).
+RUN npm install -g "@anthropic-ai/claude-code@^2" "@openai/codex@^0" "opencode-ai@^1" "@earendil-works/pi-coding-agent@^0"
 
 # Verify the binaries exist
-RUN which claude && which codex && which opencode
+RUN which claude && which codex && which opencode && which pi
 
 # Create a test user (avoid running as root — tmux behaves differently)
 RUN useradd -m -s /bin/bash testuser

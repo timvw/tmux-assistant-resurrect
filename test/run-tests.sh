@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Integration tests for tmux-assistant-resurrect.
-# Runs inside Docker with real assistant CLI binaries (claude/opencode/codex)
-# plus mocked pi-process coverage.
+# Runs inside Docker with real assistant CLI binaries (claude/opencode/codex/pi).
 set -euo pipefail
 
 REPO_DIR="$HOME/tmux-assistant-resurrect"
@@ -291,7 +290,9 @@ tmux send-keys -t test-opencode-nosid "opencode" Enter
 tmux send-keys -t test-lsp "opencode run pyright-langserver.js" Enter
 # Command line mentioning "codex" as a value (must NOT be detected as Codex)
 tmux send-keys -t test-false-positive "python3 -c 'import time; time.sleep(300)' --profile codex" Enter
-# Pi: mock a long-running process named "pi" (argv[0])
+# Pi: mock a long-running process named "pi" (argv[0]).
+# The real pi binary exits immediately without API key setup, so we use a mock
+# for process detection. The real binary is installed for --help discovery tests.
 tmux send-keys -t test-pi "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
 
 # Wait for each assistant to appear as a child process (replaces fixed sleep 4).
@@ -307,9 +308,9 @@ wait_for_child "$opencode_pane_shell_pid" "opencode" 10 >/dev/null || echo "WARN
 wait_for_child "$codex_pane_shell_pid" "codex" 10 >/dev/null || echo "WARN: codex child not found"
 wait_for_child "$nosid_pane_shell_pid" "opencode" 10 >/dev/null || echo "WARN: opencode-nosid child not found"
 if wait_for_child "$pi_pane_shell_pid" "(^| )pi( |$)" 10 >/dev/null; then
-	pass "Pi mock process is running in test-pi pane"
+	pass "Pi process is running in test-pi pane"
 else
-	fail "Pi mock process not found in test-pi pane"
+	fail "Pi process not found in test-pi pane"
 fi
 
 # Create a Claude hook state file keyed by the Claude child PID
@@ -1524,6 +1525,123 @@ kill_pane_children test-codex-dedup1 true
 kill_pane_children test-codex-dedup2 true
 rm -rf "$DEDUP_CWD"
 
+# --- Test 5c4d: Pi --session arg fallback (chicken-and-egg, e2e) ---
+#
+# After restore, Pi is launched as `pi --session <session_id>`. Even
+# without a session file, the save script should extract the session ID
+# from the process args.
+
+echo ""
+echo "=== Test 5c4d: Pi --session arg fallback (chicken-and-egg, e2e) ==="
+echo ""
+
+tmux new-session -d -s test-pi-resume -c /tmp
+# Mock a pi process with --session in argv (real pi exits without API key).
+# bash -c 'exec -a ...' makes a child with the desired argv[0] in ps output.
+tmux send-keys -t test-pi-resume "bash -c 'exec -a \"pi --session ses_pi_from_args\" sleep 300'" Enter
+pi_resume_shell_pid=$(tmux display-message -t test-pi-resume -p '#{pane_pid}')
+wait_for_child "$pi_resume_shell_pid" "(^| )pi( |$)" 10 >/dev/null || echo "WARN: pi child not found for resume test"
+
+# Make sure NO session file exists for this cwd
+rm -rf "$HOME/.pi/agent/sessions/--tmp--" 2>/dev/null || true
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+pi_resume_sid=$(jq -r '.sessions[] | select(.pane | contains("test-pi-resume")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+assert_eq "Pi --session arg fallback extracts session ID" "ses_pi_from_args" "$pi_resume_sid"
+
+kill_pane_children test-pi-resume true
+
+# --- Test 5c4e: Pi session file lookup (e2e) ---
+#
+# When Pi is running without --session in args, the save script should
+# find the session ID from ~/.pi/agent/sessions/--<cwd>--/*.jsonl.
+
+echo ""
+echo "=== Test 5c4e: Pi session file lookup (e2e) ==="
+echo ""
+
+PI_E2E_CWD="/tmp/test-pi-sessfile"
+mkdir -p "$PI_E2E_CWD"
+
+tmux new-session -d -s test-pi-sessfile -c "$PI_E2E_CWD"
+# Mock a bare pi process (no --session arg) — session ID comes from file lookup
+tmux send-keys -t test-pi-sessfile "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
+pi_sessfile_shell_pid=$(tmux display-message -t test-pi-sessfile -p '#{pane_pid}')
+wait_for_child "$pi_sessfile_shell_pid" "(^| )pi( |$)" 10 >/dev/null || echo "WARN: pi child not found for sessfile test"
+
+# Create a session file matching this cwd
+pi_e2e_safe=$(echo "$PI_E2E_CWD" | sed -e 's#^[\\/]*##' -e 's#[/\\:]#-#g')
+pi_e2e_sessdir="$HOME/.pi/agent/sessions/--${pi_e2e_safe}--"
+mkdir -p "$pi_e2e_sessdir"
+rm -f "$pi_e2e_sessdir"/*.jsonl 2>/dev/null || true
+cat >"$pi_e2e_sessdir/$(date -u +%Y-%m-%dT%H-%M-%S)-ses_pi_e2e_file.jsonl" <<PIEOF
+{"type":"session","version":3,"id":"ses_pi_e2e_file","timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","cwd":"$PI_E2E_CWD"}
+{"type":"message","id":"msg1","parentId":null,"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}
+PIEOF
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+pi_sessfile_sid=$(jq -r '.sessions[] | select(.pane | contains("test-pi-sessfile")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+assert_eq "Pi session file e2e: session ID from session file" "ses_pi_e2e_file" "$pi_sessfile_sid"
+
+kill_pane_children test-pi-sessfile true
+rm -rf "$PI_E2E_CWD" "$pi_e2e_sessdir"
+
+# --- Test 5c4f: Pi session file dedup — two panes same cwd (e2e) ---
+#
+# Two Pi panes in the same cwd should get distinct session IDs
+# when two session files exist for that cwd.
+
+echo ""
+echo "=== Test 5c4f: Pi session file dedup — two panes same cwd (e2e) ==="
+echo ""
+
+PI_DEDUP_CWD="/tmp/test-pi-dedup"
+mkdir -p "$PI_DEDUP_CWD"
+
+tmux new-session -d -s test-pi-dedup1 -c "$PI_DEDUP_CWD"
+tmux send-keys -t test-pi-dedup1 "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
+tmux new-session -d -s test-pi-dedup2 -c "$PI_DEDUP_CWD"
+tmux send-keys -t test-pi-dedup2 "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
+
+pi_dedup1_shell_pid=$(tmux display-message -t test-pi-dedup1 -p '#{pane_pid}')
+pi_dedup2_shell_pid=$(tmux display-message -t test-pi-dedup2 -p '#{pane_pid}')
+wait_for_child "$pi_dedup1_shell_pid" "(^| )pi( |$)" 10 >/dev/null || echo "WARN: pi child not found for dedup1"
+wait_for_child "$pi_dedup2_shell_pid" "(^| )pi( |$)" 10 >/dev/null || echo "WARN: pi child not found for dedup2"
+
+# Create two session files for the same cwd
+pi_dedup_safe=$(echo "$PI_DEDUP_CWD" | sed -e 's#^[\\/]*##' -e 's#[/\\:]#-#g')
+pi_dedup_sessdir="$HOME/.pi/agent/sessions/--${pi_dedup_safe}--"
+mkdir -p "$pi_dedup_sessdir"
+rm -f "$pi_dedup_sessdir"/*.jsonl 2>/dev/null || true
+
+cat >"$pi_dedup_sessdir/2026-01-01T00-00-00Z-ses_pi_dedup_aaa.jsonl" <<'PIEOF'
+{"type":"session","version":3,"id":"ses_pi_dedup_aaa","timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/test-pi-dedup"}
+PIEOF
+sleep 1
+cat >"$pi_dedup_sessdir/2026-01-01T00-00-01Z-ses_pi_dedup_bbb.jsonl" <<'PIEOF'
+{"type":"session","version":3,"id":"ses_pi_dedup_bbb","timestamp":"2026-01-01T00:00:01Z","cwd":"/tmp/test-pi-dedup"}
+PIEOF
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+pi_dedup_sid1=$(jq -r '.sessions[] | select(.pane | contains("test-pi-dedup1")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+pi_dedup_sid2=$(jq -r '.sessions[] | select(.pane | contains("test-pi-dedup2")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+
+if [ -n "$pi_dedup_sid1" ] && [ -n "$pi_dedup_sid2" ] && [ "$pi_dedup_sid1" != "$pi_dedup_sid2" ]; then
+	pass "Pi dedup e2e: two panes same cwd get distinct sessions ($pi_dedup_sid1 vs $pi_dedup_sid2)"
+else
+	fail "Pi dedup e2e: expected distinct sessions, got '$pi_dedup_sid1' and '$pi_dedup_sid2'"
+fi
+
+kill_pane_children test-pi-dedup1 true
+kill_pane_children test-pi-dedup2 true
+rm -rf "$PI_DEDUP_CWD" "$pi_dedup_sessdir"
+
 # --- Test 5c5: Corrupt/empty state file doesn't crash save ---
 #
 # If a state file is corrupt (not valid JSON) or empty, the save script
@@ -1695,7 +1813,19 @@ else
 	fail "pane_has_assistant missed assistant behind npx wrapper"
 fi
 
-# Test 3: no assistant — should NOT match
+# Test 3: Pi direct child — should find it
+tmux new-session -d -s test-guard-pi -c /tmp
+tmux send-keys -t test-guard-pi "python3 -c 'import os; os.execvp(\"sleep\", [\"pi\", \"300\"])'" Enter
+guard_pi_pid=$(tmux display-message -t test-guard-pi -p '#{pane_pid}')
+wait_for_child "$guard_pi_pid" "(^| )pi( |$)" 10 >/dev/null || echo "WARN: pi child not found for guard test"
+
+if found_pid=$(pane_has_assistant "$guard_pi_pid"); then
+	pass "pane_has_assistant finds pi direct child"
+else
+	fail "pane_has_assistant missed pi direct child"
+fi
+
+# Test 4: no assistant — should NOT match
 tmux new-session -d -s test-guard-empty -c /tmp
 tmux send-keys -t test-guard-empty "sleep 999 &" Enter
 sleep 1
@@ -1708,7 +1838,7 @@ else
 fi
 
 # Clean up guard test sessions
-for s in test-guard-direct test-guard-wrapper test-guard-empty; do
+for s in test-guard-direct test-guard-wrapper test-guard-pi test-guard-empty; do
 	kill_pane_children "$s" true
 done
 sleep 0.5
@@ -2850,6 +2980,43 @@ assert_contains "Backward compat: restore still works" "$compat_log" "ses_compat
 assert_contains "Backward compat: bare resume command" "$compat_log" "restoring claude"
 
 kill_pane_children test-restore-compat true
+
+# --- Test 10c2: Pi restore with enriched cli_args ---
+
+echo ""
+echo "=== Test 10c2: Pi restore with enriched cli_args ==="
+echo ""
+
+tmux new-session -d -s test-restore-pi -c /tmp 2>/dev/null || true
+sleep 0.5
+
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RPIENRICH'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {
+      "pane": "test-restore-pi:0.0",
+      "tool": "pi",
+      "session_id": "ses_pi_enrich",
+      "cwd": "/tmp",
+      "pid": "99999",
+      "cli_args": "--model sonnet"
+    }
+  ]
+}
+RPIENRICH
+
+>"$RESTORE_LOG"
+just restore 2>&1
+sleep 5
+
+pi_enrich_log=$(cat "$RESTORE_LOG")
+assert_contains "Pi restore: session ID present" "$pi_enrich_log" "ses_pi_enrich"
+assert_contains "Pi restore: tool identified" "$pi_enrich_log" "restoring pi"
+assert_contains "Pi restore: cli_args preserved" "$pi_enrich_log" "'--model' 'sonnet'"
+assert_contains "Pi restore: uses command pi prefix" "$pi_enrich_log" "command pi"
+
+kill_pane_children test-restore-pi true
 
 # --- Test 10d: Restore with empty cli_args ---
 

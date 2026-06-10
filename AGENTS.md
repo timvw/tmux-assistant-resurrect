@@ -133,7 +133,8 @@ These are hard-won lessons. Do not "simplify" them away.
 ## Testing
 
 Tests run in Docker with real CLI binaries (`@anthropic-ai/claude-code`,
-`opencode-ai`, `@openai/codex`). No mocks, no API keys needed.
+`opencode-ai`, `@openai/codex`, `@earendil-works/pi-coding-agent`). No mocks,
+no API keys needed.
 
 ```bash
 # Run the full test suite in Docker
@@ -157,7 +158,7 @@ cat ~/.local/share/tmux/resurrect/assistant-restore.log
   tolerant on slow CI.
 - `kill_pane_children()` does tree-walk cleanup instead of inline kill patterns.
 - npm packages are pinned to major versions: `claude-code@^2`, `codex@^0`,
-  `opencode-ai@^1`.
+  `opencode-ai@^1`, `pi-coding-agent@^0`.
 
 ## Adding a new assistant
 
