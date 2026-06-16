@@ -934,6 +934,24 @@ main() {
 		log "jq < 1.7 detected; state file cache disabled (falling through to per-file reads)"
 	fi
 
+	# Pre-warm session-flag discovery once per tool. extract_cli_args runs in a
+	# $() subshell per pane, and _discover_session_flags caches into a shell var
+	# that does not survive the subshell — so without warming here, `<tool> --help`
+	# re-runs for every assistant pane (e.g. 8 claude panes => 8 × `claude --help`
+	# at ~0.45s each plus a grep/head fork storm parsing the output each time).
+	# Warming in main's shell lets the per-pane subshells inherit the cache.
+	# Only warm tools actually present in MATCHES.
+	if [ -n "$MATCHES" ]; then
+		local _wtool
+		while IFS= read -r _wtool; do
+			case "$_wtool" in
+			claude) _discover_session_flags claude "$SESSION_FLAG_PATTERN_claude" >/dev/null ;;
+			opencode) _discover_session_flags opencode "$SESSION_FLAG_PATTERN_opencode" >/dev/null ;;
+			pi) _discover_session_flags pi "$SESSION_FLAG_PATTERN_pi" >/dev/null ;;
+			esac
+		done <<<"$(printf '%s\n' "$MATCHES" | cut -f2 | sort -u)"
+	fi
+
 	# Process only matched panes (those with a detected tool)
 	if [ -n "$MATCHES" ]; then
 		local current_target="" current_cwd="" pane_candidates=""
