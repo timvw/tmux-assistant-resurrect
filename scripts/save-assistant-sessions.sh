@@ -579,6 +579,38 @@ _discover_session_flags() {
 	echo "$result"
 }
 
+# Discover which session-identity subcommands a tool actually supports, by
+# matching a pattern of candidate subcommand names against the tool's --help.
+# Emits the confirmed subcommand names (one per line, in pattern order).
+# Cached per tool in _SESSION_SUBCMDS_<tool> to avoid repeated --help calls:
+# like _discover_session_flags this is called from extract_cli_args inside a
+# $() subshell per pane, so the cache only pays off when warmed in main's shell.
+_discover_session_subcmds() {
+	local tool="$1" subcmd_pattern="$2"
+	local cache_var="_SESSION_SUBCMDS_${tool}"
+	local cached="${!cache_var:-}"
+	if [ -n "$cached" ]; then
+		[ "$cached" = "-" ] || echo "$cached"
+		return 0
+	fi
+
+	# When --help is unavailable (tmux hooks may run with a limited PATH that
+	# cannot resolve the binary), assume every candidate is supported so known
+	# session subcommands are still stripped — matches prior behavior.
+	local help_out subcmd result=""
+	help_out=$("$tool" --help 2>/dev/null) || true
+	for subcmd in $(echo "$subcmd_pattern" | tr '|' ' '); do
+		if [ -z "$help_out" ] || echo "$help_out" | grep -qw "$subcmd"; then
+			result="${result}${subcmd}
+"
+		fi
+	done
+	result=$(echo "$result" | sed '/^$/d')
+	printf -v "$cache_var" '%s' "${result:--}"
+	[ -n "$result" ] && echo "$result"
+	return 0
+}
+
 # Session-identity flag name patterns per tool.
 # Matched against long option names from --help. Flag names are semantic
 # (--resume always means resume), so new flags like --resume-from are
@@ -604,6 +636,36 @@ SESSION_FLAGS_FALLBACK_pi="--continue -c
 --fork
 --resume -r
 --session"
+
+# Pre-warm session-identity discovery once per tool present in a tab-separated
+# MATCHES blob (tool name in field 2). extract_cli_args runs in a $() subshell
+# per pane and the discovery helpers cache into a shell var that does not
+# survive the subshell, so without warming in main's shell `<tool> --help`
+# re-runs for every assistant pane (e.g. 8 claude panes => 8 × `claude --help`).
+# Driven off the SESSION_*_PATTERN_<tool> tables so every assistant is covered —
+# flag-based (claude/opencode/pi) and subcommand-based (codex) alike — and new
+# tools warm automatically once they gain a pattern, with no hardcoded list.
+_warm_session_discovery() {
+	local matches="$1"
+	[ -n "$matches" ] || return 0
+	local tool flag_pat sub_pat
+	while IFS= read -r tool; do
+		# Skip blanks and names that are not valid shell identifier suffixes:
+		# the indirect expansions below would otherwise abort under set -e.
+		case "$tool" in
+		'' | *[!A-Za-z0-9_]*) continue ;;
+		esac
+		flag_pat="SESSION_FLAG_PATTERN_${tool}"
+		sub_pat="SESSION_SUBCMD_PATTERN_${tool}"
+		if [ -n "${!flag_pat:-}" ]; then
+			_discover_session_flags "$tool" "${!flag_pat}" >/dev/null
+		fi
+		if [ -n "${!sub_pat:-}" ]; then
+			_discover_session_subcmds "$tool" "${!sub_pat}" >/dev/null
+		fi
+	done <<<"$(printf '%s\n' "$matches" | cut -f2 | sort -u)"
+	return 0
+}
 
 # --- CLI args extraction ---
 
@@ -659,14 +721,11 @@ extract_cli_args() {
 	fi
 
 	if [ -n "$subcmd_pattern" ]; then
-		local subcmd help_out
+		local subcmd
 		local -a confirmed_subcmds=()
-		help_out=$("$tool" --help 2>/dev/null) || true
-		for subcmd in $(echo "$subcmd_pattern" | tr '|' ' '); do
-			if [ -z "$help_out" ] || echo "$help_out" | grep -qw "$subcmd"; then
-				confirmed_subcmds+=("$subcmd")
-			fi
-		done
+		while IFS= read -r subcmd; do
+			[ -n "$subcmd" ] && confirmed_subcmds+=("$subcmd")
+		done <<<"$(_discover_session_subcmds "$tool" "$subcmd_pattern")"
 		if [ "${#confirmed_subcmds[@]}" -gt 0 ]; then
 			args=$(_strip_subcmds "$args" "${confirmed_subcmds[@]}")
 			# Strip subcommand-specific picker flags (e.g. codex resume --last)
@@ -934,23 +993,11 @@ main() {
 		log "jq < 1.7 detected; state file cache disabled (falling through to per-file reads)"
 	fi
 
-	# Pre-warm session-flag discovery once per tool. extract_cli_args runs in a
-	# $() subshell per pane, and _discover_session_flags caches into a shell var
-	# that does not survive the subshell — so without warming here, `<tool> --help`
-	# re-runs for every assistant pane (e.g. 8 claude panes => 8 × `claude --help`
-	# at ~0.45s each plus a grep/head fork storm parsing the output each time).
-	# Warming in main's shell lets the per-pane subshells inherit the cache.
-	# Only warm tools actually present in MATCHES.
-	if [ -n "$MATCHES" ]; then
-		local _wtool
-		while IFS= read -r _wtool; do
-			case "$_wtool" in
-			claude) _discover_session_flags claude "$SESSION_FLAG_PATTERN_claude" >/dev/null ;;
-			opencode) _discover_session_flags opencode "$SESSION_FLAG_PATTERN_opencode" >/dev/null ;;
-			pi) _discover_session_flags pi "$SESSION_FLAG_PATTERN_pi" >/dev/null ;;
-			esac
-		done <<<"$(printf '%s\n' "$MATCHES" | cut -f2 | sort -u)"
-	fi
+	# Pre-warm session-identity discovery so the per-pane $() subshells inherit
+	# a populated cache instead of each re-running `<tool> --help`. Warming must
+	# happen here in main's shell — the subshells cannot write back into it.
+	# Only tools present in MATCHES are warmed (see _warm_session_discovery).
+	_warm_session_discovery "$MATCHES"
 
 	# Process only matched panes (those with a detected tool)
 	if [ -n "$MATCHES" ]; then

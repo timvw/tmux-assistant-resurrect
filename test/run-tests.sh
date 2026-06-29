@@ -2725,6 +2725,105 @@ for subcmd in resume fork; do
 	fi
 done
 
+# --- Test 9e: session discovery is warmed once per tool, not per pane ---
+# extract_cli_args runs in a $() subshell per pane and the discovery helpers
+# cache into a shell var that does not survive the subshell. main() pre-warms
+# the cache in its own shell so the per-pane subshells inherit it. These tests
+# pin that contract with counting mocks: `<tool> --help` must run exactly once
+# after warming, regardless of pane count. Covers both discovery styles —
+# flag-based (claude) and subcommand-based (codex). Regression guard for #40.
+
+echo ""
+echo "=== Test 9e: warm session-discovery cache (one --help per tool) ==="
+echo ""
+
+suite "cli_args_warm_cache"
+
+WARM_TMP=$(mktemp -d)
+WARM_BIN="$WARM_TMP/bin"
+mkdir -p "$WARM_BIN"
+CLAUDE_CALLS="$WARM_TMP/claude_help_calls"
+CODEX_CALLS="$WARM_TMP/codex_help_calls"
+
+# Mock binaries: each records one line per `--help` invocation, then print
+# realistic help so the real discovery/parsing logic still runs end to end.
+cat >"$WARM_BIN/claude" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = "--help" ] && echo call >>"$CLAUDE_CALLS"
+cat <<'HELP'
+Usage: claude [options]
+  -r, --resume         Resume a session
+      --continue       Continue the most recent session
+      --session-id     Use a specific session id
+      --fork-session   Fork the session into a new one
+      --model          Model to use
+HELP
+EOF
+cat >"$WARM_BIN/codex" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = "--help" ] && echo call >>"$CODEX_CALLS"
+cat <<'HELP'
+Usage: codex [options] [command]
+Commands:
+  resume   Resume a previous session
+  fork     Fork a session
+HELP
+EOF
+chmod +x "$WARM_BIN/claude" "$WARM_BIN/codex"
+
+# Helper: run discovery for 8 panes of <tool> with the mock binaries on PATH.
+# When $1 is "warm", pre-warm through the real production code path
+# (_warm_session_discovery) fed a MATCHES blob with three duplicate panes — this
+# exercises field-2 parsing, sort -u dedup, the identifier guard, and the
+# data-driven dispatch to the right discovery helper, not just the helper alone.
+# When "cold", skip warming to demonstrate the per-pane re-discovery it prevents.
+run_panes() {
+	local mode="$1" tool="$2" args="$3"
+	PATH="$WARM_BIN:$PATH" ${TEST_BASH:-bash} -c '
+		source "'"$REPO_DIR"'/scripts/save-assistant-sessions.sh"
+		if [ "$1" = "warm" ]; then
+			matches=$(printf "p:0.0\t%s\t100\t%s\t/tmp\np:0.1\t%s\t101\t%s\t/tmp\np:0.2\t%s\t102\t%s\t/tmp\n" \
+				"$2" "$3" "$2" "$3" "$2" "$3")
+			_warm_session_discovery "$matches"
+		fi
+		for i in 1 2 3 4 5 6 7 8; do
+			out=$(extract_cli_args "$2" "$3 ses_$i")
+		done
+	' _ "$mode" "$tool" "$args" >/dev/null 2>&1
+}
+
+# Claude (flag-based discovery)
+: >"$CLAUDE_CALLS"
+run_panes cold claude "claude --resume --model opus"
+claude_cold=$(wc -l <"$CLAUDE_CALLS" | tr -d ' ')
+if [ "$claude_cold" -gt 1 ]; then
+	pass "Cold: claude --help re-runs per pane (got $claude_cold) — counting mock works"
+else
+	fail "Cold claude --help should run >1 time across 8 panes, got $claude_cold"
+fi
+
+: >"$CLAUDE_CALLS"
+run_panes warm claude "claude --resume --model opus"
+claude_warm=$(wc -l <"$CLAUDE_CALLS" | tr -d ' ')
+assert_eq "Warmed (via main's loop): claude --help runs once for 3 panes + 8 extracts" "1" "$claude_warm"
+
+# Codex (subcommand-based discovery)
+: >"$CODEX_CALLS"
+run_panes cold codex "codex resume"
+codex_cold=$(wc -l <"$CODEX_CALLS" | tr -d ' ')
+if [ "$codex_cold" -gt 1 ]; then
+	pass "Cold: codex --help re-runs per pane (got $codex_cold) — counting mock works"
+else
+	fail "Cold codex --help should run >1 time across 8 panes, got $codex_cold"
+fi
+
+: >"$CODEX_CALLS"
+run_panes warm codex "codex resume"
+codex_warm=$(wc -l <"$CODEX_CALLS" | tr -d ' ')
+assert_eq "Warmed (via main's loop): codex --help runs once for 3 panes + 8 extracts" "1" "$codex_warm"
+
+rm -rf "$WARM_TMP"
+
 # --- Test 9b: enriched fields in assistant-sessions.json ---
 
 echo ""
