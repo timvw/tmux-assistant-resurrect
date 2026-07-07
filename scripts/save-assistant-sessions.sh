@@ -535,7 +535,7 @@ _strip_subcmds() {
 			;;
 		esac
 	done
-	echo "${words[*]}"
+	echo "${words[*]:-}"
 }
 
 # Discover session-identity flags from a tool's --help output.
