@@ -65,7 +65,7 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: '24'
 
       # The contract suite drives a real Copilot under tmux, so tmux is required.
       # It is not preinstalled on macOS runners.
