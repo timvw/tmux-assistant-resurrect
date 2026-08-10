@@ -55,7 +55,8 @@ jobs:
   # the `ps -o etime=` process-start fallback, and the flattened-argv heuristic
   # that runs because /proc/<pid>/cmdline does not exist -- is exercised solely
   # on contributors' machines. Issue #49 was exactly that: a `ps` keyword BSD
-  # rejects, invisible to Linux CI. These suites need no Docker and no tmux.
+  # rejects, invisible to Linux CI. No Docker needed; tmux is installed below
+  # for the contract suite, which drives a real Copilot in a pane.
   macos:
     runs-on: macos-latest
     name: macos (hermetic + real binary)
@@ -65,6 +66,11 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
+
+      # The contract suite drives a real Copilot under tmux, so tmux is required.
+      # It is not preinstalled on macOS runners.
+      - name: Install tmux
+        run: brew install tmux
 
       - name: Install GitHub Copilot CLI
         run: npm install -g "@github/copilot@^1"
