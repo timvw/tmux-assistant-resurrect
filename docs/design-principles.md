@@ -102,5 +102,14 @@ To add support for a new tool:
 
 ## Windows considerations
 
-- Copilot's lock-file lookup is pure filesystem work, so WSL and native Windows
-  both use the same path as Linux and macOS — no platform-specific fallback.
+- **WSL is the supported Windows story.** It is ordinary Linux: `/proc` is
+  present, so process start times, `COPILOT_HOME` from a process environment and
+  exact argv from `/proc/<pid>/cmdline` all work exactly as they do natively.
+- **Native Windows is not a host for this plugin at all.** tmux has no native
+  Win32 port, and this is a tmux-resurrect hook — without tmux there is nothing
+  to hook into. The tmux-compatible reimplementations for PowerShell do not run
+  tmux plugins either. Copilot's lock lookup being pure filesystem work makes
+  the *logic* portable, but that is not the same as the plugin being usable.
+- CI runs a `windows-latest` job over the hermetic suites as a portability
+  canary. It exists to catch Linux-isms leaking into logic that WSL and MSYS2
+  users rely on — it is not a support claim.

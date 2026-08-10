@@ -51,6 +51,53 @@ jobs:
           comment_mode: off
           check_name: tests (${{ matrix.bash == 'bash' && 'bash 5' || 'bash 3.2' }})
 
+  # The Docker suites above are Linux-only, so every BSD code path -- `stat -f`,
+  # the `ps -o etime=` process-start fallback, and the flattened-argv heuristic
+  # that runs because /proc/<pid>/cmdline does not exist -- is exercised solely
+  # on contributors' machines. Issue #49 was exactly that: a `ps` keyword BSD
+  # rejects, invisible to Linux CI. These suites need no Docker and no tmux.
+  macos:
+    runs-on: macos-latest
+    name: macos (hermetic + real binary)
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install GitHub Copilot CLI
+        run: npm install -g "@github/copilot@^1"
+
+      - name: Hermetic suites
+        run: |
+          bash test/copilot-unit-tests.sh
+          bash test/grok-unit-tests.sh
+
+      # Real binary, no authentication: Copilot writes the session directory and
+      # its lock before the auth check, which is what this pins.
+      - name: Copilot upstream contract (real binary)
+        env:
+          COPILOT_AUTO_UPDATE: 'false'
+        run: bash test/copilot-contract-test.sh
+
+  # Portability canary. tmux has no native Windows port, so the plugin cannot
+  # run here and this is deliberately NOT a support claim -- it only catches
+  # Linux-isms creeping into logic that WSL and MSYS2 users depend on.
+  windows:
+    runs-on: windows-latest
+    name: windows (portability canary)
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Hermetic suites
+        run: |
+          bash test/copilot-unit-tests.sh
+          bash test/grok-unit-tests.sh
+
   benchmark:
     runs-on: ubuntu-latest
     steps:

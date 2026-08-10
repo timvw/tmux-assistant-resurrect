@@ -87,8 +87,10 @@ process args as a reliable fallback.
 - Copilot exposes a PID-specific active-session signal: the live session writes
   `$COPILOT_HOME/session-state/<uuid>/inuse.<pid>.lock` (content = the same PID).
   Resolve it with a single glob — no `/proc`, no `lsof`, no platform branch, and
-  it works on native Windows too. `COPILOT_HOME` replaces the whole `~/.copilot`
-  path, same convention as `GROK_HOME`. An in-process `/resume` can leave more
+  it behaves the same on Linux, WSL and macOS. (Native Windows is not a host for
+  this plugin at all: tmux has no Win32 port, so there is nothing to hook into.)
+  `COPILOT_HOME` replaces the whole `~/.copilot` path, same convention as
+  `GROK_HOME`. An in-process `/resume` can leave more
   than one valid lock for the same PID, so the newest valid lock is authoritative.
 - The lock alone is not enough: it appears at TUI startup, but Copilot writes
   `<session-state>/<uuid>/session.db` only once the conversation has content,
@@ -239,6 +241,14 @@ The contract and end-to-end layers need **no authentication**: Copilot creates
 the session directory and its lock before the auth check runs. Launch it in the
 integration test with *no* session selector, so the UUID exists only in the lock
 and a regressed lookup cannot be masked by the argv fallback.
+
+CI covers three platforms. The Docker suites (bash 5 and bash 3.2) run on Linux;
+a `macos-latest` job runs the hermetic suites plus the real-binary Copilot
+contract suite, because every BSD path — `stat -f`, the `ps -o etime=`
+process-start fallback, and the flattened-argv heuristic that exists only
+because `/proc/<pid>/cmdline` is unavailable — is otherwise exercised nowhere but
+a contributor's laptop; and a `windows-latest` canary runs the hermetic suites
+under Git Bash to catch Linux-isms, without implying Windows is supported.
 
 ```bash
 # Run the full test suite in Docker
