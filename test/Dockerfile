@@ -36,8 +36,26 @@ RUN BASH32_SHA256="26c99025b59e30779300b68adb764f824974d267a4d7cc1b347d14a2393f9
     && cp bash /usr/local/bin/bash3.2 \
     && rm -rf /tmp/bash-3.2 /tmp/bash-3.2.tar.gz
 
-# Install just
-RUN curl -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+# Install just from a pinned release, SHA256 verified per architecture.
+# Deliberately NOT `curl https://just.systems/install.sh | bash`: that endpoint
+# returns 403 often enough to have failed this build twice, and because it runs
+# during image build the whole job dies before a single test executes — which
+# reads as a product failure rather than an infrastructure one. A pinned tarball
+# also makes the image reproducible, matching how bash 3.2 and the npm packages
+# are handled above.
+RUN JUST_VERSION="1.58.0" && \
+    case "$(uname -m)" in \
+      x86_64)  JUST_ARCH="x86_64-unknown-linux-musl";  JUST_SHA256="4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d" ;; \
+      aarch64) JUST_ARCH="aarch64-unknown-linux-musl"; JUST_SHA256="748237128c4c40cbdabc65e841d05ceba13cc23a91eaba395495894c1d9764df" ;; \
+      *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac \
+    && curl -sSfL --retry 3 --retry-delay 2 \
+        -o /tmp/just.tar.gz \
+        "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-${JUST_ARCH}.tar.gz" \
+    && echo "${JUST_SHA256}  /tmp/just.tar.gz" | sha256sum -c - \
+    && tar xz -C /usr/local/bin -f /tmp/just.tar.gz just \
+    && rm -f /tmp/just.tar.gz \
+    && just --version
 
 # Install Bun (Oh My Pi's published `omp` bin uses a Bun shebang).
 RUN curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14" \
