@@ -6,6 +6,13 @@
 
 set -euo pipefail
 
+# Claude settings are profile-wide, but this hook owns only tmux sessions.
+# A non-tmux session must not remove state belonging to a tmux-hosted Claude.
+if [ -z "${TMUX:-}" ] || [ -z "${TMUX_PANE:-}" ]; then
+	cat >/dev/null
+	exit 0
+fi
+
 # Source shared find_claude_pid() helper
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-claude-pid.sh

@@ -921,6 +921,19 @@ echo ""
 # SessionStart payload), verify state file preserves all fields.
 export TMUX_ASSISTANT_RESURRECT_DIR="/tmp/tmux-assistant-resurrect-test5"
 mkdir -p "$TMUX_ASSISTANT_RESURRECT_DIR"
+
+# Profile-wide Claude hooks must not create or remove tmux resurrection state
+# when Claude is hosted by a native terminal, IDE, or another session system.
+unset TMUX TMUX_PANE
+outside_tmux_state="$TMUX_ASSISTANT_RESURRECT_DIR/claude-$$.json"
+echo '{"session_id": "ses_outside_tmux", "cwd": "/tmp"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
+assert_file_not_exists "SessionStart hook ignores Claude outside tmux" "$outside_tmux_state"
+echo '{"session_id":"tmux-owned"}' >"$outside_tmux_state"
+echo '{}' | bash "$REPO_DIR/hooks/claude-session-cleanup.sh"
+assert_file_exists "SessionEnd hook preserves tmux state outside tmux" "$outside_tmux_state"
+rm -f "$outside_tmux_state"
+
+export TMUX="/tmp/tmux-test/default,1,0"
 export TMUX_PANE="%99"
 echo '{"session_id": "ses_hook_test", "cwd": "/tmp/project", "model": "claude-sonnet-4-5-20250929", "source": "startup", "permission_mode": "default", "transcript_path": "/tmp/transcript.jsonl", "hook_event_name": "SessionStart"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
 
@@ -1017,7 +1030,7 @@ else
 	fail "SessionStart hook state file not created for special chars test"
 fi
 
-unset TMUX_PANE
+unset TMUX TMUX_PANE
 
 # Restore the test-wide state dir
 export TMUX_ASSISTANT_RESURRECT_DIR="$TEST_STATE_DIR"

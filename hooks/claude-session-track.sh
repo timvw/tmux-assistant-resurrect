@@ -11,6 +11,14 @@
 
 set -euo pipefail
 
+# Claude settings are profile-wide, but this hook owns only tmux sessions.
+# Consume the provider payload and leave no state when Claude is running in a
+# native terminal, an IDE, or another session host.
+if [ -z "${TMUX:-}" ] || [ -z "${TMUX_PANE:-}" ]; then
+	cat >/dev/null
+	exit 0
+fi
+
 # Source shared find_claude_pid() helper
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-claude-pid.sh
