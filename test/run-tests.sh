@@ -933,7 +933,8 @@ echo '{}' | bash "$REPO_DIR/hooks/claude-session-cleanup.sh"
 assert_file_exists "SessionEnd hook preserves tmux state outside tmux" "$outside_tmux_state"
 rm -f "$outside_tmux_state"
 
-export TMUX="/tmp/tmux-test/default,1,0"
+tmux_socket=$(tmux display-message -p '#{socket_path}')
+export TMUX="${tmux_socket},$$,0"
 export TMUX_PANE="%99"
 echo '{"session_id": "ses_hook_test", "cwd": "/tmp/project", "model": "claude-sonnet-4-5-20250929", "source": "startup", "permission_mode": "default", "transcript_path": "/tmp/transcript.jsonl", "hook_event_name": "SessionStart"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
 
