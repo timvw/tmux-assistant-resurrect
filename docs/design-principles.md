@@ -42,7 +42,8 @@ before hooks/plugins have fired):
   at `~/.local/share/opencode/opencode.db` matching the pane's cwd (version-
   resilient fallback when the plugin hasn't fired)
 - **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary);
-  `resume <id>` in process args (fallback)
+  `resume <id>` in process args; exact UUID from the live tmux pane title;
+  cwd-scoped state database and rollout lookup as the final fallback
 - **Pi**: `--session <id>` in process args (fallback); session header lookup in
   `~/.pi/agent/sessions/--<cwd>--/*.jsonl` (primary for fresh sessions)
 - **Oh My Pi**: `--resume <id>` / `-r <id>` in process args (fallback);

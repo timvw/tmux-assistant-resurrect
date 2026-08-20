@@ -1186,7 +1186,7 @@ assert_eq "Codex resume extraction" "ses_codex_789" "$(get_codex_session 99999 "
 assert_eq "Codex resume with path" "ses_codex_789" "$(get_codex_session 99999 "/usr/bin/codex resume ses_codex_789")"
 assert_eq "Codex bare (no resume)" "" "$(get_codex_session 99999 "codex")"
 
-# --- Codex: state_*.sqlite thread DB (Method 3) ---
+# --- Codex: state_*.sqlite thread DB (Method 4) ---
 # Codex >= ~0.118 persists thread state in SQLite. The save script queries
 # the threads table by cwd, preferring recently-updated unarchived threads.
 
@@ -1250,6 +1250,20 @@ HOME="$STATEDB_TEST_DIR"
 statedb_sid=$(get_codex_session $$ "codex" "/tmp/statedb-project")
 assert_eq "Codex state DB: finds active thread by cwd" "ses_statedb_active" "$statedb_sid"
 
+# A running Codex TUI publishes its exact UUID in the tmux pane title. Prefer
+# that process-specific identity over the ambiguous same-cwd database fallback.
+tmux() {
+	if [ "$1" = "display-message" ] && [ "$4" = "test-codex-title" ]; then
+		printf '%s\n' 'codex | project | Ready | 01a02030-ab68-7050-bdf3-fd0946302174 | main'
+		return 0
+	fi
+	command tmux "$@"
+}
+statedb_title_sid=$(get_codex_session $$ "codex" "/tmp/statedb-project" "test-codex-title")
+assert_eq "Codex pane title beats ambiguous same-cwd state DB" \
+	"01a02030-ab68-7050-bdf3-fd0946302174" "$statedb_title_sid"
+unset -f tmux
+
 # Should NOT match a different cwd
 statedb_miss=$(get_codex_session $$ "codex" "/tmp/nonexistent")
 assert_eq "Codex state DB: no match for different cwd" "" "$statedb_miss"
@@ -1267,7 +1281,7 @@ else
 fi
 USED_CODEX_SESSION_IDS=""
 
-# Should prefer state DB (Method 3) over rollout JSONL (Method 4) when both exist
+# Should prefer state DB (Method 4) over rollout JSONL (Method 5) when both exist
 mkdir -p "$STATEDB_TEST_DIR/.codex/sessions/2026/04/23"
 cat >"$STATEDB_TEST_DIR/.codex/sessions/2026/04/23/rollout-statedb-test.jsonl" <<'ROLLOUT'
 {"timestamp":"2026-04-23T10:00:00.000Z","type":"session_meta","payload":{"id":"ses_rollout_loser","timestamp":"2026-04-23T10:00:00.000Z","cwd":"/tmp/statedb-project","originator":"codex_cli_rs","cli_version":"0.116.0"}}
@@ -1279,9 +1293,9 @@ assert_eq "Codex state DB takes priority over rollout JSONL" "ses_statedb_active
 HOME="$ORIG_HOME"
 rm -rf "$STATEDB_TEST_DIR"
 
-# --- Codex: rollout session files (Method 4) ---
+# --- Codex: rollout session files (Method 5) ---
 # Codex ~0.100-0.117 wrote session metadata to ~/.codex/sessions/*/*.jsonl.
-# Newer versions use SQLite (Method 3). Test the JSONL fallback.
+# Newer versions use SQLite (Method 4). Test the JSONL fallback.
 
 ROLLOUT_TEST_DIR=$(mktemp -d)
 mkdir -p "$ROLLOUT_TEST_DIR/.codex/sessions/2026/03/24"
@@ -1361,7 +1375,7 @@ if [ -n "${TEST_BASH:-}" ] && [ "$TEST_BASH" != "bash" ] && command -v "$TEST_BA
 fi
 
 # Run the save script's preamble + get_codex_session under the restricted PATH.
-# The PATH augmentation block should find python3 and make Method 3 work.
+# The PATH augmentation block should find python3 and make Method 5 work.
 ORIG_HOME_PATH="$HOME"
 HOME="$PATH_TEST_DIR"
 path_aug_sid=$(PATH="$rbin" ${TEST_BASH:-bash} -c '

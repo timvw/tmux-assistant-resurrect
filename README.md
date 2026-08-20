@@ -62,7 +62,7 @@ Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 | **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` in process args | - | Claude overwrites its process title, so args fallback only works if args are visible |
 | **GitHub Copilot CLI** | `$COPILOT_HOME/session-state/<uuid>/inuse.<pid>.lock` written by the live session | `--session-id` / `--resume` in process args | - | Plain glob keyed on the native PID — no `/proc`, no `lsof`, so it behaves identically on Linux, WSL and macOS |
 | **OpenCode** | `-s` / `--session` in process args | Plugin state file | SQLite DB query (`~/.local/share/opencode/opencode.db`) | Go binary overwrites process title; DB fallback matches most recent session by cwd |
-| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | - | Codex runs via Node.js, so args are always visible in `ps` |
+| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | Exact UUID from the tmux pane title, then state DB / rollout lookup | Pane titles disambiguate bare processes sharing a cwd; database lookup is a last resort |
 | **Pi** | Session header lookup in `~/.pi/agent/sessions/--<cwd>--/*.jsonl` | `--session` in process args | - | Session-file lookup is cwd-scoped and uses process-time scoring + dedup |
 | **Oh My Pi** | Terminal breadcrumb + session JSONL lookup (`$XDG_STATE_HOME/omp`, `$XDG_DATA_HOME/omp`) | `--resume` / `-r` in process args | `--session-dir` / `--profile` scoped lookup | Distinct `omp` tool; no hook/plugin required |
 | **Grok** | PID lookup in `~/.grok/active_sessions.json` | `-r` / `--resume <uuid>` in process args | - | Registry records every live session (including a bare `grok` with no args) keyed by PID, so sessions sharing a cwd never collide; no hook/plugin required |
@@ -534,9 +534,11 @@ also cleans up its state file on process exit (SIGINT, SIGTERM).
 
 ### Codex CLI
 
-Codex natively writes PID-to-session mappings in
-`~/.codex/session-tags.jsonl`. The save script reads this file directly -- no
-additional hook is needed.
+When available, Codex writes PID-to-session mappings in
+`~/.codex/session-tags.jsonl`. The save script reads this file directly. For
+versions that omit it, the script reads the exact UUID Codex publishes in the
+tmux pane title before falling back to cwd-scoped state database and rollout
+lookups. No additional hook is needed.
 
 ### GitHub Copilot CLI
 

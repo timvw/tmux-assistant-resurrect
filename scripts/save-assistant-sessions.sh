@@ -362,6 +362,7 @@ get_codex_session() {
 	local child_pid="$1"
 	local args="$2"
 	local cwd="${3:-}"
+	local pane_target="${4:-}"
 
 	# Method 1: session-tags.jsonl (written by Codex at runtime)
 	local tags_file="${HOME}/.codex/session-tags.jsonl"
@@ -385,13 +386,27 @@ get_codex_session() {
 		return
 	fi
 
-	# Method 3: Codex thread state DB (Codex >= ~0.118 persist state in
+	# Method 3: exact UUID from the live tmux pane title. Codex publishes the
+	# current session ID there, which disambiguates multiple bare processes in
+	# the same cwd. Older versions and customized titles fall through.
+	if [ -n "$pane_target" ]; then
+		local pane_title uuid_re
+		pane_title=$(tmux display-message -p -t "$pane_target" '#{pane_title}' 2>/dev/null || true)
+		uuid_re='[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}'
+		sid=$(printf '%s\n' "$pane_title" | sed -n "s/.*\($uuid_re\).*/\1/p")
+		if [ -n "$sid" ]; then
+			echo "$sid"
+			return
+		fi
+	fi
+
+	# Method 4: Codex thread state DB (Codex >= ~0.118 persist state in
 	# SQLite: ~/.codex/state_*.sqlite, table `threads`, columns id/cwd/
 	# updated_at/archived).  This is the canonical current source — codex
 	# writes a `threads` row per session and bumps `updated_at` on every
 	# user turn.  A long-lived session that started days ago keeps its
 	# same `id` in this table even though no new rollout JSONL is ever
-	# written, which is exactly the case Method 4 misses.
+	# written, which is exactly the case Method 5 misses.
 	#
 	# Strategy: among threads matching our process's cwd that are unarchived
 	# and have been updated during this process's lifetime, pick the most
@@ -412,8 +427,8 @@ get_codex_session() {
 		fi
 	fi
 
-	# Method 4: Codex rollout session files (Codex ~0.100-0.117 wrote
-	# these; newer versions have moved to SQLite, see Method 3).
+	# Method 5: Codex rollout session files (Codex ~0.100-0.117 wrote
+	# these; newer versions have moved to SQLite, see Method 4).
 	# Releases in that window persisted session metadata under
 	# ~/.codex/sessions/*/*.jsonl and included a session_meta record
 	# with both id and cwd.
@@ -1632,7 +1647,7 @@ resolve_pane_candidates() {
 				session_id="$cached_sid"
 				[ -z "$session_id" ] && session_id=$(get_opencode_session "$cand_pid" "$cand_args" "$pane_cwd" "$allow_deferred_fallback" || true)
 				;;
-			codex) session_id=$(get_codex_session "$cand_pid" "$cand_args" "$pane_cwd" || true) ;;
+			codex) session_id=$(get_codex_session "$cand_pid" "$cand_args" "$pane_cwd" "$pane_target" || true) ;;
 			pi) session_id=$(get_pi_session "$cand_pid" "$cand_args" "$pane_cwd" || true) ;;
 			omp) session_id=$(get_omp_session "$cand_pid" "$cand_args" "$pane_cwd" "$pane_tty" || true) ;;
 			grok) session_id=$(get_grok_session "$cand_pid" "$cand_args" || true) ;;
@@ -2136,7 +2151,7 @@ emit_session() {
 		session_id=$(get_copilot_session "$cpid" "$cargs" 1 "$copilot_state_dir" || true)
 		;;
 	opencode) session_id=$(get_opencode_session "$cpid" "$cargs" "$cwd" "$allow_opencode_db" || true) ;;
-	codex) session_id=$(get_codex_session "$cpid" "$cargs" "$cwd" || true) ;;
+	codex) session_id=$(get_codex_session "$cpid" "$cargs" "$cwd" "$target" || true) ;;
 	pi) session_id=$(get_pi_session "$cpid" "$cargs" "$cwd" || true) ;;
 	omp) session_id=$(get_omp_session "$cpid" "$cargs" "$cwd" "" || true) ;;
 	grok) session_id=$(get_grok_session "$cpid" "$cargs" || true) ;;
