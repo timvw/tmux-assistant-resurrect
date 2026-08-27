@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2154  # sources save script; resets its globals and reads its per-tool vars
 # Integration tests for tmux-assistant-resurrect.
 # Runs inside Docker with real assistant CLI binaries
 # (claude/copilot/opencode/codex/pi/omp).
@@ -443,7 +444,7 @@ assert_contains "TPM entry point defaults session-less relaunch on" \
 	"$(cat "$REPO_DIR/tmux-assistant-resurrect.tmux")" \
 	"tmux set-option -g @assistant-resurrect-relaunch 'on'"
 # Verify idempotent install (run again, should not duplicate)
-just install 2>&1 >/dev/null
+just install >/dev/null 2>&1
 
 hook_count_after=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
 assert_eq "Install is idempotent (no duplicate hooks)" "1" "$hook_count_after"
@@ -851,7 +852,7 @@ echo ""
 # becomes the foreground process, so pane_current_command != shell. Guard 1
 # (the shell whitelist) should fire and skip these panes.
 sleep 2
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep $((session_count * 2 + 3))
 
@@ -897,7 +898,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'BG_EOF'
 }
 BG_EOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -939,7 +940,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'CWDEOF'
 }
 CWDEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 restore_exit=0
 just restore 2>&1 || restore_exit=$?
 sleep 5
@@ -960,7 +961,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'CWDEOF2'
 }
 CWDEOF2
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 restore_exit2=0
 just restore 2>&1 || restore_exit2=$?
 sleep 5
@@ -1033,7 +1034,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'UNKNEOF'
 }
 UNKNEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 restore_exit_unknown=0
 just restore 2>&1 || restore_exit_unknown=$?
 sleep 3
@@ -1066,7 +1067,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'NOSHELLEOF'
 }
 NOSHELLEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 restore_exit_noshell=0
 just restore 2>&1 || restore_exit_noshell=$?
 sleep 3
@@ -2461,7 +2462,7 @@ echo "=== Test 6: just clean ==="
 echo ""
 
 # Re-install for the clean test
-just install 2>&1 >/dev/null
+just install >/dev/null 2>&1
 
 # Create a stale state file with a dead PID
 STATE_DIR="$TEST_STATE_DIR"
@@ -2499,6 +2500,7 @@ cat >"$STATE_DIR/opencode-zeropid.json" <<EOF
 }
 EOF
 
+# shellcheck disable=SC2034  # captured to suppress output; value not inspected
 clean_output_2=$(just clean 2>&1)
 assert_file_not_exists "Clean removes corrupt PID state file" "$STATE_DIR/claude-corrupt.json"
 assert_file_not_exists "Clean removes zero-PID state file" "$STATE_DIR/opencode-zeropid.json"
@@ -2511,7 +2513,7 @@ echo "=== Test 7: TPM plugin entry point (.tmux file) ==="
 echo ""
 
 # Clean up from previous tests — remove claude hooks and opencode plugin
-just uninstall 2>&1 >/dev/null
+just uninstall >/dev/null 2>&1
 
 # Remove claude settings entirely to test from scratch
 rm -f "$HOME/.claude/settings.json"
@@ -2586,7 +2588,7 @@ upgrade_cleanup_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command | c
 assert_eq "Upgrade: no duplicate SessionEnd hooks after upgrade" "1" "$upgrade_cleanup_count"
 
 # Now test uninstall via justfile — it should remove both old and new forms
-just uninstall 2>&1 >/dev/null
+just uninstall >/dev/null 2>&1
 
 upgrade_remaining=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json" 2>/dev/null || echo "0")
 assert_eq "Upgrade: uninstall removes old unquoted hooks" "0" "$upgrade_remaining"
@@ -3688,7 +3690,7 @@ echo "=== Test 9b: enriched fields in assistant-sessions.json ==="
 echo ""
 
 # Re-install so save/restore use the updated scripts
-just install 2>&1 >/dev/null
+just install >/dev/null 2>&1
 
 # Create a tmux session with claude running
 tmux new-session -d -s test-enrich-claude -c /tmp
@@ -3848,7 +3850,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RENRICH'
 RENRICH
 
 RESTORE_LOG="$HOME/.tmux/resurrect/assistant-restore.log"
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -3889,7 +3891,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<RECOPEOF
 }
 RECOPEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -3929,7 +3931,7 @@ RENVEOF
 # Set the capture-env option so restore knows ANTHROPIC_BASE_URL is user-configured
 tmux set-option -g @assistant-resurrect-capture-env 'ANTHROPIC_BASE_URL' 2>/dev/null || true
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -3964,7 +3966,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RCOMPAT'
 }
 RCOMPAT
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4073,7 +4075,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RPIENRICH'
 }
 RPIENRICH
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4112,7 +4114,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'REMPTY'
 }
 REMPTY
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4152,7 +4154,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RMODEL'
 }
 RMODEL
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4183,7 +4185,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RMODELDUP'
 }
 RMODELDUP
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4215,7 +4217,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RMODELOC'
 }
 RMODELOC
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4257,7 +4259,7 @@ RENVF
 # Set the capture-env option so restore knows MY_CUSTOM is a user var
 tmux set-option -g @assistant-resurrect-capture-env 'MY_CUSTOM' 2>/dev/null || true
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4358,7 +4360,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RBRACKET'
 }
 RBRACKET
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 restore_bracket_exit=0
 just restore 2>&1 || restore_bracket_exit=$?
 sleep 5
@@ -4460,7 +4462,7 @@ cat >"$SAVED" <<RPIPEEOF
 }
 RPIPEEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4497,7 +4499,7 @@ cat >"$SAVED" <<RLEGACYEOF
 }
 RLEGACYEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4549,7 +4551,7 @@ else
 }
 RDOTEOF
 
-	>"$RESTORE_LOG"
+	: >"$RESTORE_LOG"
 	just restore 2>&1
 	sleep 5
 

@@ -1,5 +1,8 @@
 # Codex rollout session-file lookup (get_codex_session, Method 4).
 # Invoked as: USED_CODEX_SESSION_IDS=... python3 codex_rollout.py <sessions_root> <cwd> <process_start_epoch>
+# The broad `except Exception` guards below are deliberate (hence the noqa):
+# this runs inside the save hook against files written by another process,
+# and one unreadable or malformed file must be skipped, never propagated.
 import datetime
 import json
 import os
@@ -24,7 +27,7 @@ def parse_ts(value):
         return None
     try:
         return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -55,7 +58,7 @@ for root, _, files in os.walk(sessions_root):
             candidates.append(
                 (sid, parse_ts(payload.get("timestamp")), os.path.getmtime(path))
             )
-        except Exception:
+        except Exception:  # noqa: BLE001, S112
             continue
 
 if not candidates:
