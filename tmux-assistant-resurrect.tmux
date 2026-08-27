@@ -60,7 +60,10 @@ tmux set-option -g @resurrect-hook-post-restore-all "$(hook_command "${CURRENT_D
 if [ -z "$(tmux show-option -gqv @continuum-save-interval)" ]; then
     tmux set-option -g @continuum-save-interval '5'
 fi
-tmux set-option -g @continuum-restore 'on'
+# Respect user's @continuum-restore if already set (same guard as save-interval)
+if [ -z "$(tmux show-option -gqv @continuum-restore)" ]; then
+    tmux set-option -g @continuum-restore 'on'
+fi
 
 # --- Claude Code hooks ---
 
