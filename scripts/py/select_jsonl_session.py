@@ -1,5 +1,8 @@
 # Pick the best JSONL session id across one or more session dirs (select_jsonl_session_id).
 # Invoked as: python3 select_jsonl_session.py <cwd> <process_start_epoch> <used_ids> <session_dir>...
+# The broad `except Exception` guards below are deliberate (hence the noqa):
+# this runs inside the save hook against files written by another process,
+# and one unreadable or malformed file must be skipped, never propagated.
 import datetime
 import glob
 import json
@@ -34,7 +37,7 @@ def parse_ts(value):
         return None
     try:
         return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -72,7 +75,7 @@ for session_dir in session_dirs:
             candidates.append(
                 (sid, parse_ts(header.get("timestamp")), os.path.getmtime(path))
             )
-        except Exception:
+        except Exception:  # noqa: BLE001, S112
             continue
 
 if not candidates:

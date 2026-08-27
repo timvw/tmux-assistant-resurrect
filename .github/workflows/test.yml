@@ -11,6 +11,46 @@ permissions:
   checks: write
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    name: lint (shellcheck + ruff + node)
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install linters
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          # Pinned: an unpinned linter turns every upstream release into a
+          # potential red build on an unrelated day. ruff 0.16 widened its
+          # default rule set, which is exactly how that failure arrives.
+          # Bump deliberately, with the new findings reviewed in the same PR.
+          pip install --quiet ruff==0.16.5
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      # Gate at error+warning severity (info-level findings are not blockers).
+      # SC1091: shellcheck cannot follow dynamic source paths — expected.
+      - name: shellcheck (scripts + hooks)
+        run: shellcheck --severity=warning --exclude=SC1091 scripts/*.sh hooks/*.sh *.tmux
+
+      # Test scripts are gated at the same level; targeted disable comments
+      # handle the intentional patterns (bare truncation, unused read vars).
+      - name: shellcheck (tests)
+        run: shellcheck --severity=warning --exclude=SC1091 test/*.sh
+
+      - name: ruff (Python helpers)
+        run: ruff check scripts/py/
+
+      - name: node --check (JS plugin)
+        run: node --check hooks/opencode-session-track.js
+
   test:
     runs-on: ubuntu-latest
     strategy:
