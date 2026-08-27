@@ -206,6 +206,15 @@ resolve_pane_candidates 'test:0.0' /tmp /dev/null "$candidates" "$unit_us" 0 \
 	"$state_cache" "$parts_file" test 0 0
 assert_eq "resolver relaunches the first BFS candidate argv" \
 	"claude agents" "$captured_first_args"
+assert_eq "one unresolved pane increments the summary count once" \
+	"1" "$UNRESOLVED_PANES"
+
+handle_sessionless_relaunch() { return 0; }
+UNRESOLVED_PANES=0
+resolve_pane_candidates 'test:0.0' /tmp /dev/null "$candidates" "$unit_us" 0 \
+	"$state_cache" "$parts_file" test 0 0
+assert_eq "a vouched relaunch is not reported as unresolved" \
+	"0" "$UNRESOLVED_PANES"
 
 echo
 echo "relaunch unit tests: $PASS passed, $FAIL failed"

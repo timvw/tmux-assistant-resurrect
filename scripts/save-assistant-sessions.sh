@@ -43,6 +43,11 @@ PY_DIR="$SCRIPT_DIR/py"
 # Shared with the SessionStart/SessionEnd hooks, which write and delete these
 # files from the assistant's process environment rather than the tmux server's.
 STATE_DIR="$(assistant_state_dir)"
+
+# Panes where a tool was detected but neither a session ID nor an authorized
+# relaunch command could be resolved. Such a pane is dropped from the sidecar;
+# without this the save reports plain success and the loss is easy to miss.
+UNRESOLVED_PANES=0
 # Follow tmux-resurrect's own save-dir resolution (see resurrect_data_dir in
 # lib-detect.sh) instead of hardcoding ~/.tmux/resurrect, so our sidecar lands
 # next to resurrect's saves on both legacy and XDG installs.
@@ -2172,7 +2177,9 @@ resolve_pane_candidates() {
 	done
 
 	if [ "$resolved" -eq 0 ] && [ -n "$first_tool" ]; then
-		handle_sessionless_relaunch "$pane_target" "$first_tool" "$first_pid" "$first_args" "$pane_cwd" 1 || true
+		if ! handle_sessionless_relaunch "$pane_target" "$first_tool" "$first_pid" "$first_args" "$pane_cwd" 1; then
+			UNRESOLVED_PANES=$((UNRESOLVED_PANES + 1))
+		fi
 	fi
 }
 
@@ -2309,6 +2316,9 @@ stop_save_watchdog() {
 # --- Main ---
 
 main() {
+	# Reset per-run: the script is sourceable, so main() can be entered more
+	# than once in one shell and a stale count would carry over.
+	UNRESOLVED_PANES=0
 	PS_FILE=$(mktemp)
 	PANE_FILE=$(mktemp)
 	PARTS_FILE=$(mktemp)
@@ -2517,7 +2527,11 @@ main() {
 	count=$(jq '.sessions | length' "$OUTPUT_FILE")
 	relaunch_count=$(jq '.relaunch | length' "$OUTPUT_FILE")
 
-	log "saved $count assistant session(s) to $OUTPUT_FILE"
+	if [ "$UNRESOLVED_PANES" -gt 0 ]; then
+		log "saved $count assistant session(s) to $OUTPUT_FILE ($UNRESOLVED_PANES detected but unresolved)"
+	else
+		log "saved $count assistant session(s) to $OUTPUT_FILE"
+	fi
 	[ "$relaunch_count" -gt 0 ] && log "saved $relaunch_count vouched assistant relaunch command(s)"
 
 	# Strip captured pane contents for assistant panes so tmux-resurrect
