@@ -278,7 +278,7 @@ Find your actual save directory with `just status` (from the plugin directory)
 or this one-liner that mirrors the same resolution logic:
 
 ```bash
-RESURRECT_DIR=$(tmux show-option -gqv @resurrect-dir 2>/dev/null)
+RESURRECT_DIR="${TMUX_RESURRECT_DIR:-$(tmux show-option -gqv @resurrect-dir 2>/dev/null)}"
 [ -n "$RESURRECT_DIR" ] || { [ -d ~/.tmux/resurrect ] && RESURRECT_DIR=~/.tmux/resurrect || RESURRECT_DIR=${XDG_DATA_HOME:-~/.local/share}/tmux/resurrect; }
 ```
 
