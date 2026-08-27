@@ -50,7 +50,8 @@ tmux-resurrect to save session IDs and restore them automatically.
   injecting a resume command into a pane: (1) the pane's foreground process must
   be a known shell, and (2) the pane must not already have a running assistant
   in its process tree. Both must pass. This prevents typing into TUIs or
-  double-launching.
+  double-launching. The saved cwd must also still be a directory; otherwise
+  leave the pane untouched rather than resume in an unrelated fallback cwd.
 - **Restore shell whitelist**: Guard 1 strips a leading `-` (login shells report
   as `-bash`, `-zsh`, etc.) then checks against a hardcoded whitelist: `bash`,
   `zsh`, `fish`, `sh`, `dash`, `ksh`, `tcsh`, `csh`, `nu`. If a user's shell
@@ -60,9 +61,11 @@ tmux-resurrect to save session IDs and restore them automatically.
 ## Detection approach
 
 Agent detection uses direct process inspection: the save script takes a single
-`ps -eo pid=,ppid=,args=` snapshot and matches child processes of tmux pane
-shells against known assistant binary names via `detect_tool()` in
-`scripts/lib-detect.sh`.
+`ps -eo pid=,ppid=,args=` snapshot, builds the complete parent/child map before
+walking it (never assume `ps` row order), and matches only the executable token
+or a script directly launched by a known runtime against assistant binary names
+via `detect_tool()` in `scripts/lib-detect.sh`. Never match assistant-looking
+path arguments elsewhere in a command line; `vim /tmp/claude` is not Claude.
 
 Session ID extraction uses tool-native mechanisms (state files, process args,
 JSONL lookup, SQLite database) -- this is infrastructure plumbing, not heuristic
@@ -181,7 +184,10 @@ process args as a reliable fallback.
   helper that parses `--help` needs a `SESSION_EXTRA_WARM_<tool>` entry.
   Otherwise `<tool> --help` re-execs once per pane on every save.
 - Log files go to `assistant-{save,restore}.log` in tmux-resurrect's save dir
-  (resolved by `resurrect_data_dir` in `lib-detect.sh`; truncated to 500 lines per run)
+  (resolved by `resurrect_data_dir` in `lib-detect.sh`; truncated to 500 lines per
+  run). Sidecars, state files, and logs contain session/environment data: create
+  them owner-only, publish JSON atomically, use unpredictable same-directory
+  temporary files, and never append through a symlinked log path.
 - Process inspection uses `ps -eo pid=,ppid=` (not `pgrep -P` -- unreliable on macOS)
 - Agent detection matches binary names via `case` patterns in `detect_tool()`
 - Hook install uses two-phase matching: **exact equality** (`== $cmd`) to detect
@@ -348,6 +354,9 @@ just test
 just test-targets                  # saved-pane target resolution
 just test-grok
 just test-copilot
+just test-save-hardening           # save/process detection and file safety
+just test-restore                  # restore validation, quoting, failure isolation
+just test-plugin-hardening         # hooks, installers, and Python helpers
 
 # Real tmux, own socket; skips without tmux or below tmux 3.7
 just test-tmux-contract

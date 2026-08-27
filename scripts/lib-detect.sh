@@ -14,41 +14,54 @@
 #   resurrect_data_dir           — prints tmux-resurrect's save directory
 
 # --- detect_tool ---
-# Match binary name with optional path prefix, standalone or with arguments.
-# Handles: /path/to/claude, claude, claude --resume ..., copilot --resume ...,
-#          opencode -s ..., codex resume ..., pi --session ..., omp --resume ...,
-#          grok --resume ..., etc.
+# Match the executable token (or a script passed directly to a known runtime),
+# standalone or with arguments. Handles: /path/to/claude, claude,
+# node /path/to/copilot, bash /path/to/opencode, etc.
 # Excludes: opencode run ... (LSP subprocesses), omp __omp_worker_* subprocesses
-#
-# Limitation: patterns match any command line containing /claude, /opencode,
-# /copilot, /codex, /pi, /omp, or /grok as a path component. An unrelated
-# binary with the same name (e.g., a LaTeX tool named "codex") would be falsely
-# detected. In practice this is rare inside tmux panes, but worth noting.
-# Future: could verify identity via --version or known subcommands if false
-# positives become an issue.
 detect_tool() {
 	local args="$1"
-	case "$args" in
-	claude | claude\ * | */claude | */claude\ *) echo "claude" ;;
-	copilot | copilot\ * | */copilot | */copilot\ *) echo "copilot" ;;
-	opencode | opencode\ * | */opencode | */opencode\ *)
-		# Exclude LSP/language server subprocesses
-		case "$args" in
-		*"opencode run "*) ;;
-		*) echo "opencode" ;;
-		esac
-		;;
-	codex | codex\ * | */codex | */codex\ *) echo "codex" ;;
-	pi | pi\ * | */pi | */pi\ *) echo "pi" ;;
-	omp | omp\ * | */omp | */omp\ *)
-		# Exclude hidden OMP worker subprocesses; their process title can also be "omp".
-		case "$args" in
-		*"__omp_worker_"*) ;;
-		*) echo "omp" ;;
-		esac
-		;;
-	grok | grok\ * | */grok | */grok\ *) echo "grok" ;;
+	local reglob="" first tool=""
+	case "$-" in
+	*f*) ;;
+	*) reglob=1 ;;
 	esac
+	set -f
+	# ps has already flattened argv, but executable and script paths normally
+	# have no whitespace. Looking only at these leading tokens prevents an
+	# unrelated process argument such as `vim /tmp/claude` from becoming an
+	# assistant match.
+	# shellcheck disable=SC2086 # deliberate tokenization of flattened ps argv
+	set -- $args
+	[ -n "$reglob" ] && set +f
+	[ "$#" -gt 0 ] || return 0
+
+	first="${1##*/}"
+	case "$first" in
+	claude | copilot | opencode | codex | pi | omp | grok)
+		tool="$first"
+		shift
+		;;
+	node | nodejs | bun | deno | bash | sh | dash | ksh | zsh)
+		[ "$#" -gt 1 ] || return 0
+		case "${2##*/}" in
+		claude | copilot | opencode | codex | pi | omp | grok) tool="${2##*/}" ;;
+		*) return 0 ;;
+		esac
+		shift 2
+		;;
+	*) return 0 ;;
+	esac
+
+	# These are internal child modes, not the interactive assistant. Check the
+	# first argument after the actual tool token so prompt text containing the
+	# same words does not hide a genuine assistant process.
+	if [ "$tool" = "opencode" ] && [ "${1:-}" = "run" ]; then
+		return 0
+	fi
+	if [ "$tool" = "omp" ]; then
+		case "${1:-}" in __omp_worker_*) return 0 ;; esac
+	fi
+	printf '%s\n' "$tool"
 }
 
 # --- session-less relaunch vouchers ---
@@ -237,18 +250,35 @@ pane_has_assistant() {
 		return 0
 	fi
 
-	# Walk the entire process tree under the pane shell.
-	# Uses a single-pass awk that builds the descendant set as it goes.
-	#
-	# Assumption: ps output is ordered by ascending PID, so parents appear
-	# before children. POSIX doesn't guarantee this, but it holds on Linux
-	# (procfs enumeration) and macOS (libproc). If a child PID appeared before
-	# its parent, it would be missed. A multi-pass approach would be more
-	# robust but slower; in practice, single-pass has been reliable.
+	# Walk the entire process tree under the pane shell. Build the whole parent
+	# map before traversing it: POSIX does not promise `ps` ordering, and a
+	# child-before-parent row must not let restore launch a second assistant.
 	local found_pid
-	found_pid=$(echo "$snapshot" | awk -v root="$shell_pid" '
-		BEGIN { pids[root]=1 }
-		{ if ($2 in pids) { pids[$1]=1; print $1, substr($0, index($0,$3)) } }
+	found_pid=$(printf '%s\n' "$snapshot" | awk -v root="$shell_pid" '
+		{
+			pid = $1
+			ppid = $2
+			line = $0
+			sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]*/, "", line)
+			args[pid] = line
+			children[ppid] = (ppid in children) ? children[ppid] SUBSEP pid : "" pid
+		}
+		END {
+			seen[root] = 1
+			queue[++tail] = root
+			while (head < tail) {
+				cur = queue[++head]
+				if (!(cur in children)) continue
+				n = split(children[cur], kids, SUBSEP)
+				for (i = 1; i <= n; i++) {
+					child = kids[i] + 0
+					if (child <= 0 || child in seen) continue
+					seen[child] = 1
+					queue[++tail] = child
+					print child, args[child]
+				}
+			}
+		}
 	' | while read -r cpid cargs; do
 		if [ -n "$(detect_tool "$cargs")" ]; then
 			echo "$cpid"

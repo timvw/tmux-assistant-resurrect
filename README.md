@@ -174,6 +174,14 @@ The full test suite runs in Docker with real CLI binaries (no mocks):
 just test
 ```
 
+Fast hermetic suites cover the hardened save, restore, and installer paths:
+
+```bash
+just test-save-hardening
+just test-restore
+just test-plugin-hardening
+```
+
 This builds a Docker image with tmux, jq, just, and the real
 `@anthropic-ai/claude-code`, `opencode-ai`, `@openai/codex`, and
 `@earendil-works/pi-coding-agent` npm packages, then runs the full test suite
@@ -469,9 +477,11 @@ live process, the live process wins.
 
 Built-in variables (`TMUX_PANE`, `SHELL`) are **not** restored — `TMUX_PANE`
 would be stale after restore, and `SHELL` is already in the environment.
-State files live in a user-only directory: it is created mode 0700, and its
-parents (`~/.local`, `~/.local/state`) are left at your umask. A directory that
-already exists keeps whatever mode you gave it — if you point
+State files are written atomically with mode 0600. The default state directory
+is created mode 0700, and its parents (`~/.local`, `~/.local/state`) are left at
+your umask. The persistent sidecar and save/restore logs are also owner-only,
+and the plugin refuses to append through a symlinked log path. A state directory
+that already exists keeps whatever mode you gave it — if you point
 `TMUX_ASSISTANT_RESURRECT_DIR` somewhere deliberately group-readable, that is
 respected rather than reset on every save.
 
@@ -730,6 +740,9 @@ the command from the matching voucher line.
 
 - **Running state is not preserved**: Assistants restart with their conversation
   history loaded, but any in-flight tool calls or pending operations are lost.
+- **Deleted working directories are not replayed**: If a saved pane's working
+  directory no longer exists, restore leaves that pane at its shell instead of
+  launching the assistant in an unrelated fallback directory.
 - **Session-less modes require one user action per command**: Until you add an
   observed command to the voucher, that pane deliberately returns as a shell.
 - **The voucher is user authority**: `relaunch-add` warns about known hazard

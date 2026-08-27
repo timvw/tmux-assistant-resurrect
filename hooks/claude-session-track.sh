@@ -26,7 +26,11 @@ STATE_DIR="$(assistant_state_dir)"
 ensure_assistant_state_dir "$STATE_DIR"
 
 INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+# Hooks are best-effort integration points. Malformed/non-object input must not
+# turn into an error that interrupts Claude's own session lifecycle.
+SESSION_ID=$(printf '%s' "$INPUT" | jq -er \
+	'objects | .session_id | select(type == "string" and length > 0)' \
+	2>/dev/null || true)
 
 if [ -z "$SESSION_ID" ]; then
 	exit 0
@@ -41,20 +45,29 @@ ENV_JSON=$(jq -n --arg tmux_pane "${TMUX_PANE:-}" --arg shell "${SHELL:-}" \
 
 CAPTURE_ENV=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
 for var in $CAPTURE_ENV; do
-	# shellcheck disable=SC2086
-	ENV_JSON=$(echo "$ENV_JSON" | jq --arg k "$var" --arg v "${!var:-}" '. + {($k): $v}')
+	# Bash indirect expansion aborts on malformed variable names. Ignore invalid
+	# option tokens rather than taking down the hook.
+	if [[ ! "$var" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+		continue
+	fi
+	ENV_JSON=$(printf '%s' "$ENV_JSON" | jq --arg k "$var" --arg v "${!var:-}" '. + {($k): $v}')
 done
 
 # Merge the full stdin JSON with our added fields + env.
 # This preserves all fields Claude sends (model, source, permission_mode, etc.)
 # and adds tool metadata for the save/restore scripts.
 STATE_FILE="$STATE_DIR/claude-$CLAUDE_PID.json"
-if ! echo "$INPUT" | jq \
-	--arg tool "claude" \
-	--argjson ppid "$CLAUDE_PID" \
-	--arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-	--argjson env "$ENV_JSON" \
-	'. + {tool: $tool, ppid: $ppid, timestamp: $timestamp, env: $env}' \
-	>"$STATE_FILE" 2>/dev/null; then
+STATE_TMP=$(mktemp "$STATE_DIR/.claude-$CLAUDE_PID.XXXXXX") || {
+	echo "tmux-assistant-resurrect: failed to create temporary state file in $STATE_DIR" >&2
+	exit 0
+}
+trap 'rm -f "$STATE_TMP"' EXIT
+if ! (umask 077 && printf '%s' "$INPUT" | jq \
+		--arg tool "claude" \
+		--argjson ppid "$CLAUDE_PID" \
+		--arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		--argjson env "$ENV_JSON" \
+		'. + {tool: $tool, ppid: $ppid, timestamp: $timestamp, env: $env}' \
+		>"$STATE_TMP" 2>/dev/null) || ! mv "$STATE_TMP" "$STATE_FILE"; then
 	echo "tmux-assistant-resurrect: failed to write state file $STATE_FILE (permission denied?)" >&2
 fi
