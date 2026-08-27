@@ -107,6 +107,121 @@ relaunch_canon() {
 	printf '%s\n' "$result"
 }
 
+# Test whether a flag name matches the credential-shaped blocklist. A plaintext
+# key on disk is worse than a restore that requires re-supplying it, so both
+# the relaunch advisory filter and the primary extract_cli_args save path must
+# strip these. One list, one function, zero drift.
+#
+# Known limitation: this matches on the flag NAME, so a secret buried inside an
+# opaque value survives -- `claude --settings '{"env":{"ANTHROPIC_API_KEY":...}}'`
+# is persisted as written. Scanning values instead would mean guessing which
+# blobs are sensitive and silently breaking legitimate restores, so the blast
+# radius is bounded by file mode instead: the sidecar and both logs are 0600
+# (see the umask 077 blocks in the save and restore scripts).
+# Usage: is_credential_flag "--api-key" => returns 0 (true) / 1 (false)
+is_credential_flag() {
+	case "$1" in
+	--api-key | --api-key-* | --api_key | --api_key_* | --token | --token-* | --token_* | --secret* | --password | --password-* | --password_* | --auth*)
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# Flags whose names match the blocklist above but which carry configuration
+# rather than a secret. Copilot's --secret-env-vars takes the NAMES of variables
+# to redact, so stripping it does not protect a secret -- it silently turns the
+# user's redaction off, which is the opposite of the intent. The save path
+# consults this exception; the relaunch ledger deliberately does not, because
+# declining to vouch a shape costs nothing while losing a redaction setting on
+# restore is a real regression.
+# Usage: is_non_credential_config_flag "--secret-env-vars" => 0 (true) / 1 (false)
+is_non_credential_config_flag() {
+	case "$1" in
+	--secret-env-vars)
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# Remove credential-bearing flags and their values from a flattened argv string,
+# echoing the cleaned result. Dropped flag names (never their values) are
+# reported through log() using the caller-supplied context label.
+#
+# Both save and restore call this. Save keeps secrets out of the sidecar in the
+# first place; restore repeats the filter because sidecars written before that
+# existed are still on disk, and replaying one would put the secret back into
+# the pane and the restore log.
+#
+# Reporting happens in here rather than through a variable the caller reads: the
+# only call shape is `x=$(strip_credential_flags ...)`, and a variable set inside
+# that subshell never reaches the caller. log() writes to stderr and fd 9 only,
+# so it cannot contaminate the substituted value.
+# Usage: cleaned=$(strip_credential_flags "$args" "pi cli_args")
+strip_credential_flags() {
+	local _in="$1" _context="${2:-cli_args}"
+	local _cleaned="" _state="keep" _dropped="" _reglob="" _tok="" _name=""
+	[ -n "$_in" ] || return 0
+	case "$-" in *f*) ;; *) _reglob=1 ;; esac
+	set -f
+	for _tok in $_in; do
+		case "$_state" in
+		first)
+			# The token straight after a credential flag is its value, even if
+			# it happens to begin with '-'. Always consume it.
+			_state="rest"
+			continue
+			;;
+		rest)
+			# ps has already flattened argv, so a quoted value containing
+			# spaces arrives here as several tokens. Keep consuming until
+			# something that looks like the next option. A secret whose later
+			# words themselves begin with '-' is indistinguishable from a flag
+			# and is the residual limit of working from a flattened argv.
+			case "$_tok" in
+			-*) _state="keep" ;;
+			*) continue ;;
+			esac
+			;;
+		esac
+		case "$_tok" in
+		--*=*)
+			_name="${_tok%%=*}"
+			if is_credential_flag "$_name" && ! is_non_credential_config_flag "$_name"; then
+				_dropped="${_dropped} ${_name}"
+			else
+				_cleaned="${_cleaned} ${_tok}"
+			fi
+			;;
+		--*)
+			if is_credential_flag "$_tok" && ! is_non_credential_config_flag "$_tok"; then
+				_state="first"
+				_dropped="${_dropped} ${_tok}"
+			else
+				_cleaned="${_cleaned} ${_tok}"
+			fi
+			;;
+		*)
+			_cleaned="${_cleaned} ${_tok}"
+			;;
+		esac
+	done
+	[ -n "$_reglob" ] && set +f
+	if [ -n "$_dropped" ]; then
+		# log() belongs to the save/restore scripts, not to this library. Both
+		# define it before calling here, but the hooks and the unit suites source
+		# this file on its own; fall back rather than let a future caller die on
+		# an undefined function at the exact moment a secret was found.
+		if command -v log >/dev/null 2>&1; then
+			log "stripped credential flag(s) from ${_context}:${_dropped}"
+		else
+			printf '%s\n' "tmux-assistant-resurrect: stripped credential flag(s) from ${_context}:${_dropped}" >&2
+		fi
+	fi
+	printf '%s\n' "${_cleaned# }"
+}
+
 # Structural proposer for the advisory candidates ledger. Passing this filter
 # never authorizes a relaunch. Keep it conservative because ps has already lost
 # quoting boundaries; commands it cannot round-trip cleanly should not be
@@ -142,11 +257,9 @@ relaunch_shape_ok() {
 			flag_name="${token%%=*}"
 			# Candidate commands are written to an advisory ledger. Never
 			# persist values attached to credential-shaped options there.
-			case "$flag_name" in
-			--api-key | --api-key-* | --api_key | --api_key_* | --token | --token-* | --token_* | --secret* | --password | --password-* | --password_* | --auth*)
+			if is_credential_flag "$flag_name"; then
 				return 1
-				;;
-			esac
+			fi
 			# Prompt-bearing modes are one-shot work, not long-lived modes.
 			# This list is advisory-only and must never be used as the voucher
 			# authorization gate in save or restore.

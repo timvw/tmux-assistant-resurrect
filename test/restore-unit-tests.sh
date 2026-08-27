@@ -161,7 +161,7 @@ run_restore
 assert_eq "restore succeeds" "0" "$RESTORE_STATUS"
 csh_tmux_log=$(cat "$TMUX_LOG")
 assert_contains "csh cwd history character is escaped" "$csh_tmux_log" "cwd\\!bang' &&"
-assert_contains "captured env uses the portable env launcher" "$csh_tmux_log" "env SAFE='env\\!choice' claude"
+assert_contains "captured env uses the alias-safe env launcher" "$csh_tmux_log" "\\env SAFE='env\\!choice' claude"
 assert_contains "model-like options do not suppress the saved model" "$csh_tmux_log" "'--model-provider' 'provider\\!choice' --model 'model\\!choice'"
 assert_not_contains "csh command does not use POSIX fd redirection" "$csh_tmux_log" "2>/dev/null"
 
@@ -175,8 +175,15 @@ if command -v tcsh >/dev/null 2>&1; then
 	assert_contains "tcsh passes literal ! in CLI args" "$marker" "arg=provider!choice"
 	assert_contains "tcsh receives the separately saved model" "$marker" "arg=model!choice"
 
-	# With no environment wrapper, restore deliberately uses csh/tcsh's
-	# `command` builtin to bypass aliases. Exercise that separate construction.
+	# csh/tcsh have no `command` builtin, so the no-env path must still go
+	# through `env`. This assertion used to expect the `command` form and
+	# passed only on macOS, which ships /usr/bin/command as an external script;
+	# on Linux that form fails with "command: Command not found."
+	#
+	# The backslash matters as much as the launcher: csh applies alias
+	# substitution to the first word, so a bare `env` is hijacked by a user's
+	# `alias env ...` in ~/.cshrc, verified against tcsh. `\env` suppresses that
+	# lookup, which is the property `command` provides in POSIX shells.
 	export MOCK_CAPTURE_ENV=''
 	jq -n '{sessions:[{
 	  pane:"csh-test:0.0", session_name:"csh-test", window_index:"0", pane_index:"0",
@@ -184,8 +191,10 @@ if command -v tcsh >/dev/null 2>&1; then
 	}]}' >"$RESURRECT_DIR/assistant-sessions.json"
 	run_restore
 	marker=$(cat "$ASSISTANT_MARKER" 2>/dev/null || true)
-	assert_contains "tcsh accepts the no-env command builtin form" "$(cat "$TMUX_LOG")" \
-		"send-keys|%1|command claude --resume 'sid-no-env'"
+	assert_contains "tcsh no-env resume uses the alias-safe env launcher" "$(cat "$TMUX_LOG")" \
+		"send-keys|%1|\\env claude --resume 'sid-no-env'"
+	assert_not_contains "tcsh never emits the absent command builtin" "$(cat "$TMUX_LOG")" \
+		"command claude"
 	assert_contains "tcsh executes the no-env resume command" "$marker" "arg=sid-no-env"
 else
 	pass "tcsh unavailable; portable command shape still covered"
@@ -341,6 +350,131 @@ MINGW* | MSYS* | CYGWIN*)
 	unset MOCK_SWAP_LOG_PATH MOCK_SWAP_LOG_TARGET MOCK_SWAP_LOG_MARKER
 	;;
 esac
+
+echo "== captured env values are redacted in restore log =="
+secret_cwd="$SANDBOX/secret-cwd"
+mkdir -p "$secret_cwd"
+export MOCK_PANES='%10|0|0|secret-env'
+export MOCK_SHELLS='%10|bash'
+export MOCK_CAPTURE_ENV='ANTHROPIC_API_KEY SAFE_VAR'
+export MOCK_FAIL_CLEAR_PANE=''
+export MOCK_EXEC_SHELL=''
+jq -n --arg cwd "$secret_cwd" '{sessions:[{
+  pane:"secret-env:0.0", session_name:"secret-env", window_index:"0", pane_index:"0",
+  tool:"claude", session_id:"sid-secret", cwd:$cwd,
+  env:{ANTHROPIC_API_KEY:"sk-ant-api03-VERYSECRETKEY", SAFE_VAR:"public-value"}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+tmux_log=$(cat "$TMUX_LOG")
+assert_eq "restore with secret env succeeds" "0" "$RESTORE_STATUS"
+# The log must show variable NAMES but never their values
+assert_contains "log shows ANTHROPIC_API_KEY name" "$restore_log" "ANTHROPIC_API_KEY=***"
+assert_contains "log shows SAFE_VAR name" "$restore_log" "SAFE_VAR=***"
+assert_not_contains "log does not contain the secret value" "$restore_log" "sk-ant-api03-VERYSECRETKEY"
+assert_not_contains "log does not contain the safe value either" "$restore_log" "public-value"
+# But the actual command sent to the pane MUST contain the real values
+assert_contains "pane command has the real secret" "$tmux_log" "sk-ant-api03-VERYSECRETKEY"
+assert_contains "pane command has the real safe value" "$tmux_log" "public-value"
+
+# The redacted string is rendered per shell dialect. A POSIX VAR=*** inside a
+# Nushell `with-env { }` block would misreport what was sent, and the log is
+# read as a record of exactly that.
+export MOCK_PANES='%11|0|0|secret-nu'
+export MOCK_SHELLS='%11|nu'
+export MOCK_CAPTURE_ENV='ANTHROPIC_API_KEY'
+jq -n --arg cwd "$secret_cwd" '{sessions:[{
+  pane:"secret-nu:0.0", session_name:"secret-nu", window_index:"0", pane_index:"0",
+  tool:"claude", session_id:"sid-secret-nu", cwd:$cwd,
+  env:{ANTHROPIC_API_KEY:"sk-ant-api03-VERYSECRETKEY"}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+# run_restore truncates TMUX_LOG but the restore log is append-only across runs,
+# so clear it first or the previous case's POSIX-form line is still matched here.
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+nu_restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_contains "nu log redacts in nu record syntax" "$nu_restore_log" "with-env { ANTHROPIC_API_KEY: *** }"
+assert_not_contains "nu log does not use POSIX assignment syntax" "$nu_restore_log" "ANTHROPIC_API_KEY=***"
+assert_not_contains "nu log does not contain the secret value" "$nu_restore_log" "sk-ant-api03-VERYSECRETKEY"
+
+# csh/tcsh plus a captured secret is the one combination neither the csh fix nor
+# the redaction fix could regress on its own: the alias-safe launcher is chosen
+# on the resume line, the redacted line is built separately, and nothing forced
+# the two to agree. They were developed on separate branches, so this crossing
+# only became reachable when both landed -- which is exactly the shape of defect
+# that survives per-branch green CI. If the log line ever falls back to a plain
+# `env`, it advertises a command csh was never sent.
+export MOCK_PANES='%12|0|0|secret-csh'
+export MOCK_SHELLS='%12|tcsh'
+export MOCK_CAPTURE_ENV='ANTHROPIC_API_KEY'
+jq -n --arg cwd "$secret_cwd" '{sessions:[{
+  pane:"secret-csh:0.0", session_name:"secret-csh", window_index:"0", pane_index:"0",
+  tool:"claude", session_id:"sid-secret-csh", cwd:$cwd,
+  env:{ANTHROPIC_API_KEY:"sk-ant-api03-VERYSECRETKEY"}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+csh_secret_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+csh_secret_tmux=$(cat "$TMUX_LOG")
+assert_contains "csh pane receives the alias-safe launcher and the real secret" \
+	"$csh_secret_tmux" "\\env ANTHROPIC_API_KEY='sk-ant-api03-VERYSECRETKEY' claude"
+assert_contains "csh log redacts behind the same alias-safe launcher" \
+	"$csh_secret_log" "\\env ANTHROPIC_API_KEY=*** claude"
+assert_not_contains "csh log does not contain the secret value" \
+	"$csh_secret_log" "sk-ant-api03-VERYSECRETKEY"
+assert_not_contains "csh log never advertises the bare env launcher" \
+	"$csh_secret_log" " env ANTHROPIC_API_KEY=***"
+
+# COPILOT_HOME is a state-root path the plugin derives, not user-supplied
+# credential material. Masking it breaks the main reason to read this log --
+# seeing which state root a restore actually landed on -- so it must stay
+# readable even while a captured secret alongside it is masked.
+# A space, but deliberately no apostrophe: this assertion is about masking, and
+# an apostrophe would make the expected string depend on shell_quote's escaping
+# instead. Quoting of hostile paths is covered by the Nushell section above.
+copilot_state_root="$SANDBOX/copilot home"
+mkdir -p "$copilot_state_root"
+export MOCK_PANES='%12|0|0|secret-copilot'
+export MOCK_SHELLS='%12|bash'
+export MOCK_CAPTURE_ENV='ANTHROPIC_API_KEY'
+jq -n --arg cwd "$secret_cwd" --arg home "$copilot_state_root" '{sessions:[{
+  pane:"secret-copilot:0.0", session_name:"secret-copilot", window_index:"0", pane_index:"0",
+  tool:"copilot", session_id:"sid-secret-copilot", cwd:$cwd, copilot_home:$home,
+  env:{ANTHROPIC_API_KEY:"sk-ant-api03-VERYSECRETKEY"}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+copilot_restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+# Compare against the value the sidecar actually holds, not the shell variable.
+# Git-bash on Windows rewrites POSIX-looking absolute paths when they are passed
+# as arguments to a native binary, so jq stores "C:/Users/..." where this script
+# said "/tmp/...". Reading it back keeps the assertion about masking rather than
+# about MSYS path translation.
+copilot_home_saved=$(jq -r '.sessions[0].copilot_home' "$RESURRECT_DIR/assistant-sessions.json")
+assert_contains "copilot log keeps the state root readable" "$copilot_restore_log" "COPILOT_HOME='$copilot_home_saved'"
+assert_not_contains "copilot state root is not masked" "$copilot_restore_log" "COPILOT_HOME=***"
+assert_contains "captured secret alongside it is still masked" "$copilot_restore_log" "ANTHROPIC_API_KEY=***"
+assert_not_contains "copilot log does not contain the secret value" "$copilot_restore_log" "sk-ant-api03-VERYSECRETKEY"
+
+# Sidecars written before the save-side filter existed still hold credential
+# flags and are read verbatim. Restore must not replay one into the pane or copy
+# it into the log, so the save fix alone is not sufficient.
+export MOCK_PANES='%13|0|0|legacy-sidecar'
+export MOCK_SHELLS='%13|bash'
+export MOCK_CAPTURE_ENV=''
+jq -n --arg cwd "$secret_cwd" '{sessions:[{
+  pane:"legacy-sidecar:0.0", session_name:"legacy-sidecar", window_index:"0", pane_index:"0",
+  tool:"pi", session_id:"sid-legacy", cwd:$cwd,
+  cli_args:"--api-key sk-LEGACYSECRET --model gpt-4"
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+legacy_restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+legacy_tmux_log=$(cat "$TMUX_LOG")
+assert_not_contains "legacy sidecar secret is not logged" "$legacy_restore_log" "sk-LEGACYSECRET"
+assert_not_contains "legacy sidecar secret is not sent to the pane" "$legacy_tmux_log" "sk-LEGACYSECRET"
+assert_contains "legacy sidecar strip is reported" "$legacy_restore_log" "stripped credential flag(s) from saved pi cli_args: --api-key"
+assert_contains "surrounding args from the legacy sidecar survive" "$legacy_tmux_log" "'--model' 'gpt-4'"
 
 echo
 echo "restore unit tests: $PASS passed, $FAIL failed"

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # per-tool variable families accessed via ${!var} dynamic expansion
 # The tmux server may have been started with a limited PATH (e.g. via a
 # systemd user service with a whitelisted runtime environment). That PATH
 # is inherited by every hook this script runs in, so utilities like
@@ -562,7 +563,7 @@ get_copilot_session() {
 	local uuid='\([0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}\)'
 	local flag
 	for flag in '--session-id' '--resume' '-r'; do
-		sid=$(echo "$args" | sed -n "s/.*$flag[= ] *$uuid.*/\1/p")
+		sid=$(echo "$args" | sed -n "s/.*${flag}[= ] *$uuid.*/\1/p")
 		if [ -n "$sid" ]; then
 			# Same resumability gate as the lock path. `copilot --session-id
 			# <uuid>` on a blank TUI puts a UUID in argv long before the session
@@ -717,6 +718,7 @@ _arg_value() {
 	local _had_noglob=0
 	case $- in *f*) _had_noglob=1 ;; esac
 	set -f
+	# shellcheck disable=SC2206  # deliberate word-split of argv string; globbing disabled above
 	words=($args)
 	[ "$_had_noglob" = 1 ] || set +f
 	local i n word flag next
@@ -1241,7 +1243,7 @@ handle_sessionless_relaunch() {
 	local log_missing="${6:-1}"
 	local prefix
 	prefix="detected $tool in $target (pid $pid) but no session ID available $(missing_session_hint "$tool" "$pid")"
-	local canon="" vouched_line="" shape_ok=0 relaunch_parts
+	local canon="" canon_log="" vouched_line="" shape_ok=0 relaunch_parts
 
 	case "$RELAUNCH_ENABLED" in
 	on | yes | true | 1) ;;
@@ -1255,20 +1257,27 @@ handle_sessionless_relaunch() {
 		[ "$log_missing" = "1" ] && log "$prefix: relaunch argv could not be canonicalized"
 		return 1
 	}
+	# Every diagnostic below quotes the canonical command. A pane launched with
+	# an inline key is exactly the case that lands here -- relaunch_shape_ok()
+	# rejects credential flags, so the rejection message would otherwise be the
+	# one place the key is written to assistant-save.log verbatim. Log the
+	# stripped form; $canon itself stays intact for the shape and ledger checks,
+	# which must see the real argv.
+	canon_log=$(strip_credential_flags "$canon" "$tool relaunch cmd")
 
 	if relaunch_shape_ok "$canon"; then
 		shape_ok=1
 		if ! relaunch_ledger_apply "$tool" "$canon" "$pid"; then
-			log "warning: failed to update relaunch candidates ledger for $canon"
+			log "warning: failed to update relaunch candidates ledger for $canon_log"
 		fi
 	fi
 
 	vouched_line=$(relaunch_voucher_match "$tool" "$canon") || {
 		if [ "$log_missing" = "1" ]; then
 			if [ "$shape_ok" -eq 1 ]; then
-				log "$prefix: relaunch cmd not vouched: $canon"
+				log "$prefix: relaunch cmd not vouched: $canon_log"
 			else
-				log "$prefix: relaunch shape rejected: $canon"
+				log "$prefix: relaunch shape rejected: $canon_log"
 			fi
 		fi
 		return 1
@@ -1280,7 +1289,7 @@ handle_sessionless_relaunch() {
 		RELAUNCH_PARTS_FILE="$relaunch_parts"
 	fi
 	if [ -z "$relaunch_parts" ]; then
-		log "warning: no relaunch parts file available for $canon"
+		log "warning: no relaunch parts file available for $canon_log"
 		return 1
 	fi
 
@@ -1607,6 +1616,7 @@ _strip_bool_opt() {
 # tokens (e.g. option values like "o3" in `--model o3 resume`) are
 # skipped — scanning continues past them to find the actual subcommand.
 _strip_subcmds() {
+	# shellcheck disable=SC2206  # deliberate word-split of argv string
 	local -a words=($1)
 	shift
 	local -a targets=("$@")
@@ -1646,6 +1656,7 @@ HELP_PROBE_ENV_copilot="COPILOT_AUTO_UPDATE=false"
 
 # Cached per tool in _TOOL_HELP_<tool>: several discovery passes read the same
 # help text, and the callers run in a $() subshell per pane.
+# shellcheck disable=SC2178,SC2128  # out is a plain string; printf -v writes to a dynamic name
 _tool_help() {
 	local tool="$1"
 	local cache_var="_TOOL_HELP_${tool}"
@@ -2104,6 +2115,12 @@ extract_cli_args() {
 		fi
 	fi
 
+	# Strip credential-bearing flags so plaintext keys are never persisted to the
+	# sidecar JSON. Shared with the restore path via lib-detect.sh so the two
+	# cannot drift. A user who launched with an inline key will restore without
+	# it; the flag name (never its value) is logged so the difference is visible.
+	args=$(strip_credential_flags "$args" "$tool cli_args")
+
 	# A remaining positional is an initial prompt (or, for OpenCode, a project
 	# path already represented by pane cwd). Never replay it into a resumed
 	# conversation. Preserve recognized separate option values such as
@@ -2286,6 +2303,7 @@ signal_pids() {
 
 # Space-separated descendants of $root, excluding $root itself and $skip (the
 # watchdog's own PID).
+# shellcheck disable=SC2178,SC2128  # out is a plain string, not an array
 victim_pids() {
 	local root="$1" skip="$2" pid out=""
 	for pid in $(descendant_pids "$root"); do
@@ -2300,7 +2318,7 @@ victim_pids() {
 # tested one-shot utility; save_watchdog uses the snapshot-based logic below.
 reap_descendants() {
 	local root="$1" skip="$2" sig="$3"
-	# shellcheck disable=SC2086
+	# shellcheck disable=SC2086,SC2046  # deliberate word-split of PID list
 	signal_pids "$sig" $(victim_pids "$root" "$skip")
 }
 

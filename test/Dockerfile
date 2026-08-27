@@ -3,6 +3,10 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Core tools + build deps for bash 3.2
+# tcsh is a test dependency, not a runtime one: restore-unit-tests.sh skips its
+# csh/tcsh execution assertions when no tcsh is present. Without it here the
+# Linux leg silently skipped them and only macOS ran that branch — where
+# /usr/bin/command exists and masked a csh-only breakage in the restore hook.
 RUN apt-get update && apt-get install -y \
     tmux \
     jq \
@@ -15,18 +19,53 @@ RUN apt-get update && apt-get install -y \
     make \
     ca-certificates \
     unzip \
+    tcsh \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 22.x (Pi requires >= 22.19.0; Ubuntu 24.04 ships Node 18)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+# No mirror exists for this one, so retry is all that is available; a truncated
+# download would otherwise surface as the apt-get below failing to find nodejs.
+RUN curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 2 \
+      https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install bash 3.2 from source (macOS ships bash 3.2; needed for awk-fallback tests)
 # SHA256 pinned for reproducibility (GPG sig also at bash-3.2.tar.gz.sig on ftp.gnu.org).
-RUN BASH32_SHA256="26c99025b59e30779300b68adb764f824974d267a4d7cc1b347d14a2393f9fb4" && \
-    curl -sSfL -o /tmp/bash-3.2.tar.gz https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz \
-    && echo "$BASH32_SHA256  /tmp/bash-3.2.tar.gz" | sha256sum -c - \
+#
+# Taken from the first mirror that serves the expected bytes, rather than from
+# ftp.gnu.org alone. A GNU infrastructure outage made that host unroutable from
+# GitHub runners for hours, and with no timeout each job spent ~135s connecting
+# before failing the build — the same infrastructure-failure-reads-as-product-
+# failure problem the `just` block below describes, except it took out every
+# Docker job at once.
+#
+# The checksum is verified INSIDE the loop, which is what makes mirrors safe and
+# is also why a bad one is survivable: a mirror that answers 200 with a stale or
+# truncated body fails verification and we move on to the next host instead of
+# failing the build. `tar` is only ever reached through `break`, and `break` is
+# only reachable once sha256sum has approved the file in that same iteration, so
+# a wrong tarball can never be unpacked. If no URL yields a verified file the
+# loop exits non-zero on its last command and the `&&` chain stops here.
+#
+# Three timeouts, because they bound different failures: --connect-timeout only
+# covers the handshake, so --speed-time/--speed-limit aborts a peer that connects
+# and then stalls mid-transfer, and --max-time is the backstop (300s against a
+# ~3MB download that normally takes about two seconds).
+RUN BASH32_SHA256="26c99025b59e30779300b68adb764f824974d267a4d7cc1b347d14a2393f9fb4" \
+    && for url in \
+        https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz \
+        https://mirrors.ocf.berkeley.edu/gnu/bash/bash-3.2.tar.gz \
+        https://mirror.us-midwest-1.nexcess.net/gnu/bash/bash-3.2.tar.gz; \
+       do \
+         echo "bash 3.2: fetching from ${url}" \
+         && curl -sSfL --connect-timeout 15 --max-time 300 \
+              --speed-limit 1024 --speed-time 30 \
+              --retry 2 --retry-delay 2 \
+              -o /tmp/bash-3.2.tar.gz "$url" \
+         && echo "$BASH32_SHA256  /tmp/bash-3.2.tar.gz" | sha256sum -c - \
+         && break; \
+       done \
     && tar xz -C /tmp -f /tmp/bash-3.2.tar.gz \
     && ARCH=$(uname -m) \
     && case "$ARCH" in x86_64) TRIPLE="x86_64-pc-linux-gnu";; aarch64) TRIPLE="aarch64-unknown-linux-gnu";; *) TRIPLE="$ARCH-pc-linux-gnu";; esac \
@@ -58,7 +97,8 @@ RUN JUST_VERSION="1.58.0" && \
     && just --version
 
 # Install Bun (Oh My Pi's published `omp` bin uses a Bun shebang).
-RUN curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14" \
+RUN curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 2 \
+      https://bun.sh/install | bash -s "bun-v1.3.14" \
     && install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun \
     && rm -rf /root/.bun
 
@@ -67,10 +107,10 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14" \
 # codex is pre-1.0 (0.x), so pin to ~0 (any 0.x); claude-code is 2.x;
 # opencode-ai is 1.x; pi-coding-agent is 0.x (requires Node >= 22.19.0);
 # Oh My Pi is 16.x and requires Bun for its `omp` entrypoint; Copilot is 1.x.
-RUN npm install -g "@anthropic-ai/claude-code@^2" "@github/copilot@^1" "@openai/codex@^0" "opencode-ai@^1" "@earendil-works/pi-coding-agent@^0" "@oh-my-pi/pi-coding-agent@^16"
+RUN npm install -g "@anthropic-ai/claude-code@^2" "@github/copilot@^1" "@openai/codex@^0" "opencode-ai@^1" "@earendil-works/pi-coding-agent@^0" "@oh-my-pi/pi-coding-agent@^16" "@xai-official/grok@^1"
 
 # Verify the binaries exist
-RUN which claude && which copilot && copilot --version && which codex && which opencode && which pi && which omp && omp --version
+RUN which claude && which copilot && copilot --version && which codex && which opencode && which pi && which omp && omp --version && which grok && grok --version
 
 # Create a test user (avoid running as root — tmux behaves differently)
 RUN useradd -m -s /bin/bash testuser

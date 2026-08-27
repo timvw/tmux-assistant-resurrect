@@ -97,7 +97,7 @@ echo "runs=$RUNS panes=$PANES assistants=$ASSISTANTS"
 TIMES_FILE="$BENCH_ROOT/times.txt"
 : >"$TIMES_FILE"
 for r in $(seq 1 "$RUNS"); do
-	t=$((TIMEFORMAT=%3R; time bash "$REPO_PATH/scripts/save-assistant-sessions.sh" >/dev/null 2>&1) 2>&1)
+	t=$( (TIMEFORMAT=%3R; time bash "$REPO_PATH/scripts/save-assistant-sessions.sh" >/dev/null 2>&1) 2>&1)
 	echo "$t" >>"$TIMES_FILE"
 	printf 'run_%02d=%s\n' "$r" "$t"
 done
