@@ -102,6 +102,7 @@ native_pid=""
 loader_pid=""
 deadline=$((SECONDS + 60))
 while [ "$SECONDS" -lt "$deadline" ]; do
+	# shellcheck disable=SC2034  # cppid read from structured output; only cpid and cargs used
 	while IFS=$'\t' read -r cpid cppid cargs; do
 		[ "$(detect_tool "$cargs")" = "copilot" ] || continue
 		case "$cargs" in
