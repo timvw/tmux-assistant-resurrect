@@ -160,6 +160,11 @@ while read -r entry; do
 	relaunch_cmd=$(printf '%s\n' "$entry" | jq -r '.cmd // empty')
 	cwd=$(printf '%s\n' "$entry" | jq -r '.cwd // empty')
 	cli_args=$(printf '%s\n' "$entry" | jq -r '.cli_args // empty')
+	# The save path stops writing credential flags into the sidecar, but files
+	# written before that are still on disk and are read verbatim here. Without
+	# this the old value would be replayed into the pane and copied into the
+	# restore log, so the save-side fix alone would not close the leak.
+	cli_args=$(strip_credential_flags "$cli_args" "saved $tool cli_args")
 	model=$(printf '%s\n' "$entry" | jq -r '.model // empty')
 	env_json=$(printf '%s\n' "$entry" | jq -c '.env // {}')
 	copilot_home=$(printf '%s\n' "$entry" | jq -r '.copilot_home // empty')
@@ -269,8 +274,18 @@ while read -r entry; do
 	# Build env prefix: only restore user-configured vars from
 	# @assistant-resurrect-capture-env. Exclude built-in vars (tmux_pane, shell)
 	# which would be stale or already present in the shell environment.
+	# redacted_env_prefix and redacted_nu_env mirror env_prefix and nu_env for log
+	# output, with captured values replaced by *** so credentials never reach the
+	# restore log. They are kept in each shell's own dialect rather than sharing
+	# one string: the log is read as a record of what was sent, so rendering a
+	# POSIX VAR=*** inside a Nushell `with-env { }` block would misreport it.
+	# Only user-captured values are masked. Plugin-derived values such as
+	# COPILOT_HOME are paths, not secrets, and stay readable — they are the whole
+	# reason to consult this log when a restore lands on the wrong state root.
 	env_prefix=""
 	nu_env=""
+	redacted_env_prefix=""
+	redacted_nu_env=""
 	if [ -n "$env_json" ] && [ "$env_json" != "null" ] && [ "$env_json" != "{}" ]; then
 		capture_env=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
 		reglob=""
@@ -291,6 +306,8 @@ while read -r entry; do
 			if [ -n "$val" ]; then
 				env_prefix="${env_prefix}${var}=$(shell_quote "$pane_cmd" "$val") "
 				nu_env="${nu_env}${var}: $(shell_quote "$pane_cmd" "$val"), "
+				redacted_env_prefix="${redacted_env_prefix}${var}=*** "
+				redacted_nu_env="${redacted_nu_env}${var}: ***, "
 			fi
 		done
 		[ -n "$reglob" ] && set +f
@@ -361,6 +378,10 @@ while read -r entry; do
 		if [ -n "$copilot_home" ]; then
 			env_prefix="${env_prefix}COPILOT_HOME=$(shell_quote "$pane_cmd" "$copilot_home") "
 			nu_env="${nu_env}COPILOT_HOME: $(shell_quote "$pane_cmd" "$copilot_home"), "
+			# Not masked: this is a state-root path the plugin derived itself,
+			# not user-supplied credential material.
+			redacted_env_prefix="${redacted_env_prefix}COPILOT_HOME=$(shell_quote "$pane_cmd" "$copilot_home") "
+			redacted_nu_env="${redacted_nu_env}COPILOT_HOME: $(shell_quote "$pane_cmd" "$copilot_home"), "
 		fi
 		if [ -n "$safe_cli_args" ]; then
 			resume_cmd="${copilot_cmd}${safe_cli_args} --resume=${safe_sid}"
@@ -415,17 +436,38 @@ while read -r entry; do
 	# Bypass aliases/functions without relying on POSIX assignment-prefix syntax,
 	# which csh/tcsh reject. Nushell uses `^` for an external command and
 	# `with-env` for scoped environment changes.
+	# Build log_cmd in parallel with the env-values redacted to VAR=***, so
+	# captured credentials never leak into the restore log.
+	log_cmd="$resume_cmd"
 	case "$pane_cmd" in
 	nu)
 		resume_cmd="^${resume_cmd#command }"
+		log_cmd="^${log_cmd#command }"
 		if [ -n "$nu_env" ]; then
 			nu_env="${nu_env%, }"
 			resume_cmd="with-env { ${nu_env} } { ${resume_cmd} }"
+		fi
+		if [ -n "$redacted_nu_env" ]; then
+			log_cmd="with-env { ${redacted_nu_env%, } } { ${log_cmd} }"
+		elif [ -n "$nu_env" ]; then
+			log_cmd="$resume_cmd"
 		fi
 		;;
 	*)
 		if [ -n "$env_prefix" ]; then
 			resume_cmd="env ${env_prefix}${resume_cmd#command }"
+		fi
+		if [ -n "$redacted_env_prefix" ]; then
+			# Mirror whatever launcher the resume line above used, so the log
+			# keeps describing the command that was actually sent. Defaulted
+			# because env_launcher is set by the csh handling, which this
+			# branch does not itself introduce.
+			log_cmd="${env_launcher:-env} ${redacted_env_prefix}${log_cmd#command }"
+		elif [ -n "$env_prefix" ] || [ "${force_env:-0}" -eq 1 ]; then
+			# force_env covers shells that are routed through `env` even with no
+			# captured vars; without it the log would keep the untransformed
+			# command and advertise a form that was never sent to the pane.
+			log_cmd="$resume_cmd"
 		fi
 		;;
 	esac
@@ -454,9 +496,9 @@ while read -r entry; do
 	fi
 
 	if [ "$kind" = "relaunch" ]; then
-		log "relaunching $tool in $pane (cmd: $resume_cmd)"
+		log "relaunching $tool in $pane (cmd: $log_cmd)"
 	else
-		log "restoring $tool in $pane (session: $session_id, cmd: $resume_cmd)"
+		log "restoring $tool in $pane (session: $session_id, cmd: $log_cmd)"
 	fi
 
 	# Clear the pane before launching: tmux-resurrect may have restored old
