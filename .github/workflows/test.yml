@@ -25,7 +25,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          pip install --quiet ruff
+          # Pinned: an unpinned linter turns every upstream release into a
+          # potential red build on an unrelated day. ruff 0.16 widened its
+          # default rule set, which is exactly how that failure arrives.
+          # Bump deliberately, with the new findings reviewed in the same PR.
+          pip install --quiet ruff==0.16.5
 
       - uses: actions/setup-node@v7
         with:
