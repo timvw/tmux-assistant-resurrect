@@ -85,6 +85,9 @@ jobs:
           bash test/grok-unit-tests.sh
           bash test/target-resolution-unit-tests.sh
           bash test/state-dir-unit-tests.sh
+          bash test/save-hardening-unit-tests.sh
+          bash test/restore-unit-tests.sh
+          bash test/plugin-hardening-unit-tests.sh
 
       # The only tmux >= 3.7 in CI. Below 3.7 tmux rewrites ':' and '.' in
       # session names to '_', so the Docker suites (tmux 3.4) cannot reach the
@@ -103,6 +106,8 @@ jobs:
   # Portability canary. tmux has no native Windows port, so the plugin cannot
   # run here and this is deliberately NOT a support claim -- it only catches
   # Linux-isms creeping into logic that WSL and MSYS2 users depend on.
+  # The save/plugin hardening suites intentionally stay in the Linux/macOS jobs:
+  # they verify POSIX symlink replacement, owner-only modes and signal status.
   windows:
     runs-on: windows-latest
     name: windows (portability canary)
@@ -118,6 +123,7 @@ jobs:
           bash test/grok-unit-tests.sh
           bash test/target-resolution-unit-tests.sh
           bash test/state-dir-unit-tests.sh
+          bash test/restore-unit-tests.sh
 
   benchmark:
     runs-on: ubuntu-latest

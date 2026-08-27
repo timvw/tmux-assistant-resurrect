@@ -1,6 +1,11 @@
 # Codex rollout session-file lookup (get_codex_session, Method 4).
 # Invoked as: USED_CODEX_SESSION_IDS=... python3 codex_rollout.py <sessions_root> <cwd> <process_start_epoch>
-import datetime, json, os, sys
+import datetime
+import json
+import os
+import sys
+
+MAX_HEADER_BYTES = 1024 * 1024
 
 sessions_root = sys.argv[1]
 cwd = sys.argv[2]
@@ -13,6 +18,7 @@ try:
 except ValueError:
     process_start = None
 
+
 def parse_ts(value):
     if not value:
         return None
@@ -21,6 +27,7 @@ def parse_ts(value):
     except Exception:
         return None
 
+
 candidates = []
 for root, _, files in os.walk(sessions_root):
     for name in files:
@@ -28,25 +35,32 @@ for root, _, files in os.walk(sessions_root):
             continue
         path = os.path.join(root, name)
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                first = f.readline()
+            with open(path, "rb") as f:
+                first = f.readline(MAX_HEADER_BYTES + 1)
+            if len(first) > MAX_HEADER_BYTES:
+                continue
             if not first:
                 continue
-            record = json.loads(first)
+            record = json.loads(first.decode("utf-8"))
+            if not isinstance(record, dict):
+                continue
             if record.get("type") != "session_meta":
                 continue
             payload = record.get("payload") or {}
             if payload.get("cwd") != cwd:
                 continue
             sid = payload.get("id")
-            if not sid:
+            if not isinstance(sid, str) or not sid:
                 continue
-            candidates.append((sid, parse_ts(payload.get("timestamp")), os.path.getmtime(path)))
+            candidates.append(
+                (sid, parse_ts(payload.get("timestamp")), os.path.getmtime(path))
+            )
         except Exception:
             continue
 
 if not candidates:
     sys.exit(0)
+
 
 def score(item):
     sid, session_start, mtime = item
@@ -63,6 +77,7 @@ def score(item):
         -distance,
         mtime,
     )
+
 
 best = max(candidates, key=score)
 print(best[0])

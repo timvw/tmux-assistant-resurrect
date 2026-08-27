@@ -27,6 +27,13 @@ fi
 
 set -euo pipefail
 
+# Sidecars can contain captured environment values and session identifiers.
+# Keep every file this executable creates private, independently of the user's
+# interactive-shell umask. Do not alter the caller's umask when tests source us.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	umask 077
+fi
+
 # Source shared detection library (detect_tool, pane_has_assistant, posix_quote)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-detect.sh
@@ -54,6 +61,7 @@ UNRESOLVED_PANES=0
 RESURRECT_DIR="$(resurrect_data_dir)"
 OUTPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
 LOG_FILE="${RESURRECT_DIR}/assistant-save.log"
+LOG_ENABLED=0
 CAPTURE_ENV=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
 RELAUNCH_ENABLED=$(tmux show-option -gqv @assistant-resurrect-relaunch 2>/dev/null || true)
 RELAUNCH_ENABLED="${RELAUNCH_ENABLED:-on}"
@@ -76,16 +84,71 @@ esac
 ensure_assistant_state_dir "$STATE_DIR"
 mkdir -p "$RESURRECT_DIR"
 
-# Rotate log: keep only the most recent 500 lines to prevent unbounded growth
-# (continuum saves every 5 minutes, so this grows ~12 lines/hour).
-if [ -f "$LOG_FILE" ]; then
-	tail -n 500 "$LOG_FILE" >"${LOG_FILE}.tmp" 2>/dev/null && mv "${LOG_FILE}.tmp" "$LOG_FILE" || true
+# Move an existing log aside without following it, then create the replacement
+# atomically under noclobber and retain its descriptor. Later path replacement
+# cannot redirect writes. The moved file is rechecked before it is read so a
+# raced symlink is never used as rotation input.
+_log_previous=""
+_log_previous_copied=0
+if [ -e "$LOG_FILE" ] || [ -L "$LOG_FILE" ]; then
+	if [ -L "$LOG_FILE" ]; then
+		printf '%s\n' "tmux-assistant-resurrect: refusing symlinked save log: $LOG_FILE" >&2
+	elif [ ! -f "$LOG_FILE" ]; then
+		printf '%s\n' "tmux-assistant-resurrect: refusing non-regular save log: $LOG_FILE" >&2
+	else
+		_log_previous=$(mktemp "${LOG_FILE}.rotate.XXXXXX" 2>/dev/null || true)
+		if [ -z "$_log_previous" ] || ! mv "$LOG_FILE" "$_log_previous" 2>/dev/null; then
+			printf '%s\n' "tmux-assistant-resurrect: cannot rotate save log, disabling file logging: $LOG_FILE" >&2
+			[ -z "$_log_previous" ] || rm -f "$_log_previous"
+			_log_previous=""
+		fi
+	fi
 fi
 
+if { [ ! -e "$LOG_FILE" ] && [ ! -L "$LOG_FILE" ]; } &&
+	{ [ -z "$_log_previous" ] || { [ -f "$_log_previous" ] && [ ! -L "$_log_previous" ]; }; }; then
+	_log_had_noclobber=0
+	case "$-" in *C*) _log_had_noclobber=1 ;; esac
+	_log_old_umask=$(umask)
+	umask 077
+	set -C
+	if exec 9>"$LOG_FILE"; then
+		LOG_ENABLED=1
+	fi
+	[ "$_log_had_noclobber" -eq 1 ] || set +C
+	umask "$_log_old_umask"
+	if [ "$LOG_ENABLED" -eq 1 ] && [ -n "$_log_previous" ]; then
+		if tail -n 500 "$_log_previous" >&9 2>/dev/null; then
+			_log_previous_copied=1
+		fi
+	fi
+fi
+
+if [ -n "$_log_previous" ]; then
+	if [ "$LOG_ENABLED" -eq 1 ] && [ "$_log_previous_copied" -eq 1 ]; then
+		rm -f "$_log_previous"
+	else
+		printf '%s\n' "tmux-assistant-resurrect: previous save log retained at $_log_previous" >&2
+	fi
+fi
+if [ "$LOG_ENABLED" -ne 1 ] && [ ! -e "$LOG_FILE" ]; then
+	printf '%s\n' "tmux-assistant-resurrect: cannot securely open save log, disabling file logging: $LOG_FILE" >&2
+fi
+unset _log_previous _log_previous_copied _log_had_noclobber _log_old_umask
+
 log() {
-	local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
-	echo "$msg" >&2
-	echo "$msg" >>"$LOG_FILE"
+	local msg
+	msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+	msg="${msg//$'\r'/\\r}"
+	msg="${msg//$'\n'/\\n}"
+	msg="${msg//$'\033'/\\e}"
+	printf '%s\n' "$msg" >&2
+	if [ "$LOG_ENABLED" -eq 1 ]; then
+		if ! printf '%s\n' "$msg" >&9 2>/dev/null; then
+			LOG_ENABLED=0
+			printf '%s\n' "tmux-assistant-resurrect: cannot write save log, disabling file logging: $LOG_FILE" >&2
+		fi
+	fi
 }
 
 # Move state files left in any pre-$HOME default into the current state dir.
@@ -972,8 +1035,8 @@ get_grok_session() {
 register_codex_session_id() {
 	local sid="$1"
 	[ -z "$sid" ] && return
-	case "$USED_CODEX_SESSION_IDS" in
-	*"$sid"*) ;;
+	case "$USED_CODEX_SESSION_IDS"$'\t' in
+	*$'\t'"$sid"$'\t'*) ;;
 	*)
 		USED_CODEX_SESSION_IDS="${USED_CODEX_SESSION_IDS}"$'\t'"$sid"
 		;;
@@ -983,8 +1046,8 @@ register_codex_session_id() {
 register_pi_session_id() {
 	local sid="$1"
 	[ -z "$sid" ] && return
-	case "$USED_PI_SESSION_IDS" in
-	*"$sid"*) ;;
+	case "$USED_PI_SESSION_IDS"$'\t' in
+	*$'\t'"$sid"$'\t'*) ;;
 	*)
 		USED_PI_SESSION_IDS="${USED_PI_SESSION_IDS}"$'\t'"$sid"
 		;;
@@ -994,8 +1057,8 @@ register_pi_session_id() {
 register_omp_session_id() {
 	local sid="$1"
 	[ -z "$sid" ] && return
-	case "$USED_OMP_SESSION_IDS" in
-	*"$sid"*) ;;
+	case "$USED_OMP_SESSION_IDS"$'\t' in
+	*$'\t'"$sid"$'\t'*) ;;
 	*)
 		USED_OMP_SESSION_IDS="${USED_OMP_SESSION_IDS}"$'\t'"$sid"
 		;;
@@ -1134,7 +1197,7 @@ relaunch_ledger_apply() {
 	else
 		existing='[]'
 	fi
-	tmp="${RELAUNCH_LEDGER_FILE}.tmp.$$"
+	tmp=$(mktemp "${RELAUNCH_LEDGER_FILE}.tmp.XXXXXX") || return 1
 	RELAUNCH_LEDGER_TMP="$tmp"
 	if ! (umask 077 && jq -Rn \
 		--arg existing "$existing" \
@@ -2327,11 +2390,13 @@ main() {
 	WATCHDOG_PID=""
 	WATCHDOG_SELF_FILE=""
 	WATCHDOG_FIRED_FILE=""
+	SESSIONS_TMP=""
+	OUTPUT_TMP=""
 	# stop_save_watchdog MUST run before the rm: it reads WATCHDOG_FIRED_FILE to
 	# decide whether the watchdog has already fired (and so must not be cancelled).
 	# Deleting that file first would make the fired-check always fail, cancelling a
 	# mid-escalation watchdog and defeating the whole grandchild-leak guarantee.
-	trap 'stop_save_watchdog; rm -f "$PS_FILE" "$PANE_FILE" "$PARTS_FILE" "$RELAUNCH_PARTS_FILE" "$STATE_CACHE_FILE" "${WATCHDOG_SELF_FILE:-}" "${WATCHDOG_FIRED_FILE:-}" "${RELAUNCH_LEDGER_TMP:-}" "${OUTPUT_FILE}.sessions.tmp.$$" "${OUTPUT_FILE}.tmp.$$"' EXIT INT TERM
+	trap 'stop_save_watchdog; rm -f "$PS_FILE" "$PANE_FILE" "$PARTS_FILE" "$RELAUNCH_PARTS_FILE" "$STATE_CACHE_FILE" "${WATCHDOG_SELF_FILE:-}" "${WATCHDOG_FIRED_FILE:-}" "${RELAUNCH_LEDGER_TMP:-}" "${SESSIONS_TMP:-}" "${OUTPUT_TMP:-}"' EXIT INT TERM
 
 	# Arm the watchdog (unless disabled with a 0/invalid timeout).
 	if [ "$SAVE_TIMEOUT" -gt 0 ]; then
@@ -2500,8 +2565,8 @@ main() {
 	# leaves the previous valid sidecar intact (a bare `>"$OUTPUT_FILE"` truncates
 	# it before jq runs, which would lose all saved sessions on a timeout).
 	local count=0 relaunch_count=0
-	local SESSIONS_TMP="${OUTPUT_FILE}.sessions.tmp.$$"
-	local OUTPUT_TMP="${OUTPUT_FILE}.tmp.$$"
+	SESSIONS_TMP=$(mktemp "${OUTPUT_FILE}.sessions.tmp.XXXXXX")
+	OUTPUT_TMP=$(mktemp "${OUTPUT_FILE}.tmp.XXXXXX")
 	if ! jq -Rs --arg ts "$SAVE_TS" '
 			split("\n") | map(select(length > 0) | split("\t") |
 			{pane:.[0], tool:.[1], session_id:.[2], cwd:.[3], pid:.[4], model:.[5], cli_args:.[6],
@@ -2524,6 +2589,8 @@ main() {
 	fi
 	rm -f "$SESSIONS_TMP"
 	mv -f "$OUTPUT_TMP" "$OUTPUT_FILE"
+	SESSIONS_TMP=""
+	OUTPUT_TMP=""
 	count=$(jq '.sessions | length' "$OUTPUT_FILE")
 	relaunch_count=$(jq '.relaunch | length' "$OUTPUT_FILE")
 
@@ -2580,12 +2647,14 @@ strip_assistant_pane_contents() {
 	done < <(printf '%s\n' "$panes")
 
 	if [ "$removed" -gt 0 ]; then
-		if tar cf - -C "$tmpdir" ./pane_contents/ | gzip >"${archive}.tmp" 2>/dev/null; then
-			mv "${archive}.tmp" "$archive"
+		local archive_tmp
+		archive_tmp=$(mktemp "${archive}.tmp.XXXXXX") || archive_tmp=""
+		if [ -n "$archive_tmp" ] && tar cf - -C "$tmpdir" ./pane_contents/ | gzip >"$archive_tmp" 2>/dev/null; then
+			mv "$archive_tmp" "$archive"
 			log "stripped pane contents for $removed assistant pane(s)"
 		else
 			log "warning: failed to repack pane_contents archive"
-			rm -f "${archive}.tmp"
+			[ -z "$archive_tmp" ] || rm -f "$archive_tmp"
 		fi
 	fi
 

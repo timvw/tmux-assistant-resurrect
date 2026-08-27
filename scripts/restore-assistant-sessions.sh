@@ -19,15 +19,73 @@ RESURRECT_DIR="$(resurrect_data_dir)"
 INPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
 LOG_FILE="${RESURRECT_DIR}/assistant-restore.log"
 
-# Rotate log: keep only the most recent 500 lines
-if [ -f "$LOG_FILE" ]; then
-	tail -n 500 "$LOG_FILE" >"${LOG_FILE}.tmp" 2>/dev/null && mv "${LOG_FILE}.tmp" "$LOG_FILE" || true
+# The log contains session ids and reconstructed CLI arguments/environment.
+# Keep newly-created logs private and never reopen the published path for
+# writing: a retained descriptor prevents a later symlink swap from redirecting
+# log output.
+umask 077
+LOG_ENABLED=0
+log_previous=""
+log_previous_copied=0
+if [ -e "$LOG_FILE" ] || [ -L "$LOG_FILE" ]; then
+	if [ -L "$LOG_FILE" ]; then
+		printf '%s\n' "tmux-assistant-resurrect: refusing symlinked restore log: $LOG_FILE" >&2
+	elif [ ! -f "$LOG_FILE" ]; then
+		printf '%s\n' "tmux-assistant-resurrect: refusing non-regular restore log: $LOG_FILE" >&2
+	else
+		log_previous=$(mktemp "${LOG_FILE}.rotate.XXXXXX" 2>/dev/null || true)
+		if [ -z "$log_previous" ] || ! mv "$LOG_FILE" "$log_previous" 2>/dev/null; then
+			printf '%s\n' "tmux-assistant-resurrect: cannot rotate restore log, disabling file logging: $LOG_FILE" >&2
+			[ -z "$log_previous" ] || rm -f "$log_previous"
+			log_previous=""
+		fi
+	fi
 fi
 
+if { [ ! -e "$LOG_FILE" ] && [ ! -L "$LOG_FILE" ]; } &&
+	{ [ -z "$log_previous" ] || { [ -f "$log_previous" ] && [ ! -L "$log_previous" ]; }; }; then
+	log_had_noclobber=0
+	case "$-" in *C*) log_had_noclobber=1 ;; esac
+	set -C
+	if exec 9>"$LOG_FILE"; then
+		LOG_ENABLED=1
+	fi
+	[ "$log_had_noclobber" -eq 1 ] || set +C
+	if [ "$LOG_ENABLED" -eq 1 ] && [ -n "$log_previous" ]; then
+		if tail -n 500 "$log_previous" >&9 2>/dev/null; then
+			log_previous_copied=1
+		fi
+	fi
+fi
+
+if [ -n "$log_previous" ]; then
+	if [ "$LOG_ENABLED" -eq 1 ] && [ "$log_previous_copied" -eq 1 ]; then
+		rm -f "$log_previous"
+	else
+		printf '%s\n' "tmux-assistant-resurrect: previous restore log retained at $log_previous" >&2
+	fi
+fi
+if [ "$LOG_ENABLED" -ne 1 ] && [ ! -e "$LOG_FILE" ]; then
+	printf '%s\n' "tmux-assistant-resurrect: cannot securely open restore log, disabling file logging: $LOG_FILE" >&2
+fi
+unset log_previous log_previous_copied log_had_noclobber
+
 log() {
-	local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
-	echo "$msg" >&2
-	echo "$msg" >>"$LOG_FILE"
+	local msg
+	msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+	# Sidecar values may contain control characters. Keep one event per physical
+	# line and prevent a corrupt cache from forging log entries or emitting an
+	# escape sequence into the restore hook's terminal.
+	msg="${msg//$'\r'/\\r}"
+	msg="${msg//$'\n'/\\n}"
+	msg="${msg//$'\033'/\\e}"
+	printf '%s\n' "$msg" >&2
+	if [ "$LOG_ENABLED" -eq 1 ]; then
+		if ! printf '%s\n' "$msg" >&9 2>/dev/null; then
+			LOG_ENABLED=0
+			printf '%s\n' "tmux-assistant-resurrect: cannot write restore log, disabling file logging: $LOG_FILE" >&2
+		fi
+	fi
 }
 
 if [ ! -f "$INPUT_FILE" ]; then
@@ -38,11 +96,19 @@ fi
 # Read resumable sessions and vouched session-less relaunches as one tagged
 # stream. The sibling-key schema keeps both upgrade directions safe: old
 # restores ignore .relaunch, and new restores treat a missing key as empty.
-entries=$(jq -c \
-	'[ (.sessions // [])[] | . + {kind: "session"} ]
-	 + [ (.relaunch // [])[] | . + {kind: "relaunch"} ]' \
-	"$INPUT_FILE")
-count=$(echo "$entries" | jq 'length')
+if ! entries=$(jq -ce '
+	if type != "object"
+	   or ((.sessions // []) | type) != "array"
+	   or ((.relaunch // []) | type) != "array"
+	then error("invalid assistant sidecar schema")
+	else
+	  [ (.sessions // [])[] | if type == "object" then . + {kind: "session"} else . end ]
+	  + [ (.relaunch // [])[] | if type == "object" then . + {kind: "relaunch"} else . end ]
+	end' "$INPUT_FILE" 2>/dev/null); then
+	log "invalid assistant sidecar at $INPUT_FILE, skipping restore"
+	exit 0
+fi
+count=$(printf '%s\n' "$entries" | jq 'length')
 
 if [ "$count" -eq 0 ]; then
 	log "no assistant panes to restore"
@@ -57,20 +123,54 @@ log "restoring $count assistant pane(s)..."
 # Use a temp file to avoid subshell variable scoping issues with pipes
 tmpfile=$(mktemp)
 trap 'rm -f "$tmpfile"' EXIT INT TERM
-echo "$entries" | jq -c '.[]' >"$tmpfile"
+printf '%s\n' "$entries" | jq -c '.[]' >"$tmpfile"
 
 restored=0
+entry_number=0
+claimed_panes="|"
 while read -r entry; do
-	pane=$(echo "$entry" | jq -r '.pane')
-	tool=$(echo "$entry" | jq -r '.tool')
-	kind=$(echo "$entry" | jq -r '.kind')
-	session_id=$(echo "$entry" | jq -r '.session_id // empty')
-	relaunch_cmd=$(echo "$entry" | jq -r '.cmd // empty')
-	cwd=$(echo "$entry" | jq -r '.cwd // empty')
-	cli_args=$(echo "$entry" | jq -r '.cli_args // empty')
-	model=$(echo "$entry" | jq -r '.model // empty')
-	env_json=$(echo "$entry" | jq -c '.env // {}')
-	copilot_home=$(echo "$entry" | jq -r '.copilot_home // empty')
+	entry_number=$((entry_number + 1))
+	# Treat the sidecar as untrusted input. Besides preventing surprising jq
+	# coercions, validating each entry here means one corrupt entry cannot abort
+	# restoration of all the valid panes after it.
+	if ! printf '%s\n' "$entry" | jq -e '
+		def optional_string($k): (has($k) | not) or .[$k] == null or (.[$k] | type) == "string";
+		type == "object"
+		and (.pane | type) == "string"
+		and (.tool | type) == "string"
+		and (.kind == "session" or .kind == "relaunch")
+		and optional_string("cwd")
+		and optional_string("cli_args")
+		and optional_string("model")
+		and optional_string("copilot_home")
+		and optional_string("session_name")
+		and optional_string("window_index")
+		and optional_string("pane_index")
+		and ((has("env") | not) or .env == null or (.env | type) == "object")
+		and (if .kind == "session" then (.session_id | type) == "string"
+		     else (.cmd | type) == "string" end)' >/dev/null 2>&1; then
+		log "malformed sidecar entry $entry_number, skipping"
+		continue
+	fi
+
+	pane=$(printf '%s\n' "$entry" | jq -r '.pane')
+	tool=$(printf '%s\n' "$entry" | jq -r '.tool')
+	kind=$(printf '%s\n' "$entry" | jq -r '.kind')
+	session_id=$(printf '%s\n' "$entry" | jq -r '.session_id // empty')
+	relaunch_cmd=$(printf '%s\n' "$entry" | jq -r '.cmd // empty')
+	cwd=$(printf '%s\n' "$entry" | jq -r '.cwd // empty')
+	cli_args=$(printf '%s\n' "$entry" | jq -r '.cli_args // empty')
+	model=$(printf '%s\n' "$entry" | jq -r '.model // empty')
+	env_json=$(printf '%s\n' "$entry" | jq -c '.env // {}')
+	copilot_home=$(printf '%s\n' "$entry" | jq -r '.copilot_home // empty')
+
+	if [ "$kind" = "session" ]; then
+		if [ -z "$session_id" ] || [ "${#session_id}" -gt 256 ] ||
+			! [[ "$session_id" =~ ^[A-Za-z0-9_][A-Za-z0-9._:/+=-]*$ ]]; then
+			log "invalid or empty session id for $tool in $pane, skipping"
+			continue
+		fi
+	fi
 
 	# Resolve the saved pane to a live tmux pane id (%N), which every tmux
 	# command below then targets. The saved "session:window.pane" string is a
@@ -83,9 +183,9 @@ while read -r entry; do
 	# sidecars written before those fields existed (the file is a cache
 	# regenerated on every save, so the only path that hits this is
 	# save -> upgrade -> restore).
-	tmux_session=$(echo "$entry" | jq -r '.session_name // empty')
-	window_index=$(echo "$entry" | jq -r '.window_index // empty')
-	pane_index=$(echo "$entry" | jq -r '.pane_index // empty')
+	tmux_session=$(printf '%s\n' "$entry" | jq -r '.session_name // empty')
+	window_index=$(printf '%s\n' "$entry" | jq -r '.window_index // empty')
+	pane_index=$(printf '%s\n' "$entry" | jq -r '.pane_index // empty')
 	if [ -z "$tmux_session" ] || [ -z "$window_index" ] || [ -z "$pane_index" ]; then
 		if ! split_pane_target "$pane"; then
 			log "malformed pane target '$pane', skipping"
@@ -101,6 +201,12 @@ while read -r entry; do
 		log "pane $pane does not exist (session '$tmux_session', window $window_index, pane $pane_index), skipping"
 		continue
 	fi
+	case "$claimed_panes" in
+	*"|${pane_id}|"*)
+		log "duplicate sidecar entry for pane $pane, skipping"
+		continue
+		;;
+	esac
 
 	# Wait for at least one client to attach to this pane's session before
 	# replaying. TUI tools that query the terminal at startup (OSC 11
@@ -164,19 +270,30 @@ while read -r entry; do
 	# @assistant-resurrect-capture-env. Exclude built-in vars (tmux_pane, shell)
 	# which would be stale or already present in the shell environment.
 	env_prefix=""
+	nu_env=""
 	if [ -n "$env_json" ] && [ "$env_json" != "null" ] && [ "$env_json" != "{}" ]; then
 		capture_env=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
+		reglob=""
+		case "$-" in *f*) ;; *) reglob=1 ;; esac
+		set -f
 		for var in $capture_env; do
 			# Validate var name to prevent shell injection via crafted tmux option
 			if ! [[ "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
 				log "skipping invalid env var name: $var"
 				continue
 			fi
-			val=$(echo "$env_json" | jq -r --arg k "$var" '.[$k] // empty')
+			# A saved Copilot state root is authoritative and is appended below.
+			# Avoid duplicate Nushell record keys when users also capture it.
+			if [ "$tool" = "copilot" ] && [ "$var" = "COPILOT_HOME" ] && [ -n "$copilot_home" ]; then
+				continue
+			fi
+			val=$(printf '%s\n' "$env_json" | jq -r --arg k "$var" '.[$k] // empty')
 			if [ -n "$val" ]; then
 				env_prefix="${env_prefix}${var}=$(shell_quote "$pane_cmd" "$val") "
+				nu_env="${nu_env}${var}: $(shell_quote "$pane_cmd" "$val"), "
 			fi
 		done
+		[ -n "$reglob" ] && set +f
 	fi
 
 	resume_cmd=""
@@ -203,30 +320,32 @@ while read -r entry; do
 			continue
 		}
 	else
-		# Build the resume command for each tool. Apply posix_quote to the
-		# session ID defensively: IDs are alphanumeric in practice, but a
-		# corrupt/tampered sidecar must not inject shell commands.
-		safe_sid=$(posix_quote "$session_id")
+		# Build the resume command for each tool. Quote for the actual pane shell;
+		# csh/tcsh expand `!` even inside POSIX single quotes.
+		safe_sid=$(shell_quote "$pane_cmd" "$session_id")
 
 		# Quote cli_args tokens and disable glob expansion while splitting, so
 		# args like "claude-opus-4-6[1m]" are treated literally.
 		safe_cli_args=""
+		cli_has_model=0
 		if [ -n "$cli_args" ]; then
+			reglob=""
+			case "$-" in *f*) ;; *) reglob=1 ;; esac
 			set -f
 			for _arg in $cli_args; do
-				safe_cli_args="${safe_cli_args} $(posix_quote "$_arg")"
+				safe_cli_args="${safe_cli_args} $(shell_quote "$pane_cmd" "$_arg")"
+				case "$_arg" in --model | --model=*) cli_has_model=1 ;; esac
 			done
-			set +f
+			[ -n "$reglob" ] && set +f
 		fi
 
 		# Add --model from the sidecar model field if not already in cli_args.
 		# Only for Claude — OpenCode and Codex don't support --model.
 		safe_model_arg=""
 		if [ -n "$model" ] && [ "$tool" = "claude" ]; then
-			case "$cli_args" in
-			*--model*) ;;
-			*) safe_model_arg=" --model $(posix_quote "$model")" ;;
-			esac
+			if [ "${cli_has_model:-0}" -eq 0 ]; then
+				safe_model_arg=" --model $(shell_quote "$pane_cmd" "$model")"
+			fi
 		fi
 
 		case "$tool" in
@@ -240,10 +359,8 @@ while read -r entry; do
 	copilot)
 		copilot_cmd="command copilot"
 		if [ -n "$copilot_home" ]; then
-			# `VAR=value command ...` is not valid csh/tcsh syntax. `env`
-			# preserves aliases/functions bypass while working in every shell
-			# accepted by the restore whitelist.
-			copilot_cmd="env COPILOT_HOME=$(shell_quote "$pane_cmd" "$copilot_home") copilot"
+			env_prefix="${env_prefix}COPILOT_HOME=$(shell_quote "$pane_cmd" "$copilot_home") "
+			nu_env="${nu_env}COPILOT_HOME: $(shell_quote "$pane_cmd" "$copilot_home"), "
 		fi
 		if [ -n "$safe_cli_args" ]; then
 			resume_cmd="${copilot_cmd}${safe_cli_args} --resume=${safe_sid}"
@@ -295,9 +412,45 @@ while read -r entry; do
 	esac
 	fi
 
-	# Prepend env vars if present
-	if [ -n "$env_prefix" ]; then
-		resume_cmd="${env_prefix}${resume_cmd}"
+	# Bypass aliases/functions without relying on POSIX assignment-prefix syntax,
+	# which csh/tcsh reject. Nushell uses `^` for an external command and
+	# `with-env` for scoped environment changes.
+	case "$pane_cmd" in
+	nu)
+		resume_cmd="^${resume_cmd#command }"
+		if [ -n "$nu_env" ]; then
+			nu_env="${nu_env%, }"
+			resume_cmd="with-env { ${nu_env} } { ${resume_cmd} }"
+		fi
+		;;
+	*)
+		if [ -n "$env_prefix" ]; then
+			resume_cmd="env ${env_prefix}${resume_cmd#command }"
+		fi
+		;;
+	esac
+
+	# Resolve the working directory before touching the pane. A stale saved cwd
+	# must not leave the user with a cleared shell or resume into the wrong
+	# project. `&&` also covers the small disappearance/permission race between
+	# this check and execution in the pane.
+	if [ -n "$cwd" ] && [ "$cwd" != "null" ]; then
+		if [ ! -d "$cwd" ]; then
+			log "saved cwd for $tool in $pane no longer exists, skipping"
+			continue
+		fi
+		safe_cwd=$(shell_quote "$pane_cmd" "$cwd")
+		case "$pane_cmd" in
+		nu)
+			# Nushell sequences statements with `;`; POSIX-style `&&` is not
+			# accepted by current Nushell releases. A failed `cd` is a shell
+			# error, so the following external command is not evaluated.
+			full_cmd="cd ${safe_cwd}; ${resume_cmd}"
+			;;
+		*) full_cmd="cd ${safe_cwd} && ${resume_cmd}" ;;
+		esac
+	else
+		full_cmd="$resume_cmd"
 	fi
 
 	if [ "$kind" = "relaunch" ]; then
@@ -311,18 +464,18 @@ while read -r entry; do
 	# clearing, TUI tools like Claude show stale output above the new instance.
 	# Uses tmux clear-history to wipe scrollback, then sends 'clear' to reset
 	# the visible area.
-	tmux send-keys -t "$pane_id" "clear" Enter
-	tmux clear-history -t "$pane_id"
+	if ! tmux send-keys -t "$pane_id" "clear" Enter 2>/dev/null ||
+		! tmux clear-history -t "$pane_id" 2>/dev/null; then
+		log "pane $pane disappeared while clearing, skipping"
+		continue
+	fi
 	sleep 0.3
 
-	# Build the full command: cd to cwd (if it exists) then resume.
-	# Use POSIX single-quote escaping (safe for bash, zsh, sh, dash, fish).
-	if [ -n "$cwd" ] && [ "$cwd" != "null" ]; then
-		safe_cwd=$(posix_quote "$cwd")
-		tmux send-keys -t "$pane_id" "cd ${safe_cwd} 2>/dev/null; ${resume_cmd}" Enter
-	else
-		tmux send-keys -t "$pane_id" "${resume_cmd}" Enter
+	if ! tmux send-keys -t "$pane_id" "$full_cmd" Enter 2>/dev/null; then
+		log "pane $pane disappeared before replay, skipping"
+		continue
 	fi
+	claimed_panes="${claimed_panes}${pane_id}|"
 
 	restored=$((restored + 1))
 

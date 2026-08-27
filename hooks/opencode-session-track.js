@@ -6,8 +6,15 @@
 //
 // Install: symlink into ~/.config/opencode/plugins/ (global) or .opencode/plugins/ (project).
 
-import { writeFileSync, mkdirSync, unlinkSync, existsSync } from "fs";
-import { execSync } from "child_process";
+import {
+  writeFileSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+  existsSync,
+} from "fs";
+import { execFileSync } from "child_process";
+import { randomUUID } from "crypto";
 import { homedir } from "os";
 
 export const SessionTracker = async ({ client, directory }) => {
@@ -57,9 +64,10 @@ export const SessionTracker = async ({ client, directory }) => {
   // @assistant-resurrect-capture-env (space-separated list).
   let captureEnvVars = [];
   try {
-    const raw = execSync(
-      "tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null",
-      { encoding: "utf8", timeout: 2000 },
+    const raw = execFileSync(
+      "tmux",
+      ["show-option", "-gqv", "@assistant-resurrect-capture-env"],
+      { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] },
     ).trim();
     if (raw) captureEnvVars = raw.split(/\s+/);
   } catch {
@@ -83,14 +91,17 @@ export const SessionTracker = async ({ client, directory }) => {
     }
   };
   process.on("exit", cleanup);
-  process.on("SIGINT", () => {
-    cleanup();
-    process.exit(0);
-  });
-  process.on("SIGTERM", () => {
-    cleanup();
-    process.exit(0);
-  });
+  // A signal listener suppresses Node's default exit, so clean up first and
+  // then restore the default only when the host has no handler of its own. Host
+  // handlers still receive the original signal and retain shutdown control.
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    const cleanupOnSignal = () => {
+      cleanup();
+      process.removeListener(signal, cleanupOnSignal);
+      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+    };
+    process.prependListener(signal, cleanupOnSignal);
+  }
 
   const writeSessionFile = (event) => {
     const sessionInfo = event.properties?.info || {};
@@ -121,10 +132,21 @@ export const SessionTracker = async ({ client, directory }) => {
       null,
       2,
     );
+    // Write beside the destination and atomically rename it into place. The
+    // save hook can read this file concurrently, and must never observe a
+    // truncated JSON document. Explicit 0600 protects captured environment
+    // values even when the user supplied a shared state directory.
+    const tempFile = `${stateFile}.${randomUUID()}.tmp`;
     try {
-      writeFileSync(stateFile, data);
+      writeFileSync(tempFile, data, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      renameSync(tempFile, stateFile);
     } catch {
       // Best-effort — don't crash OpenCode if state dir is unavailable
+      try {
+        unlinkSync(tempFile);
+      } catch {
+        // The write may have failed before the temporary file was created
+      }
     }
   };
 

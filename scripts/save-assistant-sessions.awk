@@ -74,7 +74,7 @@ END {
 		}
 
 		# BFS through descendant processes
-		delete queue
+		for (queue_index in queue) delete queue[queue_index]
 		qs = 1
 		qe = 0
 		if (root in child_list) {

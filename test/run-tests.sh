@@ -109,6 +109,15 @@ assert_contains() {
 	fi
 }
 
+assert_not_contains() {
+	local desc="$1" haystack="$2" needle="$3"
+	if echo "$haystack" | grep -qF -- "$needle"; then
+		fail "$desc (did not expect '$needle')"
+	else
+		pass "$desc"
+	fi
+}
+
 assert_file_exists() {
 	local desc="$1" path="$2"
 	if [ -f "$path" ]; then
@@ -285,6 +294,54 @@ if relaunch_unit_output=$("${TEST_BASH:-bash}" "$REPO_DIR/test/relaunch-unit-tes
 else
 	echo "$relaunch_unit_output"
 	fail "Relaunch voucher focused unit suite"
+fi
+
+# --- Restore hardening unit suite ---
+
+suite "restore_unit"
+echo ""
+echo "=== Restore validation, quoting, and failure-isolation tests ==="
+echo ""
+
+restore_unit_output=""
+if restore_unit_output=$("${TEST_BASH:-bash}" "$REPO_DIR/test/restore-unit-tests.sh" 2>&1); then
+	echo "$restore_unit_output"
+	pass "Restore hardening focused unit suite"
+else
+	echo "$restore_unit_output"
+	fail "Restore hardening focused unit suite"
+fi
+
+# --- Save/detection hardening unit suite ---
+
+suite "save_hardening_unit"
+echo ""
+echo "=== Save and process-detection hardening tests ==="
+echo ""
+
+save_hardening_output=""
+if save_hardening_output=$("${TEST_BASH:-bash}" "$REPO_DIR/test/save-hardening-unit-tests.sh" 2>&1); then
+	echo "$save_hardening_output"
+	pass "Save and process-detection hardening unit suite"
+else
+	echo "$save_hardening_output"
+	fail "Save and process-detection hardening unit suite"
+fi
+
+# --- Hook/plugin hardening unit suite ---
+
+suite "plugin_hardening_unit"
+echo ""
+echo "=== Hook and plugin hardening tests ==="
+echo ""
+
+plugin_hardening_output=""
+if plugin_hardening_output=$("${TEST_BASH:-bash}" "$REPO_DIR/test/plugin-hardening-unit-tests.sh" 2>&1); then
+	echo "$plugin_hardening_output"
+	pass "Hook and plugin hardening unit suite"
+else
+	echo "$plugin_hardening_output"
+	fail "Hook and plugin hardening unit suite"
 fi
 
 # --- Copilot upstream contract ---
@@ -859,7 +916,7 @@ fi
 # Clean up the background assistant
 kill_pane_children test-claude
 
-# --- Test 3c: Restore handles cwd with single quotes and missing dirs ---
+# --- Test 3c: Restore quotes valid cwd values and refuses stale dirs ---
 
 echo ""
 echo "=== Test 3c: restore handles tricky cwd values ==="
@@ -909,7 +966,10 @@ just restore 2>&1 || restore_exit2=$?
 sleep 5
 
 assert_eq "Restore doesn't crash on missing cwd" "0" "$restore_exit2"
-assert_contains "Restore attempted resume with missing cwd" "$(cat "$RESTORE_LOG")" "ses_nocwd_test"
+assert_contains "Restore reports missing saved cwd" "$(cat "$RESTORE_LOG")" "no longer exists, skipping"
+assert_not_contains "Restore does not resume in the wrong cwd" "$(cat "$RESTORE_LOG")" "ses_nocwd_test"
+assert_eq "Missing cwd leaves the pane at its shell" "bash" \
+	"$(tmux display-message -t test-claude -p '#{pane_current_command}')"
 
 # --- Test 3d: @resurrect-processes does not include assistants ---
 #

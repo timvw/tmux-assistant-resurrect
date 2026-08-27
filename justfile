@@ -309,7 +309,7 @@ status:
     echo ""
 
     # Last saved assistant sessions
-    saved="${HOME}/.tmux/resurrect/assistant-sessions.json"
+    saved="$(resurrect_data_dir)/assistant-sessions.json"
     if [ -f "$saved" ]; then
         count=$(jq '.sessions | length' "$saved" 2>/dev/null || echo 0)
         ts=$(jq -r '.timestamp' "$saved" 2>/dev/null || echo "?")
@@ -500,6 +500,14 @@ test-tmux-contract:
 test-state-dir:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/state-dir-unit-tests.sh"
 
+# Run save and process-detection hardening tests (no assistant binaries needed)
+test-save-hardening:
+    @"${TEST_BASH:-bash}" "{{repo_dir}}/test/save-hardening-unit-tests.sh"
+
+# Run hook/plugin installer and helper hardening tests (no assistant login needed)
+test-plugin-hardening:
+    @bash "{{repo_dir}}/test/plugin-hardening-unit-tests.sh"
+
 # Run hermetic Copilot session-discovery tests (no binary or login required)
 test-copilot:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/copilot-unit-tests.sh"
@@ -507,6 +515,10 @@ test-copilot:
 # Run hermetic session-less relaunch voucher tests (no tmux or CLI needed)
 test-relaunch:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/relaunch-unit-tests.sh"
+
+# Run hermetic restore validation/quoting tests (no tmux or CLI needed)
+test-restore:
+    @"${TEST_BASH:-bash}" "{{repo_dir}}/test/restore-unit-tests.sh"
 
 # Authenticated Copilot round trip: prompt -> save -> kill -> restore -> recall.
 # Needs a real Copilot login and spends a few AI credits; skips without a token.
