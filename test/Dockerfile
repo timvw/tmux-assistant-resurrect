@@ -102,10 +102,10 @@ RUN curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 2 \
 # codex is pre-1.0 (0.x), so pin to ~0 (any 0.x); claude-code is 2.x;
 # opencode-ai is 1.x; pi-coding-agent is 0.x (requires Node >= 22.19.0);
 # Oh My Pi is 16.x and requires Bun for its `omp` entrypoint; Copilot is 1.x.
-RUN npm install -g "@anthropic-ai/claude-code@^2" "@github/copilot@^1" "@openai/codex@^0" "opencode-ai@^1" "@earendil-works/pi-coding-agent@^0" "@oh-my-pi/pi-coding-agent@^16"
+RUN npm install -g "@anthropic-ai/claude-code@^2" "@github/copilot@^1" "@openai/codex@^0" "opencode-ai@^1" "@earendil-works/pi-coding-agent@^0" "@oh-my-pi/pi-coding-agent@^16" "@xai-official/grok@^1"
 
 # Verify the binaries exist
-RUN which claude && which copilot && copilot --version && which codex && which opencode && which pi && which omp && omp --version
+RUN which claude && which copilot && copilot --version && which codex && which opencode && which pi && which omp && omp --version && which grok && grok --version
 
 # Create a test user (avoid running as root — tmux behaves differently)
 RUN useradd -m -s /bin/bash testuser
