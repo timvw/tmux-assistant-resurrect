@@ -220,6 +220,105 @@ case "$(cat "$log_error_file")" in
 *) assert_eq "save log write failure is reported once" yes no ;;
 esac
 
+echo "== credential flags are stripped from cli_args =="
+# extract_cli_args must remove credential-bearing flags while keeping
+# surrounding non-credential flags intact. Session flag discovery is
+# unavailable here (no mock binary), so session flags remain — the test
+# focuses on the credential blocklist.
+assert_eq "--api-key VALUE form is stripped" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --api-key sk-xxx --model gpt-4")"
+assert_eq "--api-key=VALUE form is stripped" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --api-key=sk-xxx --model gpt-4")"
+assert_eq "--token VALUE form is stripped" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --token tok-secret --model gpt-4")"
+assert_eq "--token=VALUE form is stripped" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --token=tok-secret --model gpt-4")"
+assert_eq "--password VALUE form is stripped" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --password s3cret --model gpt-4")"
+assert_eq "--secret-key VALUE form is stripped" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --secret-key abc123 --model gpt-4")"
+assert_eq "--auth-token VALUE form is stripped" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --auth-token bearer-xyz --model gpt-4")"
+assert_eq "non-credential flags around credential survive" \
+	"--verbose --model gpt-4 --debug" \
+	"$(extract_cli_args pi "pi --verbose --api-key sk-xxx --model gpt-4 --debug")"
+assert_eq "multiple credential flags are all stripped" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --api-key sk-xxx --token tok-yyy --model gpt-4")"
+assert_eq "credential flag at end is stripped" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --model gpt-4 --api-key sk-xxx")"
+# ps flattens argv before this runs, so a value containing spaces arrives as
+# several tokens. Consuming only one would persist the remainder of the secret.
+assert_eq "multi-word credential value is fully consumed" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --api-key correct horse battery staple --model gpt-4")"
+assert_eq "multi-word value at end leaves nothing behind" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --model gpt-4 --password hunter two three")"
+# The token right after the flag is the value even when it looks like a flag.
+assert_eq "dash-leading credential value is still consumed" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --api-key -sk-dashy --model gpt-4")"
+# --secret-env-vars matches the blocklist by shape but carries variable NAMES,
+# not a secret. Stripping it would silently disable the user's redaction.
+assert_eq "--secret-env-vars survives the credential filter" \
+	"--secret-env-vars TOKEN --model gpt-4" \
+	"$(extract_cli_args copilot "copilot --secret-env-vars TOKEN --model gpt-4")"
+assert_eq "--secret-env-vars=VALUE form survives too" \
+	"--secret-env-vars=TOKEN --model gpt-4" \
+	"$(extract_cli_args copilot "copilot --secret-env-vars=TOKEN --model gpt-4")"
+assert_eq "a real secret flag alongside it is still stripped" \
+	"--secret-env-vars TOKEN --model gpt-4" \
+	"$(extract_cli_args copilot "copilot --secret-env-vars TOKEN --api-key sk-xxx --model gpt-4")"
+
+echo "== session-less relaunch diagnostics =="
+# A pane launched with an inline key is precisely the case that reaches the
+# session-less path, and relaunch_shape_ok() rejects it -- so the rejection
+# message was the one place the key still reached assistant-save.log verbatim.
+# log() writes to stderr and fd 9 only, so capturing stderr sees every line.
+_relaunch_stderr() {
+	# Brace form so the intent is explicit: drop stdout, then hand stderr to the
+	# command substitution. Only the diagnostics are under test here.
+	{ RELAUNCH_ENABLED=on \
+		handle_sessionless_relaunch 'sess:0.0' pi 4242 "$1" /tmp 1 >/dev/null || true; } 2>&1
+}
+_holds() { case "$2" in *"$1"*) printf 'yes\n' ;; *) printf 'no\n' ;; esac; }
+
+relaunch_diag=$(_relaunch_stderr 'pi --api-key sk-RELAUNCHSECRET agents')
+assert_eq "rejected relaunch cmd does not log the key" "no" \
+	"$(_holds 'sk-RELAUNCHSECRET' "$relaunch_diag")"
+assert_eq "rejected relaunch cmd still names the dropped flag" "yes" \
+	"$(_holds '--api-key' "$relaunch_diag")"
+# A command with nothing to strip must be reported unchanged, or the diagnostic
+# stops being useful for the ordinary rejection cases.
+relaunch_diag=$(_relaunch_stderr 'pi -p summarize this')
+assert_eq "clean relaunch cmd is reported verbatim" "yes" \
+	"$(_holds 'relaunch shape rejected: pi -p summarize this' "$relaunch_diag")"
+
+echo "== is_credential_flag shared helper =="
+_cred_rc() { is_credential_flag "$1" && echo yes || echo no; }
+assert_eq "--api-key is credential" "yes" "$(_cred_rc "--api-key")"
+assert_eq "--api-key-file is credential" "yes" "$(_cred_rc "--api-key-file")"
+assert_eq "--api_key is credential" "yes" "$(_cred_rc "--api_key")"
+assert_eq "--token is credential" "yes" "$(_cred_rc "--token")"
+assert_eq "--token-file is credential" "yes" "$(_cred_rc "--token-file")"
+assert_eq "--secret is credential" "yes" "$(_cred_rc "--secret")"
+assert_eq "--secret-key is credential" "yes" "$(_cred_rc "--secret-key")"
+assert_eq "--password is credential" "yes" "$(_cred_rc "--password")"
+assert_eq "--password-file is credential" "yes" "$(_cred_rc "--password-file")"
+assert_eq "--auth-token is credential" "yes" "$(_cred_rc "--auth-token")"
+assert_eq "--model is not credential" "no" "$(_cred_rc "--model")"
+assert_eq "--verbose is not credential" "no" "$(_cred_rc "--verbose")"
+assert_eq "--debug is not credential" "no" "$(_cred_rc "--debug")"
+
 echo
 echo "save hardening unit tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

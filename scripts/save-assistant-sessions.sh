@@ -1243,7 +1243,7 @@ handle_sessionless_relaunch() {
 	local log_missing="${6:-1}"
 	local prefix
 	prefix="detected $tool in $target (pid $pid) but no session ID available $(missing_session_hint "$tool" "$pid")"
-	local canon="" vouched_line="" shape_ok=0 relaunch_parts
+	local canon="" canon_log="" vouched_line="" shape_ok=0 relaunch_parts
 
 	case "$RELAUNCH_ENABLED" in
 	on | yes | true | 1) ;;
@@ -1257,20 +1257,27 @@ handle_sessionless_relaunch() {
 		[ "$log_missing" = "1" ] && log "$prefix: relaunch argv could not be canonicalized"
 		return 1
 	}
+	# Every diagnostic below quotes the canonical command. A pane launched with
+	# an inline key is exactly the case that lands here -- relaunch_shape_ok()
+	# rejects credential flags, so the rejection message would otherwise be the
+	# one place the key is written to assistant-save.log verbatim. Log the
+	# stripped form; $canon itself stays intact for the shape and ledger checks,
+	# which must see the real argv.
+	canon_log=$(strip_credential_flags "$canon" "$tool relaunch cmd")
 
 	if relaunch_shape_ok "$canon"; then
 		shape_ok=1
 		if ! relaunch_ledger_apply "$tool" "$canon" "$pid"; then
-			log "warning: failed to update relaunch candidates ledger for $canon"
+			log "warning: failed to update relaunch candidates ledger for $canon_log"
 		fi
 	fi
 
 	vouched_line=$(relaunch_voucher_match "$tool" "$canon") || {
 		if [ "$log_missing" = "1" ]; then
 			if [ "$shape_ok" -eq 1 ]; then
-				log "$prefix: relaunch cmd not vouched: $canon"
+				log "$prefix: relaunch cmd not vouched: $canon_log"
 			else
-				log "$prefix: relaunch shape rejected: $canon"
+				log "$prefix: relaunch shape rejected: $canon_log"
 			fi
 		fi
 		return 1
@@ -1282,7 +1289,7 @@ handle_sessionless_relaunch() {
 		RELAUNCH_PARTS_FILE="$relaunch_parts"
 	fi
 	if [ -z "$relaunch_parts" ]; then
-		log "warning: no relaunch parts file available for $canon"
+		log "warning: no relaunch parts file available for $canon_log"
 		return 1
 	fi
 
@@ -2107,6 +2114,12 @@ extract_cli_args() {
 			done
 		fi
 	fi
+
+	# Strip credential-bearing flags so plaintext keys are never persisted to the
+	# sidecar JSON. Shared with the restore path via lib-detect.sh so the two
+	# cannot drift. A user who launched with an inline key will restore without
+	# it; the flag name (never its value) is logged so the difference is visible.
+	args=$(strip_credential_flags "$args" "$tool cli_args")
 
 	# A remaining positional is an initial prompt (or, for OpenCode, a project
 	# path already represented by pane cwd). Never replay it into a resumed
