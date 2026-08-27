@@ -1284,6 +1284,9 @@ assert_eq "Claude --resume extraction" "ses_abc_123" "$(get_claude_session 99999
 assert_eq "Claude --resume with path" "ses_abc_123" "$(get_claude_session 99999 "/usr/bin/claude --resume ses_abc_123")"
 assert_eq "Claude bare (no --resume)" "" "$(get_claude_session 99999 "claude")"
 assert_eq "Claude --resume with UUID" "a1b2c3d4-e5f6-7890-abcd-ef1234567890" "$(get_claude_session 99999 "claude --resume a1b2c3d4-e5f6-7890-abcd-ef1234567890")"
+assert_eq "Claude --session-id extraction" "a1b2c3d4-e5f6-7890-abcd-ef1234567890" "$(get_claude_session 99999 "claude --session-id a1b2c3d4-e5f6-7890-abcd-ef1234567890")"
+assert_eq "Claude --resume wins over --session-id" "ses_resume" "$(get_claude_session 99999 "claude --resume ses_resume --session-id ses_other")"
+assert_eq "Claude --resume followed by a flag is not an ID" "" "$(get_claude_session 99999 "claude --resume --model opus")"
 
 # --- Claude: state file takes priority over args ---
 UNIT_STATE_DIR=$(mktemp -d)
@@ -1521,6 +1524,7 @@ assert_eq "OpenCode bare (no -s, no DB)" "" "$(get_opencode_session 99999 "openc
 
 # --- Equals form: --resume=<id>, --session=<id> ---
 assert_eq "Claude --resume=id (equals form)" "ses_equals_test" "$(get_claude_session 99999 "claude --resume=ses_equals_test")"
+assert_eq "Claude --session-id=id (equals form)" "ses_sid_equals" "$(get_claude_session 99999 "claude --session-id=ses_sid_equals")"
 assert_eq "OpenCode --session=id (equals form)" "ses_oc_eq" "$(get_opencode_session 99999 "opencode --session=ses_oc_eq" "/tmp")"
 
 # --- Pi: --session arg + session-file lookup ---

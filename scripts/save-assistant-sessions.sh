@@ -285,12 +285,19 @@ get_claude_session() {
 		fi
 	fi
 
-	# Method 2: --resume flag in process args (chicken-and-egg fallback)
-	# After restore, claude is launched as `claude --resume <session_id>`.
-	# Supports both `--resume <id>` and `--resume=<id>` forms.
+	# Method 2: session selector in process args (chicken-and-egg fallback).
+	# After restore, claude is launched as `claude --resume <session_id>`, and
+	# `claude --session-id <uuid>` names the session up front the same way.
 	# If the SessionStart hook hasn't fired yet, the ID is still in the args.
+	#
+	# _arg_value is the same helper get_omp_session already uses. It handles
+	# both `--flag <id>` and `--flag=<id>`, and it will not mistake a following
+	# option for the value -- the old regex read `claude --resume --model opus`
+	# as the session ID `--model`. Two calls rather than one so --resume keeps
+	# precedence when both flags are present, as it did before.
 	local sid
-	sid=$(echo "$args" | sed -n "s/.*--resume[= ] *\([A-Za-z0-9_-]*\).*/\1/p")
+	sid=$(_arg_value "$args" --resume)
+	[ -n "$sid" ] || sid=$(_arg_value "$args" --session-id)
 	if [ -n "$sid" ]; then
 		echo "$sid"
 		return
