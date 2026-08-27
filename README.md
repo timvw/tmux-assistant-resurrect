@@ -504,9 +504,34 @@ that already exists keeps whatever mode you gave it — if you point
 `TMUX_ASSISTANT_RESURRECT_DIR` somewhere deliberately group-readable, that is
 respected rather than reset on every save.
 
-> **Note:** Avoid capturing secrets (API keys, tokens). State files and the
-> sidecar JSON persist to disk and may outlive the process they were captured
-> from.
+#### What happens to secrets
+
+Two different things, and the difference matters:
+
+**Captured environment values are stored, and masked only in the logs.** A
+variable you list in `@resurrect-capture-env` has to be written to the sidecar
+verbatim, because restoring it is the entire point. The save and restore logs
+show `VAR=***` so that a log you paste into an issue does not carry your key,
+but the sidecar JSON itself holds the real value. It is mode 0600, as are both
+logs, and the plugin refuses to append through a symlinked log path — the
+protection here is file permissions, not redaction.
+
+**Credential flags on the command line are dropped, not stored.** If a pane was
+launched with `--api-key`, `--token`, `--secret*`, `--password` or `--auth*`
+(including `_`/`-` suffixed spellings), the flag and its value are stripped
+before anything is persisted, and a `stripped credential flag(s) from ...` line
+names the flag without its value. Stripping also runs on restore, so a sidecar
+written by an older version is cleaned on the way out rather than replayed.
+
+> **Known limitation:** stripping matches the flag *name*, so a secret buried
+> inside an opaque value survives — `claude --settings '{"env":{"ANTHROPIC_API_KEY":...}}'`
+> is persisted as written. Scanning values instead would mean guessing which
+> blobs are sensitive and silently breaking legitimate restores, so the blast
+> radius is bounded by file mode instead.
+
+Prefer keeping keys in your shell profile or a secrets manager over passing them
+on the command line or capturing them. State files persist to disk and may
+outlive the process they were captured from.
 
 ### Session-less relaunch vouchers
 
