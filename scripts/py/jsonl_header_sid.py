@@ -21,6 +21,8 @@ for raw in (first, second if first else b""):
         header = json.loads(raw.decode("utf-8"))
     except Exception:
         continue
+    if not isinstance(header, dict):
+        continue
     if header.get("type") == "title":
         continue
     if header.get("type") != "session":

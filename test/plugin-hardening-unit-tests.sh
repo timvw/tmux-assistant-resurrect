@@ -259,6 +259,13 @@ assert_eq "Codex rollout lookup rejects oversized records" "" \
 : >"$OVERSIZED_DIR/empty.jsonl"
 assert_eq "JSONL header helper handles an empty binary file" "" \
     "$(python3 "$ROOT_DIR/scripts/py/jsonl_header_sid.py" "$OVERSIZED_DIR/empty.jsonl")"
+printf '%s\n' '[]' >"$OVERSIZED_DIR/non-object.jsonl"
+assert_eq "JSONL header helper skips non-object records" "" \
+    "$(python3 "$ROOT_DIR/scripts/py/jsonl_header_sid.py" "$OVERSIZED_DIR/non-object.jsonl")"
+assert_eq "JSONL selector skips non-object records" "" \
+    "$(python3 "$ROOT_DIR/scripts/py/select_jsonl_session.py" /work 10 '' "$OVERSIZED_DIR")"
+assert_eq "Codex rollout lookup skips non-object records" "" \
+    "$(python3 "$ROOT_DIR/scripts/py/codex_rollout.py" "$OVERSIZED_DIR" /work 10)"
 
 # The bound is bytes, not decoded characters: a valid UTF-8 header containing
 # multibyte text must still be rejected once its on-disk line exceeds 1 MiB.

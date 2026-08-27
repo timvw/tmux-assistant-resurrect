@@ -42,6 +42,8 @@ for root, _, files in os.walk(sessions_root):
             if not first:
                 continue
             record = json.loads(first.decode("utf-8"))
+            if not isinstance(record, dict):
+                continue
             if record.get("type") != "session_meta":
                 continue
             payload = record.get("payload") or {}

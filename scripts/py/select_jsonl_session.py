@@ -48,6 +48,8 @@ def read_logical_header(path):
         if len(raw) > MAX_HEADER_BYTES:
             return None
         header = json.loads(raw.decode("utf-8"))
+        if not isinstance(header, dict):
+            continue
         if header.get("type") == "title":
             continue
         return header
