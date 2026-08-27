@@ -482,11 +482,10 @@ while read -r entry; do
 		fi
 		if [ -n "$redacted_env_prefix" ]; then
 			# Mirror whatever launcher the resume line above used, so the log
-			# keeps describing the command that was actually sent. Defaulted
-			# because env_launcher is set by the csh handling, which this
-			# branch does not itself introduce.
-			log_cmd="${env_launcher:-env} ${redacted_env_prefix}${log_cmd#command }"
-		elif [ -n "$env_prefix" ] || [ "${force_env:-0}" -eq 1 ]; then
+			# keeps describing the command that was actually sent rather than a
+			# plain `env` the csh/tcsh panes never received.
+			log_cmd="${env_launcher} ${redacted_env_prefix}${log_cmd#command }"
+		elif [ -n "$env_prefix" ] || [ "$force_env" -eq 1 ]; then
 			# force_env covers shells that are routed through `env` even with no
 			# captured vars; without it the log would keep the untransformed
 			# command and advertise a form that was never sent to the pane.

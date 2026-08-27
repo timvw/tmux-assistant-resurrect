@@ -397,6 +397,34 @@ assert_contains "nu log redacts in nu record syntax" "$nu_restore_log" "with-env
 assert_not_contains "nu log does not use POSIX assignment syntax" "$nu_restore_log" "ANTHROPIC_API_KEY=***"
 assert_not_contains "nu log does not contain the secret value" "$nu_restore_log" "sk-ant-api03-VERYSECRETKEY"
 
+# csh/tcsh plus a captured secret is the one combination neither the csh fix nor
+# the redaction fix could regress on its own: the alias-safe launcher is chosen
+# on the resume line, the redacted line is built separately, and nothing forced
+# the two to agree. They were developed on separate branches, so this crossing
+# only became reachable when both landed -- which is exactly the shape of defect
+# that survives per-branch green CI. If the log line ever falls back to a plain
+# `env`, it advertises a command csh was never sent.
+export MOCK_PANES='%12|0|0|secret-csh'
+export MOCK_SHELLS='%12|tcsh'
+export MOCK_CAPTURE_ENV='ANTHROPIC_API_KEY'
+jq -n --arg cwd "$secret_cwd" '{sessions:[{
+  pane:"secret-csh:0.0", session_name:"secret-csh", window_index:"0", pane_index:"0",
+  tool:"claude", session_id:"sid-secret-csh", cwd:$cwd,
+  env:{ANTHROPIC_API_KEY:"sk-ant-api03-VERYSECRETKEY"}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+csh_secret_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+csh_secret_tmux=$(cat "$TMUX_LOG")
+assert_contains "csh pane receives the alias-safe launcher and the real secret" \
+	"$csh_secret_tmux" "\\env ANTHROPIC_API_KEY='sk-ant-api03-VERYSECRETKEY' claude"
+assert_contains "csh log redacts behind the same alias-safe launcher" \
+	"$csh_secret_log" "\\env ANTHROPIC_API_KEY=*** claude"
+assert_not_contains "csh log does not contain the secret value" \
+	"$csh_secret_log" "sk-ant-api03-VERYSECRETKEY"
+assert_not_contains "csh log never advertises the bare env launcher" \
+	"$csh_secret_log" " env ANTHROPIC_API_KEY=***"
+
 # COPILOT_HOME is a state-root path the plugin derives, not user-supplied
 # credential material. Masking it breaks the main reason to read this log --
 # seeing which state root a restore actually landed on -- so it must stay
