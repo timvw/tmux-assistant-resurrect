@@ -412,6 +412,29 @@ while read -r entry; do
 	esac
 	fi
 
+	# csh/tcsh have no `command` builtin, so the POSIX form below cannot be used
+	# there even when no env vars were captured. macOS happens to ship
+	# /usr/bin/command as an external script, which hides the breakage; on Linux
+	# the line dies with "command: Command not found." and the pane is left at a
+	# shell. `env` is the wrapper this script already uses whenever captured env
+	# vars exist, so force those shells through it unconditionally.
+	#
+	# `env` alone is not the alias-bypass that `command` is: csh applies alias
+	# substitution to the first word, so a user's `alias env ...` intercepts the
+	# restore. A leading backslash suppresses that lookup and is the closest csh
+	# equivalent of `command`. It does not disturb the assignments that follow.
+	#
+	# These are variables rather than a separate case arm so csh/tcsh keep
+	# sharing every other transformation applied below.
+	force_env=0
+	env_launcher="env"
+	case "$pane_cmd" in
+	csh | tcsh)
+		force_env=1
+		env_launcher='\env'
+		;;
+	esac
+
 	# Bypass aliases/functions without relying on POSIX assignment-prefix syntax,
 	# which csh/tcsh reject. Nushell uses `^` for an external command and
 	# `with-env` for scoped environment changes.
@@ -424,8 +447,8 @@ while read -r entry; do
 		fi
 		;;
 	*)
-		if [ -n "$env_prefix" ]; then
-			resume_cmd="env ${env_prefix}${resume_cmd#command }"
+		if [ -n "$env_prefix" ] || [ "$force_env" -eq 1 ]; then
+			resume_cmd="${env_launcher} ${env_prefix}${resume_cmd#command }"
 		fi
 		;;
 	esac

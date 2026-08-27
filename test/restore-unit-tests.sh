@@ -161,7 +161,7 @@ run_restore
 assert_eq "restore succeeds" "0" "$RESTORE_STATUS"
 csh_tmux_log=$(cat "$TMUX_LOG")
 assert_contains "csh cwd history character is escaped" "$csh_tmux_log" "cwd\\!bang' &&"
-assert_contains "captured env uses the portable env launcher" "$csh_tmux_log" "env SAFE='env\\!choice' claude"
+assert_contains "captured env uses the alias-safe env launcher" "$csh_tmux_log" "\\env SAFE='env\\!choice' claude"
 assert_contains "model-like options do not suppress the saved model" "$csh_tmux_log" "'--model-provider' 'provider\\!choice' --model 'model\\!choice'"
 assert_not_contains "csh command does not use POSIX fd redirection" "$csh_tmux_log" "2>/dev/null"
 
@@ -175,8 +175,15 @@ if command -v tcsh >/dev/null 2>&1; then
 	assert_contains "tcsh passes literal ! in CLI args" "$marker" "arg=provider!choice"
 	assert_contains "tcsh receives the separately saved model" "$marker" "arg=model!choice"
 
-	# With no environment wrapper, restore deliberately uses csh/tcsh's
-	# `command` builtin to bypass aliases. Exercise that separate construction.
+	# csh/tcsh have no `command` builtin, so the no-env path must still go
+	# through `env`. This assertion used to expect the `command` form and
+	# passed only on macOS, which ships /usr/bin/command as an external script;
+	# on Linux that form fails with "command: Command not found."
+	#
+	# The backslash matters as much as the launcher: csh applies alias
+	# substitution to the first word, so a bare `env` is hijacked by a user's
+	# `alias env ...` in ~/.cshrc, verified against tcsh. `\env` suppresses that
+	# lookup, which is the property `command` provides in POSIX shells.
 	export MOCK_CAPTURE_ENV=''
 	jq -n '{sessions:[{
 	  pane:"csh-test:0.0", session_name:"csh-test", window_index:"0", pane_index:"0",
@@ -184,8 +191,10 @@ if command -v tcsh >/dev/null 2>&1; then
 	}]}' >"$RESURRECT_DIR/assistant-sessions.json"
 	run_restore
 	marker=$(cat "$ASSISTANT_MARKER" 2>/dev/null || true)
-	assert_contains "tcsh accepts the no-env command builtin form" "$(cat "$TMUX_LOG")" \
-		"send-keys|%1|command claude --resume 'sid-no-env'"
+	assert_contains "tcsh no-env resume uses the alias-safe env launcher" "$(cat "$TMUX_LOG")" \
+		"send-keys|%1|\\env claude --resume 'sid-no-env'"
+	assert_not_contains "tcsh never emits the absent command builtin" "$(cat "$TMUX_LOG")" \
+		"command claude"
 	assert_contains "tcsh executes the no-env resume command" "$marker" "arg=sid-no-env"
 else
 	pass "tcsh unavailable; portable command shape still covered"
