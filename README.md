@@ -3,8 +3,9 @@
 > **Disclaimer**: This project was entirely vibecoded (designed and implemented
 > through conversation with AI coding assistants). It has been end-to-end tested
 > in Docker with real CLI binaries (Claude/Copilot/OpenCode/Codex/Pi/Oh My Pi)
-> (400+ automated tests + full save/kill/restore lifecycle smoke test),
-> but has **limited real-world usage** so far. Expect
+> (400+ automated tests + full save/kill/restore lifecycle smoke test).
+> Grok is supported with hermetic unit tests but has no Docker integration test.
+> **Limited real-world usage** so far — expect
 > rough edges. Contributions and bug reports welcome.
 
 Persist and restore AI coding assistant sessions across tmux restarts and reboots.
@@ -59,10 +60,10 @@ Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 
 | Tool | Primary method | Fallback 1 | Fallback 2 | Notes |
 |------|---------------|------------|------------|-------|
-| **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` in process args | - | Claude overwrites its process title, so args fallback only works if args are visible |
+| **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` / `--session-id` in process args | - | Claude overwrites its process title, so args fallback only works if args are visible |
 | **GitHub Copilot CLI** | `$COPILOT_HOME/session-state/<uuid>/inuse.<pid>.lock` written by the live session | `--session-id` / `--resume` in process args | - | Plain glob keyed on the native PID — no `/proc`, no `lsof`, so it behaves identically on Linux, WSL and macOS |
 | **OpenCode** | `-s` / `--session` in process args | Plugin state file | SQLite DB query (`~/.local/share/opencode/opencode.db`) | Go binary overwrites process title; DB fallback matches most recent session by cwd |
-| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | - | Codex runs via Node.js, so args are always visible in `ps` |
+| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | SQLite `~/.codex/state_*.sqlite` `threads` table (Codex >= 0.118); rollout JSONL `~/.codex/sessions/` (Codex ~0.100-0.117) | Codex runs via Node.js, so args are always visible in `ps` |
 | **Pi** | Session header lookup in `~/.pi/agent/sessions/--<cwd>--/*.jsonl` | `--session` in process args | - | Session-file lookup is cwd-scoped and uses process-time scoring + dedup |
 | **Oh My Pi** | Terminal breadcrumb + session JSONL lookup (`$XDG_STATE_HOME/omp`, `$XDG_DATA_HOME/omp`) | `--resume` / `-r` in process args | `--session-dir` / `--profile` scoped lookup | Distinct `omp` tool; no hook/plugin required |
 | **Grok** | PID lookup in `~/.grok/active_sessions.json` | `-r` / `--resume <uuid>` in process args | - | Registry records every live session (including a bare `grok` with no args) keyed by PID, so sessions sharing a cwd never collide; no hook/plugin required |
@@ -118,8 +119,12 @@ and automatically set up:
 
 ## Uninstallation
 
-Remove the `@plugin 'timvw/tmux-assistant-resurrect'` line from `~/.tmux.conf`,
-then press `prefix + alt + u` inside tmux.
+**TPM users**: Remove the `@plugin 'timvw/tmux-assistant-resurrect'` line from
+`~/.tmux.conf`, then press `prefix + alt + u` inside tmux.
+
+**`just install` users**: Run `just uninstall` from the plugin directory — this
+removes the Claude hooks, the OpenCode plugin symlink, and the managed block
+from `~/.tmux.conf`.
 
 ## Usage
 
@@ -131,6 +136,10 @@ Once installed, everything runs automatically:
 - **Post-save hook** collects assistant session IDs at each save
 - **On tmux server start**, continuum auto-restores the layout
 - **Post-restore hook** resumes each assistant with its saved session ID
+
+The plugin defaults `@continuum-save-interval` to 5 and `@continuum-restore` to
+`on`, but only when they are not already set — your own values in `~/.tmux.conf`
+are never overwritten.
 
 Manual save/restore keybindings (tmux-resurrect defaults):
 
@@ -263,12 +272,20 @@ tmux-resurrect's save directory.
 > resolved exactly as resurrect resolves it: `@resurrect-dir` if you set it,
 > otherwise `~/.tmux/resurrect` when that directory already exists, else the
 > XDG default `${XDG_DATA_HOME:-~/.local/share}/tmux/resurrect`. Set
-> `TMUX_RESURRECT_DIR` to override. Examples below assume the XDG default.
+> `TMUX_RESURRECT_DIR` to override.
+
+Find your actual save directory with `just status` (from the plugin directory)
+or this one-liner that mirrors the same resolution logic:
+
+```bash
+RESURRECT_DIR="${TMUX_RESURRECT_DIR:-$(tmux show-option -gqv @resurrect-dir 2>/dev/null)}"
+[ -n "$RESURRECT_DIR" ] || { [ -d ~/.tmux/resurrect ] && RESURRECT_DIR=~/.tmux/resurrect || RESURRECT_DIR=${XDG_DATA_HOME:-~/.local/share}/tmux/resurrect; }
+```
 
 You can inspect what was saved:
 
 ```bash
-cat ~/.local/share/tmux/resurrect/assistant-sessions.json | jq .
+cat "$RESURRECT_DIR/assistant-sessions.json" | jq .
 ```
 
 Example output:
@@ -353,7 +370,7 @@ are prepended to the resume command.
 Check the restore log to see what happened:
 
 ```bash
-cat ~/.local/share/tmux/resurrect/assistant-restore.log
+cat "$RESURRECT_DIR/assistant-restore.log"
 ```
 
 You should see lines like:
@@ -368,19 +385,21 @@ You should see lines like:
 The save log is also available if you want to see what was detected:
 
 ```bash
-cat ~/.local/share/tmux/resurrect/assistant-save.log
+cat "$RESURRECT_DIR/assistant-save.log"
 ```
 
 ### Troubleshooting
 
 | Symptom | Check |
 |---------|-------|
-| Save finds 0 sessions | Run `ps -eo pid=,ppid=,args= \| grep -E 'claude\|copilot\|opencode\|codex\|pi'` to verify assistants are running |
+| Save finds 0 sessions | Run `ps -eo pid=,ppid=,args= \| grep -E 'claude\|copilot\|opencode\|codex\|pi\|omp\|grok'` to verify assistants are running |
 | Session ID missing for Claude | Verify the hook is installed: `jq '.hooks.SessionStart' ~/.claude/settings.json` |
 | Session ID missing, hook *is* installed | Check `assistant-save.log` — a `no session ID available` line names the state file it looked for. If that directory is empty but `ls ~/.local/state/tmux-assistant-resurrect` elsewhere is not, the two sides disagree on the path; see **State directory** below |
 | Session ID missing for Copilot | Check `ls ~/.copilot/session-state/*/inuse.*.lock` — the number in the filename must be the native Copilot PID from `ps`. If you set `COPILOT_HOME`, the save hook must see it too (tmux hooks do not inherit your shell profile; use `tmux set-environment -g COPILOT_HOME ...`) |
 | Session ID missing for OpenCode | Launch with `-s <id>`, or verify the plugin: `ls ~/.config/opencode/plugins/session-tracker.js` |
 | Session ID missing for Pi | Verify session files exist under `~/.pi/agent/sessions/--<cwd>--/*.jsonl` and that pane cwd matches the Pi session cwd |
+| Session ID missing for Grok | Verify `~/.grok/active_sessions.json` exists and contains an entry with your Grok process's PID: `jq '.[] | select(.pid == <PID>)' ~/.grok/active_sessions.json`. If you set `GROK_HOME`, the save hook must see it too — use `tmux set-environment -g GROK_HOME ...` |
+| Session ID missing for Oh My Pi | The primary method is a terminal breadcrumb under `$XDG_STATE_HOME/omp` (or `~/.local/state/omp`); verify the pane tty matches the breadcrumb file. Fallback is `--resume` / `-r` in process args. `--session-dir` or `--profile` scoped JSONL lookup is also used when those flags are present |
 | Codex/OpenCode/Pi session ID missing (python3 methods) | The save hook auto-detects `python3` in common locations. If your setup uses a non-standard path, set it in tmux: `set-environment -g PATH "/your/python3/dir:$PATH"` |
 | Restore launches but assistant says "session not found" | The session ID may have expired. This is normal — start a fresh session and the next save will pick up the new ID |
 | Assistants launch twice after restore | Make sure assistants are **not** listed in `@resurrect-processes` — the plugin handles all resuming via the post-restore hook |
@@ -485,9 +504,34 @@ that already exists keeps whatever mode you gave it — if you point
 `TMUX_ASSISTANT_RESURRECT_DIR` somewhere deliberately group-readable, that is
 respected rather than reset on every save.
 
-> **Note:** Avoid capturing secrets (API keys, tokens). State files and the
-> sidecar JSON persist to disk and may outlive the process they were captured
-> from.
+#### What happens to secrets
+
+Two different things, and the difference matters:
+
+**Captured environment values are stored, and masked only in the logs.** A
+variable you list in `@resurrect-capture-env` has to be written to the sidecar
+verbatim, because restoring it is the entire point. The save and restore logs
+show `VAR=***` so that a log you paste into an issue does not carry your key,
+but the sidecar JSON itself holds the real value. It is mode 0600, as are both
+logs, and the plugin refuses to append through a symlinked log path — the
+protection here is file permissions, not redaction.
+
+**Credential flags on the command line are dropped, not stored.** If a pane was
+launched with `--api-key`, `--token`, `--secret*`, `--password` or `--auth*`
+(including `_`/`-` suffixed spellings), the flag and its value are stripped
+before anything is persisted, and a `stripped credential flag(s) from ...` line
+names the flag without its value. Stripping also runs on restore, so a sidecar
+written by an older version is cleaned on the way out rather than replayed.
+
+> **Known limitation:** stripping matches the flag *name*, so a secret buried
+> inside an opaque value survives — `claude --settings '{"env":{"ANTHROPIC_API_KEY":...}}'`
+> is persisted as written. Scanning values instead would mean guessing which
+> blobs are sensitive and silently breaking legitimate restores, so the blast
+> radius is bounded by file mode instead.
+
+Prefer keeping keys in your shell profile or a secrets manager over passing them
+on the command line or capturing them. State files persist to disk and may
+outlive the process they were captured from.
 
 ### Session-less relaunch vouchers
 
@@ -556,10 +600,10 @@ Environment=PATH=/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin
 
 ### Continuum save interval
 
-Edit `config/resurrect-assistants.conf`:
+Add to `~/.tmux.conf`:
 
-```
-set -g @continuum-save-interval '5'  # minutes
+```bash
+set -g @continuum-save-interval '10'  # minutes (default: 5)
 ```
 
 ### Save-hook timeout (watchdog)
