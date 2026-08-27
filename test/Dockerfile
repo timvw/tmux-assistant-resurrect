@@ -3,6 +3,10 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Core tools + build deps for bash 3.2
+# tcsh is a test dependency, not a runtime one: restore-unit-tests.sh skips its
+# csh/tcsh execution assertions when no tcsh is present. Without it here the
+# Linux leg silently skipped them and only macOS ran that branch — where
+# /usr/bin/command exists and masked a csh-only breakage in the restore hook.
 RUN apt-get update && apt-get install -y \
     tmux \
     jq \
@@ -15,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     make \
     ca-certificates \
     unzip \
+    tcsh \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 22.x (Pi requires >= 22.19.0; Ubuntu 24.04 ships Node 18)
