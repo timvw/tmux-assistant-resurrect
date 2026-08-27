@@ -219,6 +219,28 @@ assert_eq "OpenCode DB helper supports URI metacharacters" open-db-test \
 assert_eq "Codex DB helper supports URI metacharacters" codex-db-test \
     "$(python3 "$ROOT_DIR/scripts/py/codex_state_db.py" "$DB_ROOT/codex" /work 10)"
 
+# Non-finite SQLite values compare surprisingly (NaN is never less than a
+# finite process start). They must not outrank a valid thread.
+python3 - "$DB_ROOT/codex/state_2.sqlite" <<'PY'
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+db.execute("CREATE TABLE threads (id TEXT, cwd TEXT, updated_at, archived INTEGER)")
+db.executemany(
+    "INSERT INTO threads VALUES (?, ?, ?, ?)",
+    [
+        ("codex-nan", "/work", "nan", 0),
+        ("codex-inf", "/work", "inf", 0),
+        ("codex-finite", "/work", 20, 0),
+    ],
+)
+db.commit()
+db.close()
+PY
+assert_eq "Codex DB helper rejects non-finite update times" codex-finite \
+    "$(python3 "$ROOT_DIR/scripts/py/codex_state_db.py" "$DB_ROOT/codex" /work 10)"
+
 # Session roots are user-writable and may contain corrupt files. Bound logical
 # header reads so one giant unterminated line cannot force unbounded allocation.
 OVERSIZED_DIR="$TEST_ROOT/oversized-jsonl"
@@ -234,6 +256,31 @@ assert_eq "JSONL selector rejects oversized records" "" \
     "$(python3 "$ROOT_DIR/scripts/py/select_jsonl_session.py" /work 10 '' "$OVERSIZED_DIR")"
 assert_eq "Codex rollout lookup rejects oversized records" "" \
     "$(python3 "$ROOT_DIR/scripts/py/codex_rollout.py" "$OVERSIZED_DIR" /work 10)"
+: >"$OVERSIZED_DIR/empty.jsonl"
+assert_eq "JSONL header helper handles an empty binary file" "" \
+    "$(python3 "$ROOT_DIR/scripts/py/jsonl_header_sid.py" "$OVERSIZED_DIR/empty.jsonl")"
+
+# The bound is bytes, not decoded characters: a valid UTF-8 header containing
+# multibyte text must still be rejected once its on-disk line exceeds 1 MiB.
+MULTIBYTE_SESSION_DIR="$TEST_ROOT/multibyte-session"
+MULTIBYTE_CODEX_DIR="$TEST_ROOT/multibyte-codex"
+mkdir -p "$MULTIBYTE_SESSION_DIR" "$MULTIBYTE_CODEX_DIR"
+python3 - "$MULTIBYTE_SESSION_DIR/session.jsonl" "$MULTIBYTE_CODEX_DIR/rollout.jsonl" <<'PY'
+import json
+import sys
+
+padding = "é" * 600_000
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    output.write(json.dumps({"type": "session", "id": "too-large", "cwd": "/work", "padding": padding}, ensure_ascii=False) + "\n")
+with open(sys.argv[2], "w", encoding="utf-8") as output:
+    output.write(json.dumps({"type": "session_meta", "payload": {"id": "too-large", "cwd": "/work", "padding": padding}}, ensure_ascii=False) + "\n")
+PY
+assert_eq "JSONL header helper applies its limit to raw UTF-8 bytes" "" \
+    "$(python3 "$ROOT_DIR/scripts/py/jsonl_header_sid.py" "$MULTIBYTE_SESSION_DIR/session.jsonl")"
+assert_eq "JSONL selector applies its limit to raw UTF-8 bytes" "" \
+    "$(python3 "$ROOT_DIR/scripts/py/select_jsonl_session.py" /work 10 '' "$MULTIBYTE_SESSION_DIR")"
+assert_eq "Codex rollout lookup applies its limit to raw UTF-8 bytes" "" \
+    "$(python3 "$ROOT_DIR/scripts/py/codex_rollout.py" "$MULTIBYTE_CODEX_DIR" /work 10)"
 
 # Schema drift is expected for versioned Codex databases and must be a quiet,
 # successful fallback so the rollout lookup can run next.

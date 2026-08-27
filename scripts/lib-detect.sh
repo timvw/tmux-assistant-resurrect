@@ -382,10 +382,23 @@ posix_quote() {
 	printf "'%s'" "$val"
 }
 
+# Quote a literal Nushell string using a raw-string delimiter that does not
+# occur in the value. Unlike POSIX shells, Nushell does not concatenate the
+# `'"'"'` sequence emitted by posix_quote() into one argument.
+nu_quote() {
+	local val="$1" hashes="#" terminator
+	terminator="'${hashes}"
+	while [[ "$val" == *"$terminator"* ]]; do
+		hashes="${hashes}#"
+		terminator="'${hashes}"
+	done
+	printf "r%s'%s'%s" "$hashes" "$val" "$hashes"
+}
+
 # Quote one value for the shell running in a restored pane. csh/tcsh perform
 # history expansion inside single quotes and use different embedded-quote
 # rules, so escape `!` and use their `'\''` sequence for a literal quote.
-# Other supported shells accept posix_quote().
+# Nushell uses a raw string; other supported shells accept posix_quote().
 shell_quote() {
 	local shell_name="$1" val="$2"
 	case "$shell_name" in
@@ -395,6 +408,7 @@ shell_quote() {
 		val="${val//\'/$quote_escape}"
 		printf "'%s'" "$val"
 		;;
+	nu) nu_quote "$val" ;;
 	*) posix_quote "$val" ;;
 	esac
 }

@@ -35,13 +35,13 @@ for root, _, files in os.walk(sessions_root):
             continue
         path = os.path.join(root, name)
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "rb") as f:
                 first = f.readline(MAX_HEADER_BYTES + 1)
             if len(first) > MAX_HEADER_BYTES:
                 continue
             if not first:
                 continue
-            record = json.loads(first)
+            record = json.loads(first.decode("utf-8"))
             if record.get("type") != "session_meta":
                 continue
             payload = record.get("payload") or {}

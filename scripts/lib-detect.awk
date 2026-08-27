@@ -5,7 +5,9 @@
 # without maintaining another copy of the patterns.
 
 function detect_tool(line) {
-	delete word
+	# Whole-array `delete word` is an extension, not POSIX awk. Clear entries
+	# individually so repeated classifications also work with older BSD awk.
+	for (word_index in word) delete word[word_index]
 	sub(/^[ \t]+/, "", line)
 	n = split(line, word, /[ \t]+/)
 	if (n < 1) return ""

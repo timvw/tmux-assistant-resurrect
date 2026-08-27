@@ -6,19 +6,19 @@ import sys
 MAX_HEADER_BYTES = 1024 * 1024
 
 try:
-    with open(sys.argv[1], "r", encoding="utf-8") as f:
+    with open(sys.argv[1], "rb") as f:
         first = f.readline(MAX_HEADER_BYTES + 1)
         second = f.readline(MAX_HEADER_BYTES + 1)
 except Exception:
     sys.exit(0)
 
-for raw in (first, second if first else ""):
+for raw in (first, second if first else b""):
     if not raw:
         continue
     if len(raw) > MAX_HEADER_BYTES:
         sys.exit(0)
     try:
-        header = json.loads(raw)
+        header = json.loads(raw.decode("utf-8"))
     except Exception:
         continue
     if header.get("type") == "title":

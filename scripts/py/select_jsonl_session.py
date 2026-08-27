@@ -39,15 +39,15 @@ def parse_ts(value):
 
 
 def read_logical_header(path):
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "rb") as f:
         first = f.readline(MAX_HEADER_BYTES + 1)
         second = f.readline(MAX_HEADER_BYTES + 1)
-    for raw in (first, second if first else ""):
+    for raw in (first, second if first else b""):
         if not raw:
             continue
         if len(raw) > MAX_HEADER_BYTES:
             return None
-        header = json.loads(raw)
+        header = json.loads(raw.decode("utf-8"))
         if header.get("type") == "title":
             continue
         return header

@@ -50,6 +50,11 @@ assert_not_contains() {
 # Avoid the restore hook's deliberate startup/stagger delays.
 cat >"$MOCK_BIN/sleep" <<'MOCK_SLEEP'
 #!/usr/bin/env bash
+if [ -n "${MOCK_SWAP_LOG_PATH:-}" ] && [ ! -e "${MOCK_SWAP_LOG_MARKER:-}" ]; then
+	: >"$MOCK_SWAP_LOG_MARKER"
+	rm -f "$MOCK_SWAP_LOG_PATH"
+	ln -s "$MOCK_SWAP_LOG_TARGET" "$MOCK_SWAP_LOG_PATH"
+fi
 exit 0
 MOCK_SLEEP
 
@@ -189,21 +194,24 @@ export MOCK_EXEC_SHELL=''
 assert_eq "restore log is owner-only" "600" "$(file_mode "$RESURRECT_DIR/assistant-restore.log")"
 
 echo "== Nushell-specific command construction =="
-nu_cwd="$SANDBOX/nu cwd"
+nu_cwd="$SANDBOX/nu cwd's"
 mkdir -p "$nu_cwd"
 export MOCK_PANES='%9|0|0|nu-test'
 export MOCK_SHELLS='%9|nu'
 export MOCK_CAPTURE_ENV='SAFE'
-jq -n --arg cwd "$nu_cwd" '{sessions:[{
+nu_cli_args="--permission-mode plan's"
+nu_model="model's"
+nu_env_value="nu-value's"
+MSYS2_ARG_CONV_EXCL='*' jq -n --arg cwd "$nu_cwd" --arg cli_args "$nu_cli_args" \
+	--arg model "$nu_model" --arg env_value "$nu_env_value" '{sessions:[{
   pane:"nu-test:0.0", session_name:"nu-test", window_index:"0", pane_index:"0",
-  tool:"claude", session_id:"sid-nu", cwd:$cwd, env:{SAFE:"nu-value"}
+  tool:"claude", session_id:"sid-nu", cwd:$cwd,
+  cli_args:$cli_args, model:$model, env:{SAFE:$env_value}
 }]}' >"$RESURRECT_DIR/assistant-sessions.json"
 run_restore
 nu_tmux_log=$(cat "$TMUX_LOG")
-assert_contains "Nushell uses its external-command marker" "$nu_tmux_log" "^claude --resume 'sid-nu'"
-assert_contains "Nushell restores env with with-env" "$nu_tmux_log" "with-env { SAFE: 'nu-value' }"
-assert_contains "Nushell cwd is restored" "$nu_tmux_log" "cd "
-assert_contains "Nushell cwd uses statement sequencing" "$nu_tmux_log" "; with-env"
+expected_nu_cmd="send-keys|%9|cd r#'$nu_cwd'#; with-env { SAFE: r#'nu-value's'# } { ^claude r#'--permission-mode'# r#'plan's'# --model r#'model's'# --resume r#'sid-nu'# }"
+assert_contains "Nushell restore command preserves exact ordering and values" "$nu_tmux_log" "$expected_nu_cmd"
 assert_not_contains "Nushell cwd does not use unsupported &&" "$nu_tmux_log" " && "
 
 echo "== malformed entries are isolated =="
@@ -230,6 +238,14 @@ assert_contains "stale cwd is rejected" "$restore_log" "no longer exists"
 assert_not_contains "stale cwd pane is not cleared" "$(cat "$TMUX_LOG")" "send-keys|%3|clear"
 assert_contains "later valid entry is still replayed" "$(cat "$TMUX_LOG")" "send-keys|%4|command claude --resume 'sid-good'"
 assert_contains "only the valid entry is counted" "$restore_log" "restored 1 of 5"
+
+export MOCK_PANES='%6|0|0|broader-id'
+jq -n '{sessions:[{
+  pane:"broader-id:0.0",tool:"codex",session_id:"_base64/id+=",cwd:""
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_contains "safe non-option session ID alphabet is accepted" "$(cat "$TMUX_LOG")" \
+	"command codex resume '_base64/id+='"
 
 echo "== one disappearing pane does not abort later panes =="
 export MOCK_PANES='%1|0|0|gone
@@ -269,7 +285,7 @@ restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
 escaped_lines=$(grep -c 'claude.*FORGED-LOG-LINE' "$RESURRECT_DIR/assistant-restore.log" || true)
 assert_eq "embedded newline is escaped onto one log line" "1" "$escaped_lines"
 forged_lines=$(grep -c '^FORGED-LOG-LINE' "$RESURRECT_DIR/assistant-restore.log" || true)
-assert_eq "sidecar text cannot forge a physical log line" "0" "$forged_lines"
+assert_eq "standalone injected log line is rejected" "0" "$forged_lines"
 
 echo "== invalid top-level schema and log symlink =="
 missing_resurrect_dir="$SANDBOX/missing-resurrect-dir"
@@ -297,6 +313,32 @@ MINGW* | MSYS* | CYGWIN*)
 	TMUX_RESURRECT_DIR="$symlink_dir" run_restore
 	assert_contains "symlinked log is refused" "$RESTORE_OUTPUT" "refusing symlinked restore log"
 	assert_eq "symlink target remains unchanged" "do-not-touch" "$(cat "$victim")"
+	;;
+esac
+
+echo "== restore log descriptor resists a post-open symlink swap =="
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*)
+	pass "post-open symlink-swap check skipped where POSIX symlinks are unavailable"
+	;;
+*)
+	race_dir="$SANDBOX/log-race-resurrect"
+	race_target="$SANDBOX/log-race-target"
+	race_marker="$SANDBOX/log-race-marker"
+	mkdir -p "$race_dir"
+	printf 'old log\n' >"$race_dir/assistant-restore.log"
+	printf 'do-not-touch\n' >"$race_target"
+	printf '%s\n' '{"sessions":[{"pane":"race:0.0","tool":"claude","session_id":"sid-race","cwd":""}]}' \
+		>"$race_dir/assistant-sessions.json"
+	export MOCK_PANES='%8|0|0|race'
+	export MOCK_SHELLS=''
+	export MOCK_SWAP_LOG_PATH="$race_dir/assistant-restore.log"
+	export MOCK_SWAP_LOG_TARGET="$race_target"
+	export MOCK_SWAP_LOG_MARKER="$race_marker"
+	TMUX_RESURRECT_DIR="$race_dir" run_restore
+	assert_eq "post-open symlink swap cannot redirect restore log writes" \
+		"do-not-touch" "$(cat "$race_target")"
+	unset MOCK_SWAP_LOG_PATH MOCK_SWAP_LOG_TARGET MOCK_SWAP_LOG_MARKER
 	;;
 esac
 

@@ -60,6 +60,8 @@ assert_eq "prompt text does not trigger OMP worker exclusion" "omp" \
 assert_eq "shell and awk detectors retain parity" \
 	"$(detect_tool 'opencode --prompt explain opencode run mode')" \
 	"$(awk_detect_tool 'opencode --prompt explain opencode run mode')"
+assert_eq "awk detector clears argv state portably between records" opencode \
+	"$(printf 'opencode run worker\nopencode\n' | awk -v classify_only=1 -f "$REPO_DIR/scripts/lib-detect.awk")"
 
 echo "== order-independent descendant walk =="
 snapshot=$' 300 200 claude --resume ses_child_first\n 200 100 node wrapper.js\n 100 1 bash'
@@ -105,7 +107,14 @@ if [ ! -e "$TMUX_RESURRECT_DIR/.prepared" ]; then
 	: >"$TMUX_RESURRECT_DIR/.prepared"
 fi
 case "$*" in
-*list-panes*) exit 0 ;;
+*list-panes*)
+	if [ -n "${MOCK_SWAP_LOG_PATH:-}" ] && [ ! -e "${MOCK_SWAP_LOG_MARKER:-}" ]; then
+		: >"$MOCK_SWAP_LOG_MARKER"
+		rm -f "$MOCK_SWAP_LOG_PATH"
+		ln -s "$MOCK_SWAP_LOG_TARGET" "$MOCK_SWAP_LOG_PATH"
+	fi
+	exit 0
+	;;
 *) exit 1 ;;
 esac
 STUB
@@ -157,6 +166,23 @@ case "$symlink_log_stderr" in
 *) assert_eq "symlink refusal is diagnosed on stderr" yes no ;;
 esac
 
+RACE_RUN="$SANDBOX/raced-log-run"
+RACE_VICTIM="$SANDBOX/raced-log-target"
+RACE_MARKER="$SANDBOX/raced-log-marker"
+mkdir -p "$RACE_RUN"
+: >"$RACE_RUN/.prepared"
+printf 'old log\n' >"$RACE_RUN/assistant-save.log"
+printf 'do not overwrite\n' >"$RACE_VICTIM"
+env PATH="$STUB_DIR:$PATH" \
+	TMUX_RESURRECT_DIR="$RACE_RUN" \
+	TMUX_ASSISTANT_RESURRECT_DIR="$SANDBOX/raced-log-state" \
+	ASSISTANT_RESURRECT_SAVE_TIMEOUT=0 TEST_VICTIM="$VICTIM" \
+	MOCK_SWAP_LOG_PATH="$RACE_RUN/assistant-save.log" \
+	MOCK_SWAP_LOG_TARGET="$RACE_VICTIM" MOCK_SWAP_LOG_MARKER="$RACE_MARKER" \
+	"${TEST_BASH:-bash}" "$REPO_DIR/scripts/save-assistant-sessions.sh" >/dev/null 2>&1
+assert_eq "post-open symlink swap cannot redirect save log writes" \
+	"do not overwrite" "$(cat "$RACE_VICTIM")"
+
 echo "== unpredictable archive replacement =="
 ARCHIVE_DIR="$SANDBOX/archive-case"
 mkdir -p "$ARCHIVE_DIR/source/pane_contents"
@@ -182,6 +208,16 @@ esac
 case "$archive_members" in
 *pane-test:0.0*) assert_eq "assistant archive member is removed" no yes ;;
 *) assert_eq "assistant archive member is removed" no no ;;
+esac
+
+log_error_file="$SANDBOX/log-write-error"
+exec 9>&-
+LOG_ENABLED=1
+log "forced closed descriptor" 2>"$log_error_file"
+assert_eq "save logging disables itself after a descriptor write failure" 0 "$LOG_ENABLED"
+case "$(cat "$log_error_file")" in
+*'cannot write save log'*) assert_eq "save log write failure is reported once" yes yes ;;
+*) assert_eq "save log write failure is reported once" yes no ;;
 esac
 
 echo

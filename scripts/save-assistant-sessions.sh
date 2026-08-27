@@ -61,7 +61,7 @@ UNRESOLVED_PANES=0
 RESURRECT_DIR="$(resurrect_data_dir)"
 OUTPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
 LOG_FILE="${RESURRECT_DIR}/assistant-save.log"
-LOG_ENABLED=1
+LOG_ENABLED=0
 CAPTURE_ENV=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
 RELAUNCH_ENABLED=$(tmux show-option -gqv @assistant-resurrect-relaunch 2>/dev/null || true)
 RELAUNCH_ENABLED="${RELAUNCH_ENABLED:-on}"
@@ -84,32 +84,70 @@ esac
 ensure_assistant_state_dir "$STATE_DIR"
 mkdir -p "$RESURRECT_DIR"
 
-# Never append through a user-planted symlink. The save directory can be an
-# explicit shared location, and a dangling link bypasses the rotation block's
-# regular-file check entirely. Keep stderr diagnostics available when file
-# logging is disabled.
-if [ -L "$LOG_FILE" ]; then
-	LOG_ENABLED=0
-	printf '%s\n' "tmux-assistant-resurrect: refusing symlinked save log: $LOG_FILE" >&2
-fi
-
-# Rotate log: keep only the most recent 500 lines to prevent unbounded growth
-# (continuum saves every 5 minutes, so this grows ~12 lines/hour).
-if [ "$LOG_ENABLED" -eq 1 ] && [ -f "$LOG_FILE" ]; then
-	_log_tmp=$(mktemp "${LOG_FILE}.tmp.XXXXXX") || _log_tmp=""
-	if [ -n "$_log_tmp" ]; then
-		if ! tail -n 500 "$LOG_FILE" >"$_log_tmp" 2>/dev/null || ! mv "$_log_tmp" "$LOG_FILE"; then
-			rm -f "$_log_tmp"
+# Move an existing log aside without following it, then create the replacement
+# atomically under noclobber and retain its descriptor. Later path replacement
+# cannot redirect writes. The moved file is rechecked before it is read so a
+# raced symlink is never used as rotation input.
+_log_previous=""
+_log_previous_copied=0
+if [ -e "$LOG_FILE" ] || [ -L "$LOG_FILE" ]; then
+	if [ -L "$LOG_FILE" ]; then
+		printf '%s\n' "tmux-assistant-resurrect: refusing symlinked save log: $LOG_FILE" >&2
+	elif [ ! -f "$LOG_FILE" ]; then
+		printf '%s\n' "tmux-assistant-resurrect: refusing non-regular save log: $LOG_FILE" >&2
+	else
+		_log_previous=$(mktemp "${LOG_FILE}.rotate.XXXXXX" 2>/dev/null || true)
+		if [ -z "$_log_previous" ] || ! mv "$LOG_FILE" "$_log_previous" 2>/dev/null; then
+			printf '%s\n' "tmux-assistant-resurrect: cannot rotate save log, disabling file logging: $LOG_FILE" >&2
+			[ -z "$_log_previous" ] || rm -f "$_log_previous"
+			_log_previous=""
 		fi
 	fi
-	unset _log_tmp
 fi
 
+if { [ ! -e "$LOG_FILE" ] && [ ! -L "$LOG_FILE" ]; } &&
+	{ [ -z "$_log_previous" ] || { [ -f "$_log_previous" ] && [ ! -L "$_log_previous" ]; }; }; then
+	_log_had_noclobber=0
+	case "$-" in *C*) _log_had_noclobber=1 ;; esac
+	_log_old_umask=$(umask)
+	umask 077
+	set -C
+	if exec 9>"$LOG_FILE"; then
+		LOG_ENABLED=1
+	fi
+	[ "$_log_had_noclobber" -eq 1 ] || set +C
+	umask "$_log_old_umask"
+	if [ "$LOG_ENABLED" -eq 1 ] && [ -n "$_log_previous" ]; then
+		if tail -n 500 "$_log_previous" >&9 2>/dev/null; then
+			_log_previous_copied=1
+		fi
+	fi
+fi
+
+if [ -n "$_log_previous" ]; then
+	if [ "$LOG_ENABLED" -eq 1 ] && [ "$_log_previous_copied" -eq 1 ]; then
+		rm -f "$_log_previous"
+	else
+		printf '%s\n' "tmux-assistant-resurrect: previous save log retained at $_log_previous" >&2
+	fi
+fi
+if [ "$LOG_ENABLED" -ne 1 ] && [ ! -e "$LOG_FILE" ]; then
+	printf '%s\n' "tmux-assistant-resurrect: cannot securely open save log, disabling file logging: $LOG_FILE" >&2
+fi
+unset _log_previous _log_previous_copied _log_had_noclobber _log_old_umask
+
 log() {
-	local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
-	echo "$msg" >&2
+	local msg
+	msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+	msg="${msg//$'\r'/\\r}"
+	msg="${msg//$'\n'/\\n}"
+	msg="${msg//$'\033'/\\e}"
+	printf '%s\n' "$msg" >&2
 	if [ "$LOG_ENABLED" -eq 1 ]; then
-		echo "$msg" >>"$LOG_FILE"
+		if ! printf '%s\n' "$msg" >&9 2>/dev/null; then
+			LOG_ENABLED=0
+			printf '%s\n' "tmux-assistant-resurrect: cannot write save log, disabling file logging: $LOG_FILE" >&2
+		fi
 	fi
 }
 

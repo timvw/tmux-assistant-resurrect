@@ -1,6 +1,7 @@
 # Codex thread-state SQLite lookup (get_codex_session, Method 3).
 # Invoked as: USED_CODEX_SESSION_IDS=... python3 codex_state_db.py <codex_home> <cwd> <process_start_epoch>
 import glob
+import math
 import os
 import sqlite3
 import sys
@@ -63,12 +64,18 @@ def pick(rows, require_after_start):
             continue
         if sid in used:
             continue
-        if require_after_start and process_start is not None:
-            try:
-                if float(updated_at) < process_start:
-                    continue
-            except (TypeError, ValueError):
-                continue
+        try:
+            updated_at_value = float(updated_at)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(updated_at_value):
+            continue
+        if (
+            require_after_start
+            and process_start is not None
+            and updated_at_value < process_start
+        ):
+            continue
         return sid
     return None
 
