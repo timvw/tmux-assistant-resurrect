@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2154  # sources save script; resets its globals and reads its per-tool vars
 # Integration tests for tmux-assistant-resurrect.
 # Runs inside Docker with real assistant CLI binaries
-# (claude/copilot/opencode/codex/pi/omp).
+# (claude/copilot/opencode/codex/pi/omp/grok).
 set -euo pipefail
 
 REPO_DIR="$HOME/tmux-assistant-resurrect"
@@ -242,6 +243,103 @@ kill_pane_children() {
 	fi
 }
 
+# --- Top-level cleanup trap ---
+#
+# If the suite is interrupted (Ctrl-C, CI timeout) it previously left tmux
+# sessions and temp dirs behind. Inside Docker that's harmless, but the suite
+# is also run locally, where it attaches to the user's default tmux server --
+# there is no `tmux -L`/`-S` anywhere in this file. A name filter alone is
+# therefore not safe: "test-" is an obvious name for a session a developer
+# already has open, and killing it would destroy their work.
+#
+# So match on name AND on absence from the pre-run snapshot below. Anything
+# already running when the suite started belongs to the user and is spared,
+# whatever it is called. A session the user opens *during* a run is the one
+# residual gap, and that window is the price of not tracking every creation
+# site individually.
+#
+# Per-test kill_pane_children / kill-session calls still run normally; this is
+# the safety net that catches whatever they missed on abnormal exit.
+
+# Delimited on both sides so a substring match cannot alias one name onto
+# another. Session names may contain '|' (the suite creates one on purpose), so
+# this is a heuristic guard, not a parser -- erring toward sparing a session.
+#
+# The suite runs under `set -euo pipefail`, and `tmux list-sessions` exits
+# non-zero when no server is running yet -- which is the normal state in CI.
+# Neutralise it inside the braces, before the pipe, or pipefail aborts the whole
+# suite here.
+_PREEXISTING_SESSIONS="|$({ tmux list-sessions -F '#{session_name}' 2>/dev/null || true; } | tr '\n' '|')"
+
+# Same rule for the fixed /tmp fixtures: only remove what this run brought into
+# existence. These names are suite-specific, but "probably nobody else owns it"
+# is not a good enough reason to rm -rf a developer's directory, and the trap
+# runs even when the suite exits long before creating them.
+_SUITE_TMP_FIXTURES="/tmp/tmux-assistant-resurrect-test5 /tmp/pi-session-test-cwd
+/tmp/omp-session-test-cwd /tmp/grok-session-test-cwd /tmp/opencode-nosid-test-cwd
+/tmp/relaunch-save-cwd /tmp/grok-test-home"
+#
+# A path that already exists is either a developer's own directory or debris
+# from an aborted earlier run, and there is no way to tell which. Keep it and
+# say so, rather than delete it and hope: stale debris is cosmetic, a deleted
+# working directory is not.
+_SUITE_OWNED_TMP=""
+for _fixture in $_SUITE_TMP_FIXTURES; do
+	if [ -e "$_fixture" ]; then
+		printf 'note: %s already exists; leaving it in place at cleanup\n' "$_fixture" >&2
+	else
+		_SUITE_OWNED_TMP="${_SUITE_OWNED_TMP} ${_fixture}"
+	fi
+done
+unset _fixture
+
+_suite_cleanup() {
+	# Kill the suite's own sessions: the "test-" prefix used everywhere below,
+	# plus the hostile-name sessions, minus anything that predates the run.
+	#
+	# Kill by session id ($N), never by name. Two of the hostile names the suite
+	# creates on purpose -- "v1.2:x" and "tar|pipe" -- are also valid tmux target
+	# *expressions*: passing "v1.2:x" as -t makes tmux look for window "x" of a
+	# session named "v1.2", so a developer with a session called "v1.2" would
+	# take the hit instead. Session ids have no such grammar.
+	local sess_id sess_name
+	while IFS='	' read -r sess_id sess_name; do
+		[ -n "$sess_id" ] || continue
+		case "$_PREEXISTING_SESSIONS" in
+		*"|${sess_name}|"*) continue ;;
+		esac
+		case "$sess_name" in
+		test-* | 'tar|pipe' | v1.2:x | v1_2_x)
+			kill_pane_children "$sess_id" true 2>/dev/null || true
+			;;
+		esac
+	done < <(tmux list-sessions -F '#{session_id}	#{session_name}' 2>/dev/null || true)
+
+	# TMUX_ASSISTANT_RESURRECT_DIR is deliberately NOT the key for the state
+	# dirs: the suite re-exports it several times, so at trap time it holds only
+	# whichever value was set last and the earlier ones would survive. Take the
+	# fixtures this run created, plus the initial and live values of the export.
+	local path
+	for path in $_SUITE_OWNED_TMP; do
+		rm -rf "$path" 2>/dev/null || true
+	done
+	rm -rf "${TEST_STATE_DIR:?}" 2>/dev/null || true
+	rm -rf "${TMUX_ASSISTANT_RESURRECT_DIR:?}" 2>/dev/null || true
+}
+
+# A bare `trap ... INT TERM` runs the handler and then *resumes* the script,
+# which would carry on testing against the sessions and directories it just
+# tore down. Restore the default disposition and re-raise so the suite dies
+# with the right status, as an uncaught signal would have done.
+_suite_signal_exit() {
+	_suite_cleanup
+	trap - EXIT INT TERM
+	kill -"$1" $$
+}
+trap _suite_cleanup EXIT
+trap '_suite_signal_exit INT' INT
+trap '_suite_signal_exit TERM' TERM
+
 # --- State-directory resolution suite ---
 #
 # Delegated rather than inlined: this suite exports TMUX_ASSISTANT_RESURRECT_DIR
@@ -443,7 +541,7 @@ assert_contains "TPM entry point defaults session-less relaunch on" \
 	"$(cat "$REPO_DIR/tmux-assistant-resurrect.tmux")" \
 	"tmux set-option -g @assistant-resurrect-relaunch 'on'"
 # Verify idempotent install (run again, should not duplicate)
-just install 2>&1 >/dev/null
+just install >/dev/null 2>&1
 
 hook_count_after=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
 assert_eq "Install is idempotent (no duplicate hooks)" "1" "$hook_count_after"
@@ -477,6 +575,11 @@ tmux new-session -d -s test-pi -c "$PI_TEST_CWD"
 OMP_TEST_CWD="/tmp/omp-session-test-cwd"
 mkdir -p "$OMP_TEST_CWD"
 tmux new-session -d -s test-omp -c "$OMP_TEST_CWD"
+GROK_TEST_CWD="/tmp/grok-session-test-cwd"
+mkdir -p "$GROK_TEST_CWD"
+export GROK_HOME="/tmp/grok-test-home"
+mkdir -p "$GROK_HOME"
+tmux new-session -d -s test-grok -c "$GROK_TEST_CWD"
 
 # Launch mock assistants inside tmux panes
 # Claude: just a bare claude process (session ID comes from hook state file)
@@ -506,6 +609,10 @@ tmux send-keys -t test-false-positive "python3 -c 'import time; time.sleep(300)'
 tmux send-keys -t test-pi "pi --offline" Enter
 # OMP: argv-only harmless process; real omp binary is still used by help discovery.
 tmux send-keys -t test-omp "bash -c 'exec -a omp cat'" Enter
+# Grok: argv-only stub process; grok exits without auth/credentials so we use
+# the same stub pattern as OMP. The real grok binary is installed for --help
+# discovery. Session ID comes from the active_sessions.json registry.
+tmux send-keys -t test-grok "bash -c 'exec -a grok cat'" Enter
 
 # Wait for each assistant to appear as a child process (replaces fixed sleep 4).
 # OpenCode spawns node → native binary chain, so it takes longer than claude/codex.
@@ -516,6 +623,7 @@ codex_pane_shell_pid=$(tmux display-message -t test-codex -p '#{pane_pid}')
 nosid_pane_shell_pid=$(tmux display-message -t test-opencode-nosid -p '#{pane_pid}')
 pi_pane_shell_pid=$(tmux display-message -t test-pi -p '#{pane_pid}')
 omp_pane_shell_pid=$(tmux display-message -t test-omp -p '#{pane_pid}')
+grok_pane_shell_pid=$(tmux display-message -t test-grok -p '#{pane_pid}')
 
 wait_for_child "$claude_pane_shell_pid" "claude" 10 >/dev/null || echo "WARN: claude child not found (may still work via tree walk)"
 copilot_sid=""
@@ -561,6 +669,11 @@ if wait_for_child "$omp_pane_shell_pid" "(^| )omp( |$)" 10 >/dev/null; then
 	pass "OMP process is running in test-omp pane"
 else
 	fail "OMP process not found in test-omp pane"
+fi
+if wait_for_child "$grok_pane_shell_pid" "(^| )grok( |$)" 10 >/dev/null; then
+	pass "Grok process is running in test-grok pane"
+else
+	fail "Grok process not found in test-grok pane"
 fi
 
 # Create a Claude hook state file keyed by the Claude child PID
@@ -620,6 +733,19 @@ cat >"$omp_session_file" <<EOF
 {"type":"message","id":"omp-msg-1","parentId":null,"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}
 EOF
 
+# Create a Grok active_sessions.json registry entry.
+# Grok records live sessions as an array of {session_id, pid, cwd, opened_at}
+# in GROK_HOME/active_sessions.json. The save hook does a PID lookup against
+# this registry. The stub process (exec -a grok cat) gives us a real PID to
+# key on, exercising the same PID-based lookup the production code uses.
+grok_sid="019f1897-89a9-7a40-baa4-587f80e772c0"
+grok_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$grok_pane_shell_pid" '$2 == ppid && /grok/ {print $1; exit}')
+cat >"$GROK_HOME/active_sessions.json" <<EOF
+[
+  { "session_id": "${grok_sid}", "pid": ${grok_child_pid}, "cwd": "${GROK_TEST_CWD}", "opened_at": "2026-06-30T12:57:31.562612Z" }
+]
+EOF
+
 # Run save
 just save 2>&1
 
@@ -628,13 +754,13 @@ SAVED="$HOME/.tmux/resurrect/assistant-sessions.json"
 assert_file_exists "assistant-sessions.json created" "$SAVED"
 
 session_count=$(jq '.sessions | length' "$SAVED")
-# We expect: claude + copilot + opencode + codex + pi + omp = 6 with IDs.
+# We expect: claude + copilot + opencode + codex + pi + omp + grok = 7 with IDs.
 # opencode-nosid detected but no session ID, so excluded from sessions array
 # lsp subprocess should be excluded entirely
-if [ "$session_count" -ge 6 ]; then
-	pass "Detected at least 6 assistant sessions (got $session_count)"
+if [ "$session_count" -ge 7 ]; then
+	pass "Detected at least 7 assistant sessions (got $session_count)"
 else
-	fail "Expected at least 6 sessions, got $session_count"
+	fail "Expected at least 7 sessions, got $session_count"
 fi
 
 # Verify Claude was detected with correct session ID
@@ -666,6 +792,10 @@ assert_eq "Pi session ID extracted from session file" "$pi_sid" "$pi_detected_si
 # Verify OMP was detected with correct session ID (from ~/.omp session file)
 omp_detected_sid=$(jq -r '.sessions[] | select(.tool == "omp") | .session_id' "$SAVED")
 assert_eq "OMP session ID extracted" "$omp_sid" "$omp_detected_sid"
+
+# Verify Grok was detected with correct session ID (from active_sessions.json PID lookup)
+grok_detected_sid=$(jq -r '.sessions[] | select(.tool == "grok") | .session_id' "$SAVED")
+assert_eq "Grok session ID extracted from active_sessions.json" "$grok_sid" "$grok_detected_sid"
 
 # Verify LSP subprocess was excluded
 lsp_count=$(jq '[.sessions[] | select(.pane | contains("test-lsp"))] | length' "$SAVED")
@@ -796,7 +926,7 @@ echo "=== Test 3: restore (resume commands) ==="
 echo ""
 
 # Kill all assistants first (so panes are empty shells)
-for sess in test-claude test-copilot test-opencode test-codex test-opencode-nosid test-lsp test-false-positive test-pi test-omp; do
+for sess in test-claude test-copilot test-opencode test-codex test-opencode-nosid test-lsp test-false-positive test-pi test-omp test-grok; do
 	kill_pane_children "$sess"
 done
 sleep 1
@@ -819,6 +949,7 @@ assert_contains "Restore log mentions opencode" "$restore_log_content" "restorin
 assert_contains "Restore log mentions codex" "$restore_log_content" "restoring codex"
 assert_contains "Restore log mentions pi" "$restore_log_content" "restoring pi"
 assert_contains "Restore log mentions omp" "$restore_log_content" "restoring omp"
+assert_contains "Restore log mentions grok" "$restore_log_content" "restoring grok"
 
 # Verify the restore log contains the correct resume commands
 # (pane content is unreliable — real CLIs take over the terminal and clear it)
@@ -831,6 +962,8 @@ assert_contains "Restore sent codex resume" "$restore_log_content" "ses_codex_te
 assert_contains "Restore sent pi --session" "$restore_log_content" "$pi_sid"
 assert_contains "Restore sent omp session ID" "$omp_restore_line" "$omp_sid"
 assert_contains "Restore sent omp --resume" "$omp_restore_line" "--resume"
+grok_restore_line=$(echo "$restore_log_content" | grep "restoring grok" || true)
+assert_contains "Restore sent grok --resume with session ID" "$grok_restore_line" "$grok_sid"
 
 # Verify restore uses 'command' prefix to bypass shell aliases
 assert_contains "Restore uses 'command claude' prefix" "$restore_log_content" "command claude"
@@ -840,6 +973,7 @@ assert_contains "Restore uses 'command opencode' prefix" "$restore_log_content" 
 assert_contains "Restore uses 'command codex' prefix" "$restore_log_content" "command codex"
 assert_contains "Restore uses 'command pi' prefix" "$restore_log_content" "command pi"
 assert_contains "Restore uses 'command omp' prefix" "$omp_restore_line" "command omp"
+assert_contains "Restore uses 'command grok' prefix" "$grok_restore_line" "command grok"
 
 # --- Test 3b: Restore skips panes with already-running assistants ---
 
@@ -851,7 +985,7 @@ echo ""
 # becomes the foreground process, so pane_current_command != shell. Guard 1
 # (the shell whitelist) should fire and skip these panes.
 sleep 2
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep $((session_count * 2 + 3))
 
@@ -874,7 +1008,7 @@ echo "=== Test 3b2: restore Guard 2 — skips panes with background assistant ==
 echo ""
 
 # Kill existing assistants so panes return to shells
-for sess in test-claude test-copilot test-opencode test-codex test-opencode-nosid test-lsp test-pi test-omp; do
+for sess in test-claude test-copilot test-opencode test-codex test-opencode-nosid test-lsp test-pi test-omp test-grok; do
 	kill_pane_children "$sess"
 done
 sleep 1
@@ -897,7 +1031,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'BG_EOF'
 }
 BG_EOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -923,7 +1057,7 @@ echo "=== Test 3c: restore handles tricky cwd values ==="
 echo ""
 
 # Kill assistants so panes are clean shells
-for sess in test-claude test-copilot test-opencode test-codex test-opencode-nosid test-lsp test-pi test-omp; do
+for sess in test-claude test-copilot test-opencode test-codex test-opencode-nosid test-lsp test-pi test-omp test-grok; do
 	kill_pane_children "$sess"
 done
 sleep 1
@@ -939,7 +1073,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'CWDEOF'
 }
 CWDEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 restore_exit=0
 just restore 2>&1 || restore_exit=$?
 sleep 5
@@ -960,7 +1094,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'CWDEOF2'
 }
 CWDEOF2
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 restore_exit2=0
 just restore 2>&1 || restore_exit2=$?
 sleep 5
@@ -1033,7 +1167,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'UNKNEOF'
 }
 UNKNEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 restore_exit_unknown=0
 just restore 2>&1 || restore_exit_unknown=$?
 sleep 3
@@ -1066,7 +1200,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'NOSHELLEOF'
 }
 NOSHELLEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 restore_exit_noshell=0
 just restore 2>&1 || restore_exit_noshell=$?
 sleep 3
@@ -2461,7 +2595,7 @@ echo "=== Test 6: just clean ==="
 echo ""
 
 # Re-install for the clean test
-just install 2>&1 >/dev/null
+just install >/dev/null 2>&1
 
 # Create a stale state file with a dead PID
 STATE_DIR="$TEST_STATE_DIR"
@@ -2499,6 +2633,7 @@ cat >"$STATE_DIR/opencode-zeropid.json" <<EOF
 }
 EOF
 
+# shellcheck disable=SC2034  # captured to suppress output; value not inspected
 clean_output_2=$(just clean 2>&1)
 assert_file_not_exists "Clean removes corrupt PID state file" "$STATE_DIR/claude-corrupt.json"
 assert_file_not_exists "Clean removes zero-PID state file" "$STATE_DIR/opencode-zeropid.json"
@@ -2511,7 +2646,7 @@ echo "=== Test 7: TPM plugin entry point (.tmux file) ==="
 echo ""
 
 # Clean up from previous tests — remove claude hooks and opencode plugin
-just uninstall 2>&1 >/dev/null
+just uninstall >/dev/null 2>&1
 
 # Remove claude settings entirely to test from scratch
 rm -f "$HOME/.claude/settings.json"
@@ -2586,7 +2721,7 @@ upgrade_cleanup_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command | c
 assert_eq "Upgrade: no duplicate SessionEnd hooks after upgrade" "1" "$upgrade_cleanup_count"
 
 # Now test uninstall via justfile — it should remove both old and new forms
-just uninstall 2>&1 >/dev/null
+just uninstall >/dev/null 2>&1
 
 upgrade_remaining=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json" 2>/dev/null || echo "0")
 assert_eq "Upgrade: uninstall removes old unquoted hooks" "0" "$upgrade_remaining"
@@ -3688,7 +3823,7 @@ echo "=== Test 9b: enriched fields in assistant-sessions.json ==="
 echo ""
 
 # Re-install so save/restore use the updated scripts
-just install 2>&1 >/dev/null
+just install >/dev/null 2>&1
 
 # Create a tmux session with claude running
 tmux new-session -d -s test-enrich-claude -c /tmp
@@ -3848,7 +3983,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RENRICH'
 RENRICH
 
 RESTORE_LOG="$HOME/.tmux/resurrect/assistant-restore.log"
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -3889,7 +4024,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<RECOPEOF
 }
 RECOPEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -3929,7 +4064,7 @@ RENVEOF
 # Set the capture-env option so restore knows ANTHROPIC_BASE_URL is user-configured
 tmux set-option -g @assistant-resurrect-capture-env 'ANTHROPIC_BASE_URL' 2>/dev/null || true
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -3964,7 +4099,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RCOMPAT'
 }
 RCOMPAT
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4073,7 +4208,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RPIENRICH'
 }
 RPIENRICH
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4112,7 +4247,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'REMPTY'
 }
 REMPTY
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4152,7 +4287,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RMODEL'
 }
 RMODEL
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4183,7 +4318,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RMODELDUP'
 }
 RMODELDUP
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4215,7 +4350,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RMODELOC'
 }
 RMODELOC
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4257,7 +4392,7 @@ RENVF
 # Set the capture-env option so restore knows MY_CUSTOM is a user var
 tmux set-option -g @assistant-resurrect-capture-env 'MY_CUSTOM' 2>/dev/null || true
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4358,7 +4493,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RBRACKET'
 }
 RBRACKET
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 restore_bracket_exit=0
 just restore 2>&1 || restore_bracket_exit=$?
 sleep 5
@@ -4460,7 +4595,7 @@ cat >"$SAVED" <<RPIPEEOF
 }
 RPIPEEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4497,7 +4632,7 @@ cat >"$SAVED" <<RLEGACYEOF
 }
 RLEGACYEOF
 
->"$RESTORE_LOG"
+: >"$RESTORE_LOG"
 just restore 2>&1
 sleep 5
 
@@ -4549,7 +4684,7 @@ else
 }
 RDOTEOF
 
-	>"$RESTORE_LOG"
+	: >"$RESTORE_LOG"
 	just restore 2>&1
 	sleep 5
 

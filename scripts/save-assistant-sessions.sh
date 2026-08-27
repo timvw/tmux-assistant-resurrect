@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034  # per-tool variable families accessed via ${!var} dynamic expansion
 # The tmux server may have been started with a limited PATH (e.g. via a
 # systemd user service with a whitelisted runtime environment). That PATH
 # is inherited by every hook this script runs in, so utilities like
@@ -562,7 +563,7 @@ get_copilot_session() {
 	local uuid='\([0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}\)'
 	local flag
 	for flag in '--session-id' '--resume' '-r'; do
-		sid=$(echo "$args" | sed -n "s/.*$flag[= ] *$uuid.*/\1/p")
+		sid=$(echo "$args" | sed -n "s/.*${flag}[= ] *$uuid.*/\1/p")
 		if [ -n "$sid" ]; then
 			# Same resumability gate as the lock path. `copilot --session-id
 			# <uuid>` on a blank TUI puts a UUID in argv long before the session
@@ -717,6 +718,7 @@ _arg_value() {
 	local _had_noglob=0
 	case $- in *f*) _had_noglob=1 ;; esac
 	set -f
+	# shellcheck disable=SC2206  # deliberate word-split of argv string; globbing disabled above
 	words=($args)
 	[ "$_had_noglob" = 1 ] || set +f
 	local i n word flag next
@@ -1614,6 +1616,7 @@ _strip_bool_opt() {
 # tokens (e.g. option values like "o3" in `--model o3 resume`) are
 # skipped — scanning continues past them to find the actual subcommand.
 _strip_subcmds() {
+	# shellcheck disable=SC2206  # deliberate word-split of argv string
 	local -a words=($1)
 	shift
 	local -a targets=("$@")
@@ -1653,6 +1656,7 @@ HELP_PROBE_ENV_copilot="COPILOT_AUTO_UPDATE=false"
 
 # Cached per tool in _TOOL_HELP_<tool>: several discovery passes read the same
 # help text, and the callers run in a $() subshell per pane.
+# shellcheck disable=SC2178,SC2128  # out is a plain string; printf -v writes to a dynamic name
 _tool_help() {
 	local tool="$1"
 	local cache_var="_TOOL_HELP_${tool}"
@@ -2299,6 +2303,7 @@ signal_pids() {
 
 # Space-separated descendants of $root, excluding $root itself and $skip (the
 # watchdog's own PID).
+# shellcheck disable=SC2178,SC2128  # out is a plain string, not an array
 victim_pids() {
 	local root="$1" skip="$2" pid out=""
 	for pid in $(descendant_pids "$root"); do
@@ -2313,7 +2318,7 @@ victim_pids() {
 # tested one-shot utility; save_watchdog uses the snapshot-based logic below.
 reap_descendants() {
 	local root="$1" skip="$2" sig="$3"
-	# shellcheck disable=SC2086
+	# shellcheck disable=SC2086,SC2046  # deliberate word-split of PID list
 	signal_pids "$sig" $(victim_pids "$root" "$skip")
 }
 

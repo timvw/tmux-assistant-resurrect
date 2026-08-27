@@ -179,7 +179,7 @@ assert_eq "lock newer than the process is accepted" "$SID_RECYCLED" \
 touch -t 200001010000 "$COPILOT_STATE/$SID_RECYCLED/inuse.$LIVE_PID.lock"
 assert_eq "lock predating the process is rejected as stale" "" \
 	"$(get_copilot_session "$LIVE_PID" "copilot" 0)"
-rm -rf "$COPILOT_STATE/$SID_RECYCLED"
+rm -rf "${COPILOT_STATE:?}/$SID_RECYCLED"
 
 echo "== argv fallback =="
 assert_eq "--session-id=<uuid>" "$SID_CURRENT" \
@@ -241,7 +241,7 @@ assert_eq "COPILOT_HOME overrides the whole ~/.copilot path" \
 	"$COPILOT_HOME/session-state" "$(copilot_session_state_dir)"
 assert_eq "defaults to ~/.copilot when COPILOT_HOME is unset" \
 	"$HOME/.copilot/session-state" \
-	"$(COPILOT_HOME= copilot_session_state_dir)"
+	"$(COPILOT_HOME='' copilot_session_state_dir)"
 assert_eq "missing state root resolves nothing, quietly" "" \
 	"$(COPILOT_HOME="$SANDBOX/absent" get_copilot_session 1001 "copilot" 0)"
 
@@ -260,13 +260,13 @@ printf 'PATH=/usr/bin\0COPILOT_HOME=%s\0SHELL=/bin/bash\0' "$PROC_ROOT" \
 	>"$FAKE_PROC/4242/environ"
 assert_eq "COPILOT_HOME is read from the Copilot process environment" \
 	"$SID_PROCENV" \
-	"$(COPILOT_PROC_ROOT="$FAKE_PROC" COPILOT_HOME= get_copilot_session 4242 "copilot" 0)"
+	"$(COPILOT_PROC_ROOT="$FAKE_PROC" COPILOT_HOME='' get_copilot_session 4242 "copilot" 0)"
 assert_eq "--config-dir still outranks the process environment" \
 	"$CFG_ROOT/session-state" \
 	"$(COPILOT_PROC_ROOT="$FAKE_PROC" copilot_session_state_dir "copilot --config-dir $CFG_ROOT" 4242)"
 assert_eq "process environment without COPILOT_HOME falls through" \
 	"$HOME/.copilot/session-state" \
-	"$(COPILOT_PROC_ROOT="$SANDBOX/absent-proc" COPILOT_HOME= copilot_session_state_dir "copilot" 4242)"
+	"$(COPILOT_PROC_ROOT="$SANDBOX/absent-proc" COPILOT_HOME='' copilot_session_state_dir "copilot" 4242)"
 
 # The save sidecar must retain the resolved state root. Discovery alone is not
 # enough: restore needs the same root to find the UUID again.

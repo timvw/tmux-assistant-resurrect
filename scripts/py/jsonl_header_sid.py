@@ -1,5 +1,8 @@
 # Read a session id from a JSONL file's logical header (jsonl_session_id_from_file).
 # Invoked as: python3 jsonl_header_sid.py <session_file>
+# The broad `except Exception` guards below are deliberate (hence the noqa):
+# this runs inside the save hook against files written by another process,
+# and one unreadable or malformed file must be skipped, never propagated.
 import json
 import sys
 
@@ -9,7 +12,7 @@ try:
     with open(sys.argv[1], "rb") as f:
         first = f.readline(MAX_HEADER_BYTES + 1)
         second = f.readline(MAX_HEADER_BYTES + 1)
-except Exception:
+except Exception:  # noqa: BLE001
     sys.exit(0)
 
 for raw in (first, second if first else b""):
@@ -19,7 +22,7 @@ for raw in (first, second if first else b""):
         sys.exit(0)
     try:
         header = json.loads(raw.decode("utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001, S112
         continue
     if not isinstance(header, dict):
         continue
