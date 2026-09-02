@@ -384,6 +384,31 @@ assert_eq "a real secret flag alongside it is still stripped" \
 	"--secret-env-vars TOKEN --model gpt-4" \
 	"$(extract_cli_args copilot "copilot --secret-env-vars TOKEN --api-key sk-xxx --model gpt-4")"
 
+echo "== claude system-prompt file options keep their path =="
+# --system-prompt-file and --append-system-prompt-file are accepted by claude
+# but missing from the option list in `claude --help`, so discovery cannot see
+# them and only the static fallback pins them as value-taking. Read as
+# booleans, their path becomes the first positional and the filter drops it
+# together with the whole tail -- restore then replays a bare
+# --append-system-prompt-file and claude eats the next flag as its filename.
+# These assertions hold whether or not a claude binary is on PATH: the
+# fallback is a superset of what --help exposes.
+assert_eq "--append-system-prompt-file keeps its path" \
+	"--append-system-prompt-file /tmp/sp.md" \
+	"$(extract_cli_args claude "claude --append-system-prompt-file /tmp/sp.md")"
+assert_eq "--system-prompt-file keeps its path and the flags after it" \
+	"--system-prompt-file /tmp/sp.md --model m" \
+	"$(extract_cli_args claude "claude --system-prompt-file /tmp/sp.md --model m")"
+# The tail-drop is what makes this more than a cosmetic loss: a mis-read flag
+# takes every later option with it, so pin a following flag's survival too.
+assert_eq "a flag after the file path is not swallowed with it" \
+	"--append-system-prompt-file /tmp/sp.md --model m" \
+	"$(extract_cli_args claude "claude --append-system-prompt-file /tmp/sp.md --model m")"
+# A genuine positional must still take the tail with it, fix or no fix.
+assert_eq "a prompt positional still discards the rest" \
+	"--append-system-prompt-file /tmp/sp.md" \
+	"$(extract_cli_args claude "claude --append-system-prompt-file /tmp/sp.md hi --model m")"
+
 echo "== session-less relaunch diagnostics =="
 # A pane launched with an inline key is precisely the case that reaches the
 # session-less path, and relaunch_shape_ok() rejects it -- so the rejection

@@ -1829,7 +1829,17 @@ _tool_help() {
 # Static value-taking option fallbacks for when a running assistant is not on
 # the save hook's PATH. Dynamic discovery below is authoritative when --help is
 # available; these keep common replay settings intact in the degraded path.
-OPTION_VALUE_FLAGS_FALLBACK_claude="--add-dir --agent --agents --allowedTools --allowed-tools --append-system-prompt --autocompact --betas --cloud -d --debug --debug-file --disallowedTools --disallowed-tools --effort --environment --fallback-model --file --input-format --json-schema --max-budget-usd --mcp-config --model -n --name --output-format --permission-mode --plugin-dir --plugin-url --prompt-suggestions --remote-control --remote-control-session-name-prefix --setting-sources --settings --system-prompt --teleport --tools -w --worktree"
+#
+# claude's --system-prompt-file and --append-system-prompt-file are the
+# exception to "dynamic discovery is authoritative": they are accepted but
+# absent from the option list in `claude --help`, named only in the prose of
+# --setting-sources. Discovery cannot see them even with --help available, so
+# the argv filter reads them as booleans, takes the path for the first
+# positional, and drops it along with the whole tail. Restore then replays a
+# bare --append-system-prompt-file and claude consumes the next flag as its
+# filename ("Append system prompt file not found: --model"). Pinning them here
+# is load-bearing on the normal path, not just the degraded one.
+OPTION_VALUE_FLAGS_FALLBACK_claude="--add-dir --agent --agents --allowedTools --allowed-tools --append-system-prompt --append-system-prompt-file --autocompact --betas --cloud -d --debug --debug-file --disallowedTools --disallowed-tools --effort --environment --fallback-model --file --input-format --json-schema --max-budget-usd --mcp-config --model -n --name --output-format --permission-mode --plugin-dir --plugin-url --prompt-suggestions --remote-control --remote-control-session-name-prefix --setting-sources --settings --system-prompt --system-prompt-file --teleport --tools -w --worktree"
 OPTION_VALUE_FLAGS_FALLBACK_copilot="--add-dir --add-github-mcp-tool --add-github-mcp-toolset --additional-mcp-config --agent --allow-tool --allow-url --attachment --available-tools --bash-env -C --context --deny-tool --deny-url --disable-mcp-server --effort --reasoning-effort --excluded-tools --extension-sdk-path --log-dir --log-level --max-ai-credits --max-autopilot-continues --mode --model --mouse --output-format --plugin-dir --secret-env-vars --share --stream"
 OPTION_VALUE_FLAGS_FALLBACK_opencode="--log-level --port --hostname --mdns-domain --cors -m --model --prompt --agent --replay-limit"
 OPTION_VALUE_FLAGS_FALLBACK_codex="-c --config --enable --disable --remote --remote-auth-token-env -i --image -m --model --local-provider -p --profile -s --sandbox -C --cd --add-dir -a --ask-for-approval"
