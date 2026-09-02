@@ -172,6 +172,16 @@ process args as a reliable fallback.
   against the hook's cwd. If a restriction cannot be reproduced exactly, all
   Copilot replay flags are dropped and restore uses a bare resume; keeping any
   remaining grant or MCP-enablement flag could silently widen permissions.
+- Claude has the same flattened-argv problem with the opposite constraint: it
+  **does** accept a positional prompt, so `--model opus my prompt` is genuinely
+  ambiguous once `ps` has joined it, and Copilot's "a bare run must be a lost
+  value" rule cannot be transplanted. `_claude_args_from_exact_argv()` therefore
+  reads `_exact_argv()` (the same `/proc/<pid>/cmdline` reader Copilot uses,
+  generalised over the tool name) and settles both questions exactly: an option
+  whose value contains whitespace is unrepresentable in a whitespace-joined
+  `cli_args` and is dropped, and the first genuine positional is truncated
+  without taking a following option with it. macOS keeps the flattened path,
+  where a `*-file` value is still cut at its first space.
 - `--attachment` is stripped unconditionally for Copilot: restore always resumes
   interactively and Copilot refuses it there ("only supported in non-interactive
   prompt mode"). The `--prompt`/`--interactive` truncation only reaches flags

@@ -409,6 +409,49 @@ assert_eq "a prompt positional still discards the rest" \
 	"--append-system-prompt-file /tmp/sp.md" \
 	"$(extract_cli_args claude "claude --append-system-prompt-file /tmp/sp.md hi --model m")"
 
+# A path with a space in it survives ps as several bare tokens, so the flattened
+# form above keeps only the fragment before the space. Claude then exits with
+# "Append system prompt file not found: <fragment>" and the pane never resumes.
+# /proc keeps the boundary, so on Linux/WSL the option is recognised as
+# unrepresentable in a whitespace-joined cli_args and dropped instead -- losing
+# the extra system prompt, not the session. Claude also takes a positional
+# prompt, so exact argv is the only thing that can tell that case apart from a
+# split value; both are asserted here against the same binary.
+if [ -r "/proc/$$/cmdline" ]; then
+	echo "== claude exact argv (/proc/<pid>/cmdline) =="
+	# Mirror the real launcher shape: argv[0] is the interpreter and argv[1] a
+	# script path ending in /claude, as the node loader appears.
+	mkdir -p "$SANDBOX/launcher" "$SANDBOX/My Prompts"
+	printf '#!/usr/bin/env bash\nsleep 45\n' >"$SANDBOX/launcher/claude"
+	chmod +x "$SANDBOX/launcher/claude"
+	: >"$SANDBOX/My Prompts/sp.md"
+	: >"$SANDBOX/sp.md"
+	# stdout is redirected: the harness captures this suite in a command
+	# substitution, which would otherwise wait on a background job holding the
+	# pipe open.
+	bash "$SANDBOX/launcher/claude" --append-system-prompt-file \
+		"$SANDBOX/My Prompts/sp.md" --model opus >/dev/null 2>&1 &
+	SPACED_PID=$!
+	bash "$SANDBOX/launcher/claude" --append-system-prompt-file \
+		"$SANDBOX/sp.md" write me a haiku --model opus >/dev/null 2>&1 &
+	PROMPTED_PID=$!
+	sleep 1
+	# ps flattens both to the same shape; only cmdline tells them apart.
+	assert_eq "a space-bearing path drops its option and keeps the tail" \
+		"--model opus" \
+		"$(extract_cli_args claude \
+			"claude --append-system-prompt-file $SANDBOX/My Prompts/sp.md --model opus" \
+			"$SPACED_PID")"
+	assert_eq "a real prompt after a valid path keeps the path, drops the tail" \
+		"--append-system-prompt-file $SANDBOX/sp.md" \
+		"$(extract_cli_args claude \
+			"claude --append-system-prompt-file $SANDBOX/sp.md write me a haiku --model opus" \
+			"$PROMPTED_PID")"
+	kill "$SPACED_PID" "$PROMPTED_PID" 2>/dev/null
+else
+	printf '  [skip] claude exact argv from /proc (not available on this platform)\n'
+fi
+
 echo "== session-less relaunch diagnostics =="
 # A pane launched with an inline key is precisely the case that reaches the
 # session-less path, and relaunch_shape_ok() rejects it -- so the rejection

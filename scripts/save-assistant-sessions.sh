@@ -1537,10 +1537,15 @@ _copilot_variadic_flags() {
 # WSL do not have to guess. macOS has no equivalent readable interface, so it
 # falls back to the heuristic below and errs toward dropping.
 #
+# Claude has the same ambiguity for a different reason: it *does* take a
+# positional prompt, so a flattened `--model opus my prompt` could be a quoted
+# model or a model plus a prompt, and the value of a `*-file` option is a path
+# that a space splits into a fragment.
+#
 # Emits the arguments after the binary (and after a node launcher's script path),
 # one per line. Prints nothing when /proc is unavailable.
-_copilot_exact_argv() {
-	local pid="$1"
+_exact_argv() {
+	local pid="$1" tool="$2"
 	[ -n "$pid" ] || return 0
 	local cmdline="/proc/${pid}/cmdline"
 	[ -r "$cmdline" ] || return 0
@@ -1553,7 +1558,7 @@ _copilot_exact_argv() {
 		if [ "$i" -eq 1 ]; then continue; fi
 		if [ "$i" -eq 2 ]; then
 			case "$tok" in
-			*/copilot) continue ;;
+			*/"$tool") continue ;;
 			esac
 		fi
 		printf '%s\n' "$tok"
@@ -1583,7 +1588,7 @@ _copilot_args_from_exact_argv() {
 	local tok dropped_permission=0
 	while IFS= read -r tok; do
 		argv[${#argv[@]}]="$tok"
-	done < <(_copilot_exact_argv "$pid")
+	done < <(_exact_argv "$pid" copilot)
 	[ "${#argv[@]}" -gt 0 ] || return 1
 
 	local i last
@@ -1619,6 +1624,86 @@ _copilot_args_from_exact_argv() {
 	# These helpers run inside $(), where a variable assignment would be
 	# discarded, so the permission drop is reported through the exit status.
 	[ "$dropped_permission" -eq 1 ] && return 9
+	return 0
+}
+
+# Rebuild Claude's replay args from exact argv, settling two questions the
+# flattened form can only guess at.
+#
+# A value containing whitespace cannot survive `cli_args`, which restore
+# word-splits back apart, so the option is dropped rather than replayed as a
+# fragment. That matters most for --system-prompt-file and
+# --append-system-prompt-file: Claude exits with "Append system prompt file not
+# found: <fragment>" and the pane never resumes, whereas dropping the option
+# only costs the extra system prompt.
+#
+# And the first genuine positional is unambiguous here, so the prompt and its
+# tail are dropped without taking a following option with them -- flattening is
+# what forced that tail rule to be so blunt, since a prompt's own words are
+# indistinguishable from further values.
+#
+# Returns 1 when exact argv is unavailable (no /proc), leaving the caller on the
+# flattened path.
+_claude_args_from_exact_argv() {
+	local pid="$1"
+	local -a argv=() out=()
+	local tok flag next
+	while IFS= read -r tok; do
+		argv[${#argv[@]}]="$tok"
+	done < <(_exact_argv "$pid" claude)
+	[ "${#argv[@]}" -gt 0 ] || return 1
+
+	local value_flags
+	value_flags=" $(_discover_option_value_flags claude) "
+
+	local i n=${#argv[@]}
+	for ((i = 0; i < n; i++)); do
+		tok="${argv[$i]}"
+		case "$tok" in
+		-*) ;;
+		*)
+			# An initial prompt. Never replayed into a resumed conversation.
+			break
+			;;
+		esac
+
+		case "$tok" in
+		*=*)
+			# `--flag=value` carries its own boundary; only its own content can
+			# be unrepresentable.
+			case "$tok" in
+			*[[:space:]]*) continue ;;
+			esac
+			out[${#out[@]}]="$tok"
+			continue
+			;;
+		esac
+
+		flag="$tok"
+		case "$value_flags" in
+		*" $flag "*) ;;
+		*)
+			out[${#out[@]}]="$tok"
+			continue
+			;;
+		esac
+
+		# A value-taking option at the end of argv has no value to lose.
+		if [ $((i + 1)) -ge "$n" ]; then
+			out[${#out[@]}]="$tok"
+			continue
+		fi
+
+		next="${argv[$((i + 1))]}"
+		i=$((i + 1))
+		case "$next" in
+		*[[:space:]]*) continue ;;
+		esac
+		out[${#out[@]}]="$tok"
+		out[${#out[@]}]="$next"
+	done
+
+	[ "${#out[@]}" -gt 0 ] && printf '%s' "${out[*]}"
 	return 0
 }
 
@@ -2204,6 +2289,18 @@ extract_cli_args() {
 			esac
 			;;
 		esac
+	fi
+
+	# Same preference for Claude: where the kernel still has the boundaries, a
+	# path with a space in it is recognised instead of being cut at the first
+	# space and replayed as a fragment. The strippers below run on the result
+	# either way, and are a no-op on the parts this already settled.
+	if [ "$tool" = "claude" ]; then
+		local exact_claude="" exact_claude_rc=0
+		exact_claude=$(_claude_args_from_exact_argv "$pid") || exact_claude_rc=$?
+		if [ "$exact_claude_rc" -eq 0 ]; then
+			args="$exact_claude"
+		fi
 	fi
 
 	# `ps` flattens argv and loses the quoting boundary around a multi-word
