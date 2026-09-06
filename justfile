@@ -617,7 +617,7 @@ test-save-hardening:
 
 # Run hook/plugin installer and helper hardening tests (no assistant login needed)
 test-plugin-hardening:
-    @bash "{{repo_dir}}/test/plugin-hardening-unit-tests.sh"
+    @REQUIRE_JUST=1 bash "{{repo_dir}}/test/plugin-hardening-unit-tests.sh"
 
 # Run hermetic Copilot session-discovery tests (no binary or login required)
 test-copilot:

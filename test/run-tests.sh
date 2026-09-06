@@ -450,7 +450,7 @@ echo "=== Hook and plugin hardening tests ==="
 echo ""
 
 plugin_hardening_output=""
-if plugin_hardening_output=$("${TEST_BASH:-bash}" "$REPO_DIR/test/plugin-hardening-unit-tests.sh" 2>&1); then
+if plugin_hardening_output=$(REQUIRE_JUST=1 "${TEST_BASH:-bash}" "$REPO_DIR/test/plugin-hardening-unit-tests.sh" 2>&1); then
 	echo "$plugin_hardening_output"
 	pass "Hook and plugin hardening unit suite"
 else

@@ -547,8 +547,8 @@ else
     skip "status resolver test (just is unavailable)"
 fi
 
-if [ "${CI:-}" = "true" ] && [ "$skips" -ne 0 ]; then
-    fail "CI must exercise every plugin-hardening test ($skips skipped)"
+if [ "${REQUIRE_JUST:-0}" = "1" ] && [ "$skips" -ne 0 ]; then
+    fail "this run requires every just-backed plugin-hardening test ($skips skipped)"
 fi
 
 printf '\n%d passed, %d failed, %d skipped\n' "$passes" "$failures" "$skips"
