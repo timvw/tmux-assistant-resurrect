@@ -90,6 +90,111 @@ register_omp_session_id bc
 assert_eq "OMP IDs that are substrings remain distinct" \
 	$'\tabc\tbc' "$USED_OMP_SESSION_IDS"
 
+echo "== Claude transcript cwd fallback =="
+CLAUDE_TEST_CONFIG="$SANDBOX/claude-config"
+CLAUDE_TEST_CWD='/tmp/work_tree/café'
+CLAUDE_TEST_PROJECT="$CLAUDE_TEST_CONFIG/projects/-tmp-work-tree-caf-"
+CLAUDE_OLD_SID='11111111-1111-4111-8111-111111111111'
+CLAUDE_NEW_SID='22222222-2222-4222-8222-222222222222'
+CLAUDE_EMPTY_SID='33333333-3333-4333-8333-333333333333'
+CLAUDE_SYMLINK_SID='44444444-4444-4444-8444-444444444444'
+mkdir -p "$CLAUDE_TEST_PROJECT"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"old"}}' \
+	>"$CLAUDE_TEST_PROJECT/$CLAUDE_OLD_SID.jsonl"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"new"}}' \
+	>"$CLAUDE_TEST_PROJECT/$CLAUDE_NEW_SID.jsonl"
+: >"$CLAUDE_TEST_PROJECT/$CLAUDE_EMPTY_SID.jsonl"
+touch "$CLAUDE_TEST_PROJECT/$CLAUDE_OLD_SID.jsonl"
+touch "$CLAUDE_TEST_PROJECT/$CLAUDE_NEW_SID.jsonl"
+touch "$CLAUDE_TEST_PROJECT/$CLAUDE_EMPTY_SID.jsonl"
+python3 -c 'import os, sys, time; now = time.time(); os.utime(sys.argv[1], (now - 2, now - 2)); os.utime(sys.argv[2], (now - 1, now - 1))' \
+	"$CLAUDE_TEST_PROJECT/$CLAUDE_OLD_SID.jsonl" "$CLAUDE_TEST_PROJECT/$CLAUDE_NEW_SID.jsonl"
+
+assert_eq "Claude cwd fallback is deferred during PID-specific pass" "" \
+	"$(CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" get_claude_session $$ claude "$CLAUDE_TEST_CWD" 0)"
+assert_eq "Claude cwd fallback picks newest non-empty transcript" "$CLAUDE_NEW_SID" \
+	"$(CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" get_claude_session $$ claude "$CLAUDE_TEST_CWD" 1)"
+ln -s "$CLAUDE_TEST_PROJECT/$CLAUDE_NEW_SID.jsonl" \
+	"$CLAUDE_TEST_PROJECT/$CLAUDE_SYMLINK_SID.jsonl"
+touch -h "$CLAUDE_TEST_PROJECT/$CLAUDE_SYMLINK_SID.jsonl" 2>/dev/null || true
+assert_eq "Claude cwd fallback ignores a newer transcript symlink" "$CLAUDE_NEW_SID" \
+	"$(CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" get_claude_session $$ claude "$CLAUDE_TEST_CWD" 1)"
+assert_eq "Claude cwd fallback stays scoped to the exact cwd" "" \
+	"$(CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" get_claude_session $$ claude '/tmp/elsewhere' 1)"
+
+USED_CLAUDE_SESSION_IDS=$'\t'"$CLAUDE_NEW_SID"
+assert_eq "Claude cwd fallback does not reuse an emitted session" "$CLAUDE_OLD_SID" \
+	"$(CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" get_claude_session $$ claude "$CLAUDE_TEST_CWD" 1)"
+# shellcheck disable=SC2034 # read by get_claude_session() in the sourced save script
+USED_CLAUDE_SESSION_IDS=""
+RESERVED_CLAUDE_SESSION_IDS=$'\t'"$CLAUDE_NEW_SID"$'\t'"$CLAUDE_OLD_SID"
+assert_eq "Claude cwd fallback does not claim a PID-reserved session" "" \
+	"$(CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" get_claude_session $$ claude "$CLAUDE_TEST_CWD" 1)"
+# shellcheck disable=SC2034 # read by get_claude_session() in the sourced save script
+RESERVED_CLAUDE_SESSION_IDS=""
+
+echo "== Claude exact-owner reservation producer =="
+CLAUDE_RESERVE_STATE="$SANDBOX/claude-reserve-state"
+CLAUDE_RESERVE_CACHE="$SANDBOX/claude-reserve-cache"
+CLAUDE_STATE_SID='77777777-7777-4777-8777-777777777777'
+CLAUDE_ARG_SID='88888888-8888-4888-8888-888888888888'
+mkdir -p "$CLAUDE_RESERVE_STATE"
+printf '%s\n' "{\"session_id\":\"$CLAUDE_STATE_SID\"}" \
+	>"$CLAUDE_RESERVE_STATE/claude-12345.json"
+: >"$CLAUDE_RESERVE_CACHE"
+CLAUDE_RESERVE_MATCHES="pane:0.0"$'\t'"claude"$'\t'"23456"$'\t'"claude --resume $CLAUDE_ARG_SID"$'\t'"/tmp"$'\t'"/dev/ttys001"$'\t'"pane"$'\t'"0"$'\t'"0"
+STATE_DIR="$CLAUDE_RESERVE_STATE"
+RESERVED_CLAUDE_SESSION_IDS=""
+reserve_claude_candidate_sessions "$CLAUDE_RESERVE_MATCHES" $'\x1f' "$CLAUDE_RESERVE_CACHE"
+case "$RESERVED_CLAUDE_SESSION_IDS"$'\t' in
+*$'\t'"$CLAUDE_STATE_SID"$'\t'*) reservation_state=yes ;;
+*) reservation_state=no ;;
+esac
+case "$RESERVED_CLAUDE_SESSION_IDS"$'\t' in
+*$'\t'"$CLAUDE_ARG_SID"$'\t'*) reservation_argv=yes ;;
+*) reservation_argv=no ;;
+esac
+assert_eq "reservation fallback covers state files without a batch cache" yes "$reservation_state"
+assert_eq "reservation prepass covers exact argv selectors" yes "$reservation_argv"
+# shellcheck disable=SC2034 # read by helpers in the sourced save script
+STATE_DIR="$TMUX_ASSISTANT_RESURRECT_DIR"
+# shellcheck disable=SC2034 # read by main() in the sourced save script
+RESERVED_CLAUDE_SESSION_IDS=""
+
+CLAUDE_RESUMED_CWD='/tmp/resumed-claude-project'
+CLAUDE_RESUMED_PROJECT="$CLAUDE_TEST_CONFIG/projects/-tmp-resumed-claude-project"
+mkdir -p "$CLAUDE_RESUMED_PROJECT"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"resumed"}}' \
+	>"$CLAUDE_RESUMED_PROJECT/$CLAUDE_OLD_SID.jsonl"
+touch -t 202001010101 "$CLAUDE_RESUMED_PROJECT/$CLAUDE_OLD_SID.jsonl"
+assert_eq "Claude cwd fallback keeps an idle resumed transcript eligible" "$CLAUDE_OLD_SID" \
+	"$(CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" get_claude_session $$ claude "$CLAUDE_RESUMED_CWD" 1)"
+
+CLAUDE_ASTRAL_CWD='/tmp/🚀'
+CLAUDE_ASTRAL_PROJECT="$CLAUDE_TEST_CONFIG/projects/-tmp---"
+CLAUDE_ASTRAL_SID='55555555-5555-4555-8555-555555555555'
+mkdir -p "$CLAUDE_ASTRAL_PROJECT"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"astral"}}' \
+	>"$CLAUDE_ASTRAL_PROJECT/$CLAUDE_ASTRAL_SID.jsonl"
+assert_eq "Claude cwd encoding mirrors JavaScript UTF-16 replacement" "$CLAUDE_ASTRAL_SID" \
+	"$(CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" get_claude_session $$ claude "$CLAUDE_ASTRAL_CWD" 1)"
+
+CLAUDE_LONG_CWD='/'
+CLAUDE_LONG_PREFIX=''
+while [ "${#CLAUDE_LONG_PREFIX}" -lt 205 ]; do
+	CLAUDE_LONG_PREFIX="${CLAUDE_LONG_PREFIX}a"
+done
+CLAUDE_LONG_CWD="${CLAUDE_LONG_CWD}${CLAUDE_LONG_PREFIX}"
+CLAUDE_LONG_PREFIX="${CLAUDE_LONG_PREFIX%aaaaaa}"
+# Expected key independently calculated from Claude Code's L1o()/GV() source.
+CLAUDE_LONG_PROJECT="$CLAUDE_TEST_CONFIG/projects/-${CLAUDE_LONG_PREFIX}-bn8w8e"
+CLAUDE_LONG_SID='66666666-6666-4666-8666-666666666666'
+mkdir -p "$CLAUDE_LONG_PROJECT"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"long"}}' \
+	>"$CLAUDE_LONG_PROJECT/$CLAUDE_LONG_SID.jsonl"
+assert_eq "Claude cwd encoding pins the 200-character hash branch" "$CLAUDE_LONG_SID" \
+	"$(CLAUDE_CONFIG_DIR="$CLAUDE_TEST_CONFIG" get_claude_session $$ claude "$CLAUDE_LONG_CWD" 1)"
+
 echo "== unpredictable private save files =="
 RUN_DIR="$SANDBOX/run"
 STUB_DIR="$SANDBOX/bin"

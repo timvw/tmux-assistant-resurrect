@@ -52,7 +52,16 @@ before hooks/plugins have fired):
 
 - **Claude Code**: `SessionStart` hook state file keyed by Claude's PID
   (primary); `--resume <id>` in process args (fallback -- note: Claude
-  overwrites its process title, so this only works if args are still visible)
+  overwrites its process title, so this only works if args are still visible);
+  newest non-empty transcript under the encoded cwd in
+  `~/.claude/projects/` (last resort). The transcript lookup mirrors Claude's
+  ASCII-only, UTF-16 cwd encoding and long-path hash. It rejects IDs reserved by
+  PID-specific state/argv or already emitted for another pane. It remains
+  cwd-scoped rather than PID-specific, so two otherwise unresolved Claude
+  processes in one cwd are inherently ambiguous and the newest transcript can
+  belong to an abandoned session. Keeping older transcripts eligible is
+  deliberate: an untouched `--continue`/`--resume` process may not have written
+  anything during its current process lifetime yet.
 - **GitHub Copilot CLI**: the live session's own
   `$COPILOT_HOME/session-state/<uuid>/inuse.<pid>.lock` marker, matched by the
   native PID (primary); `--session-id` / `--resume` in process args (fallback,

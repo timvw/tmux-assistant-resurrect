@@ -334,12 +334,16 @@ missing_session_hint() {
 USED_CODEX_SESSION_IDS=""
 USED_PI_SESSION_IDS=""
 USED_OMP_SESSION_IDS=""
+USED_CLAUDE_SESSION_IDS=""
+RESERVED_CLAUDE_SESSION_IDS=""
 
 # --- Session ID extraction ---
 
 get_claude_session() {
 	local claude_pid="$1"
 	local args="$2"
+	local cwd="${3:-}"
+	local allow_transcript_fallback="${4:-1}"
 
 	# Method 1: SessionStart hook state file (keyed by Claude PID).
 	# The hook walks up the process tree to find the main 'claude' process,
@@ -370,6 +374,29 @@ get_claude_session() {
 	if [ -n "$sid" ]; then
 		echo "$sid"
 		return
+	fi
+
+	# Method 3: cwd-scoped transcript (last-resort fallback).
+	# Claude stores transcripts under
+	#   $CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/<session-id>.jsonl
+	# (default config root: ~/.claude). The helper mirrors Claude's exact
+	# JavaScript cwd encoding, including UTF-16 semantics and its long-path hash,
+	# then selects the most recently modified non-empty transcript. Transcript
+	# existence is also the resumability gate: before Claude writes content there
+	# is nothing useful for `--resume` to restore.
+	#
+	# Limitation: this is not PID-specific. Two bare Claude instances in the same
+	# cwd with unavailable state files can both resolve to the newest transcript.
+	# Defer it to resolver pass 2 so PID-specific state from every candidate gets
+	# first chance.
+	if [ "$allow_transcript_fallback" = "1" ] && [ -n "$cwd" ] && command -v python3 >/dev/null 2>&1; then
+		local config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+		sid=$(python3 "$PY_DIR/claude_transcript.py" "$config_dir" "$cwd" \
+			"$USED_CLAUDE_SESSION_IDS$RESERVED_CLAUDE_SESSION_IDS" 2>/dev/null || true)
+		if [ -n "$sid" ]; then
+			echo "$sid"
+			return
+		fi
 	fi
 }
 
@@ -1043,6 +1070,71 @@ register_codex_session_id() {
 		USED_CODEX_SESSION_IDS="${USED_CODEX_SESSION_IDS}"$'\t'"$sid"
 		;;
 	esac
+}
+
+register_claude_session_id() {
+	local sid="$1"
+	[ -z "$sid" ] && return
+	case "$USED_CLAUDE_SESSION_IDS"$'\t' in
+	*$'\t'"$sid"$'\t'*) ;;
+	*)
+		USED_CLAUDE_SESSION_IDS="${USED_CLAUDE_SESSION_IDS}"$'\t'"$sid"
+		;;
+	esac
+}
+
+reserve_claude_session_id() {
+	local sid="$1"
+	[ -z "$sid" ] && return
+	case "$RESERVED_CLAUDE_SESSION_IDS"$'\t' in
+	*$'\t'"$sid"$'\t'*) ;;
+	*)
+		RESERVED_CLAUDE_SESSION_IDS="${RESERVED_CLAUDE_SESSION_IDS}"$'\t'"$sid"
+		;;
+	esac
+}
+
+# Reserve Claude IDs that have an exact owner before any pane may use the
+# ambiguous cwd fallback. The batch cache is the fast path. On jq < 1.7 it is
+# absent, and a corrupt input can leave it partial, so read only the state files
+# whose PIDs were not represented there. This keeps the normal one-jq hot path
+# while making the correctness fallback independent of jq version/schema luck.
+reserve_claude_candidate_sessions() {
+	local matches="$1" us="$2" state_cache_file="$3"
+	local cached_pids="" pid sid model env state_file base args tool
+
+	if [ -s "$state_cache_file" ]; then
+		while IFS="$us" read -r pid sid model env; do
+			case "$pid" in
+			'' | *[!0-9]*) continue ;;
+			esac
+			[ -f "$STATE_DIR/claude-${pid}.json" ] || continue
+			reserve_claude_session_id "$sid"
+			cached_pids="${cached_pids}"$'\t'"$pid"
+		done <"$state_cache_file"
+	fi
+
+	for state_file in "$STATE_DIR"/claude-*.json; do
+		[ -f "$state_file" ] || continue
+		base="${state_file##*/}"
+		pid="${base#claude-}"
+		pid="${pid%.json}"
+		case "$pid" in
+		'' | *[!0-9]*) continue ;;
+		esac
+		case "$cached_pids"$'\t' in
+		*$'\t'"$pid"$'\t'*) continue ;;
+		esac
+		sid=$(jq -r '.session_id // empty' "$state_file" 2>/dev/null || true)
+		reserve_claude_session_id "$sid"
+	done
+
+	while IFS=$'\t' read -r _target tool pid args _cwd _tty _sess _win _idx; do
+		[ "$tool" = "claude" ] || continue
+		sid=$(_arg_value "$args" --resume)
+		[ -n "$sid" ] || sid=$(_arg_value "$args" --session-id)
+		reserve_claude_session_id "$sid"
+	done < <(printf '%s\n' "$matches")
 }
 
 register_pi_session_id() {
@@ -2137,7 +2229,7 @@ extract_cli_args() {
 #
 # Defers ambiguous or potentially stale fallbacks:
 #   pass 1: PID-specific native state only
-#   pass 2: OpenCode DB fallback and Copilot launcher-argv fallback
+#   pass 2: cwd-scoped DB/transcript fallbacks and Copilot launcher-argv fallback
 resolve_pane_candidates() {
 	local pane_target="$1"
 	local pane_cwd="$2"
@@ -2167,10 +2259,11 @@ resolve_pane_candidates() {
 			fi
 
 			# Pass 2 is only for fallbacks that can misidentify a live session:
-			# OpenCode's cwd-scoped DB and Copilot's possibly stale loader argv.
+			# Claude's cwd-scoped transcript, OpenCode's cwd-scoped DB, and
+			# Copilot's possibly stale loader argv.
 			if [ "$pass" -eq 2 ]; then
 				case "$cand_tool" in
-				opencode | copilot) ;;
+				claude | opencode | copilot) ;;
 				*) continue ;;
 				esac
 			fi
@@ -2196,8 +2289,9 @@ resolve_pane_candidates() {
 			case "$cand_tool" in
 			claude)
 				session_id="$cached_sid"
-				# Keep legacy fallback behavior when cache misses (state file + --resume).
-				[ -z "$session_id" ] && session_id=$(get_claude_session "$cand_pid" "$cand_args" || true)
+				# Keep legacy fallback behavior when cache misses, then permit the
+				# ambiguous cwd lookup only during resolver pass 2.
+				[ -z "$session_id" ] && session_id=$(get_claude_session "$cand_pid" "$cand_args" "$pane_cwd" "$allow_deferred_fallback" || true)
 				;;
 			copilot) session_id=$(get_copilot_session "$cand_pid" "$cand_args" "$allow_deferred_fallback" "$copilot_state_dir" || true) ;;
 			opencode)
@@ -2246,6 +2340,7 @@ resolve_pane_candidates() {
 					"$pane_session" "$pane_window" "$pane_pane_index" >>"$parts_file"
 
 				case "$cand_tool" in
+				claude) register_claude_session_id "$session_id" ;;
 				codex) register_codex_session_id "$session_id" ;;
 				pi) register_pi_session_id "$session_id" ;;
 				omp) register_omp_session_id "$session_id" ;;
@@ -2540,6 +2635,14 @@ main() {
 		log "jq < 1.7 detected; state file cache disabled (falling through to per-file reads)"
 	fi
 
+	# Reserve every Claude ID already owned by PID-specific state before resolving
+	# panes one by one. Otherwise an earlier pane's ambiguous cwd fallback could
+	# claim a later pane's exact state-file session and restore both panes into the
+	# same conversation. Explicit selectors in argv are reserved for the same
+	# reason. reserve_claude_candidate_sessions() handles jq 1.6 and a partial
+	# cache without adding per-file jq calls to the healthy jq 1.7 path.
+	reserve_claude_candidate_sessions "$MATCHES" "$US" "$STATE_CACHE_FILE"
+
 	# Pre-warm session-identity discovery so the per-pane $() subshells inherit
 	# a populated cache instead of each re-running `<tool> --help`. Warming must
 	# happen here in main's shell — the subshells cannot write back into it.
@@ -2688,7 +2791,7 @@ emit_session() {
 	local log_missing="${7:-1}"
 	local session_id="" copilot_state_dir=""
 	case "$tool" in
-	claude) session_id=$(get_claude_session "$cpid" "$cargs" || true) ;;
+	claude) session_id=$(get_claude_session "$cpid" "$cargs" "$cwd" || true) ;;
 	copilot)
 		copilot_state_dir=$(copilot_session_state_dir "$cargs" "$cpid")
 		session_id=$(get_copilot_session "$cpid" "$cargs" 1 "$copilot_state_dir" || true)
@@ -2746,6 +2849,7 @@ emit_session() {
 			--argjson env "${env_json:-null}" \
 			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid, model: $model, cli_args: $cli_args, env: $env, copilot_home: $copilot_home, session_name: $session_name, window_index: $window_index, pane_index: $pane_index}' >>"$PARTS_FILE"
 		case "$tool" in
+		claude) register_claude_session_id "$session_id" ;;
 		codex) register_codex_session_id "$session_id" ;;
 		pi) register_pi_session_id "$session_id" ;;
 		omp) register_omp_session_id "$session_id" ;;
