@@ -180,8 +180,17 @@ process args as a reliable fallback.
   generalised over the tool name) and settles both questions exactly: an option
   whose value contains whitespace is unrepresentable in a whitespace-joined
   `cli_args` and is dropped, and the first genuine positional is truncated
-  without taking a following option with it. macOS keeps the flattened path,
-  where a `*-file` value is still cut at its first space.
+  without taking a following option with it. `_exact_argv()` must keep its
+  internal stream NUL-delimited: newline is legal inside one argv element, and
+  translating both boundaries to newline can fabricate a flag such as
+  `--dangerously-skip-permissions`. If a Claude restriction (`--disallowedTools`,
+  `--tools`, `--setting-sources`, `--settings`, or `--permission-mode`) cannot
+  be represented, drop every replay flag so a surviving grant cannot silently
+  widen permissions. Claude's variadic options must keep consuming exact argv
+  elements until the next flag; otherwise only the first denied tool survives.
+  Optional-value options must leave a following flag for the next iteration.
+  macOS keeps the flattened path, where a `*-file` value is still cut at its
+  first space.
 - `--attachment` is stripped unconditionally for Copilot: restore always resumes
   interactively and Copilot refuses it there ("only supported in non-interactive
   prompt mode"). The `--prompt`/`--interactive` truncation only reaches flags

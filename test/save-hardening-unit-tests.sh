@@ -435,6 +435,27 @@ if [ -r "/proc/$$/cmdline" ]; then
 	bash "$SANDBOX/launcher/claude" --append-system-prompt-file \
 		"$SANDBOX/sp.md" write me a haiku --model opus >/dev/null 2>&1 &
 	PROMPTED_PID=$!
+	# A newline is legal inside one argv element. The exact-argv reader must not
+	# turn it into a new argument: the second line can itself look like a
+	# permission-widening flag even though it is still part of the file path.
+	NEWLINE_PATH="$SANDBOX/sp.md"$'\n''--dangerously-skip-permissions'
+	bash "$SANDBOX/launcher/claude" --append-system-prompt-file \
+		"$NEWLINE_PATH" --model opus >/dev/null 2>&1 &
+	NEWLINE_PID=$!
+	bash "$SANDBOX/launcher/claude" --disallowedTools 'Bash(rm -rf /)' \
+		--dangerously-skip-permissions --model opus >/dev/null 2>&1 &
+	RESTRICTED_PID=$!
+	bash "$SANDBOX/launcher/claude" --disallowedTools Bash Write \
+		--dangerously-skip-permissions --model opus >/dev/null 2>&1 &
+	VARIADIC_PID=$!
+	bash "$SANDBOX/launcher/claude" --append-system-prompt-file '' \
+		--model opus >/dev/null 2>&1 &
+	EMPTY_PID=$!
+	bash "$SANDBOX/launcher/claude" --debug --model opus >/dev/null 2>&1 &
+	OPTIONAL_PID=$!
+	bash "$SANDBOX/launcher/claude" --dangerously-skip-permissions \
+		'write a haiku' --permission-mode plan >/dev/null 2>&1 &
+	TAIL_RESTRICTED_PID=$!
 	sleep 1
 	# ps flattens both to the same shape; only cmdline tells them apart.
 	assert_eq "a space-bearing path drops its option and keeps the tail" \
@@ -447,7 +468,43 @@ if [ -r "/proc/$$/cmdline" ]; then
 		"$(extract_cli_args claude \
 			"claude --append-system-prompt-file $SANDBOX/sp.md write me a haiku --model opus" \
 			"$PROMPTED_PID")"
-	kill "$SPACED_PID" "$PROMPTED_PID" 2>/dev/null
+	assert_eq "a newline inside one value cannot become an injected flag" \
+		"--model opus" \
+		"$(extract_cli_args claude \
+			"claude --append-system-prompt-file $SANDBOX/sp.md --dangerously-skip-permissions --model opus" \
+			"$NEWLINE_PID")"
+	assert_eq "losing a deny list drops permission-widening replay args" \
+		"" \
+		"$(extract_cli_args claude \
+			"claude --disallowedTools Bash(rm -rf /) --dangerously-skip-permissions --model opus" \
+			"$RESTRICTED_PID")"
+	case " $(_claude_variadic_flags) " in
+	*' --disallowedTools '*) assert_eq "Claude discovers variadic deny lists" yes yes ;;
+	*) assert_eq "Claude discovers variadic deny lists" yes no ;;
+	esac
+	assert_eq "a variadic deny list preserves every exact value" \
+		"--disallowedTools Bash Write --dangerously-skip-permissions --model opus" \
+		"$(extract_cli_args claude \
+			"claude --disallowedTools Bash Write --dangerously-skip-permissions --model opus" \
+			"$VARIADIC_PID")"
+	assert_eq "an empty value drops its option and keeps the tail" \
+		"--model opus" \
+		"$(extract_cli_args claude \
+			"claude --append-system-prompt-file --model opus" \
+			"$EMPTY_PID")"
+	assert_eq "an optional value cannot consume the following flag" \
+		"--debug --model opus" \
+		"$(extract_cli_args claude \
+			"claude --debug --model opus" \
+			"$OPTIONAL_PID")"
+	assert_eq "a restriction after a positional drops widening replay args" \
+		"" \
+		"$(extract_cli_args claude \
+			"claude --dangerously-skip-permissions write a haiku --permission-mode plan" \
+			"$TAIL_RESTRICTED_PID")"
+	kill "$SPACED_PID" "$PROMPTED_PID" "$NEWLINE_PID" \
+		"$RESTRICTED_PID" "$VARIADIC_PID" "$EMPTY_PID" "$OPTIONAL_PID" \
+		"$TAIL_RESTRICTED_PID" 2>/dev/null
 else
 	printf '  [skip] claude exact argv from /proc (not available on this platform)\n'
 fi

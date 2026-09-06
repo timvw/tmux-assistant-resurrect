@@ -1506,6 +1506,31 @@ merge_process_env() {
 # Copilot's variadic options -- the ones whose --help spelling ends in `...`,
 # e.g. `--allow-tool[=tools...]`. They legitimately occupy several argv tokens.
 SESSION_VARIADIC_FALLBACK_copilot="--allow-tool --allow-url --available-tools --deny-tool --deny-url --excluded-tools --secret-env-vars"
+SESSION_VARIADIC_FALLBACK_claude="--add-dir --allowedTools --allowed-tools --betas --disallowedTools --disallowed-tools --file --mcp-config --tools"
+
+_claude_variadic_flags() {
+	local cached="${_CLAUDE_VARIADIC_FLAGS:-}"
+	if [ -n "$cached" ]; then
+		[ "$cached" = "-" ] || echo "$cached"
+		return 0
+	fi
+
+	local help_out result=""
+	help_out=$(_tool_help claude)
+	if [ -n "$help_out" ]; then
+		result=$(printf '%s\n' "$help_out" |
+			grep -E '^[[:space:]]+.*--[A-Za-z][A-Za-z0-9-]*.*\.\.\.' |
+			grep -oE -- '--[A-Za-z][A-Za-z0-9-]*' | sort -u | tr '\n' ' ') || true
+		result="${result% }"
+	fi
+	result=$(printf '%s\n%s\n' "$result" "$SESSION_VARIADIC_FALLBACK_claude" |
+		tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')
+	result="${result% }"
+
+	printf -v _CLAUDE_VARIADIC_FLAGS '%s' "${result:--}"
+	[ -n "$result" ] && echo "$result"
+	return 0
+}
 
 _copilot_variadic_flags() {
 	local cached="${_COPILOT_VARIADIC_FLAGS:-}"
@@ -1543,7 +1568,8 @@ _copilot_variadic_flags() {
 # that a space splits into a fragment.
 #
 # Emits the arguments after the binary (and after a node launcher's script path),
-# one per line. Prints nothing when /proc is unavailable.
+# NUL-delimited so embedded newlines remain part of their original argv element.
+# Prints nothing when /proc is unavailable.
 _exact_argv() {
 	local pid="$1" tool="$2"
 	[ -n "$pid" ] || return 0
@@ -1551,7 +1577,12 @@ _exact_argv() {
 	[ -r "$cmdline" ] || return 0
 
 	local tok i=0
-	while IFS= read -r tok; do
+	# Bash cannot store NUL, but `read -d ''` treats it as the delimiter while
+	# preserving every other byte in the argv element. Converting NUL to newline
+	# would split a legal embedded newline into a fabricated argument; if that
+	# fragment started with `--dangerously-skip-permissions`, restore could replay
+	# a flag the user never passed.
+	while IFS= read -r -d '' tok; do
 		i=$((i + 1))
 		# Skip argv[0], and a second token that is the script path of a node
 		# launcher -- mirrors the prefix stripping extract_cli_args does.
@@ -1561,8 +1592,8 @@ _exact_argv() {
 			*/"$tool") continue ;;
 			esac
 		fi
-		printf '%s\n' "$tok"
-	done < <(tr '\0' '\n' <"$cmdline" 2>/dev/null)
+		printf '%s\0' "$tok"
+	done <"$cmdline" 2>/dev/null
 	return 0
 }
 
@@ -1580,13 +1611,23 @@ _copilot_is_restriction_flag() {
 	return 1
 }
 
+# Claude options whose loss can broaden the restored session. A deny list and
+# --tools are direct restrictions; --setting-sources can suppress project-local
+# configuration, while an explicit --settings document can itself carry policy.
+_claude_is_restriction_flag() {
+	case "$1" in
+	--disallowedTools | --disallowed-tools | --tools | --setting-sources | --settings | --permission-mode) return 0 ;;
+	esac
+	return 1
+}
+
 # Rebuild cli_args from exact argv, dropping any value that cannot survive the
 # whitespace-joined `cli_args` field along with the option it belongs to.
 _copilot_args_from_exact_argv() {
 	local pid="$1"
 	local -a argv=() out=()
 	local tok dropped_permission=0
-	while IFS= read -r tok; do
+	while IFS= read -r -d '' tok; do
 		argv[${#argv[@]}]="$tok"
 	done < <(_exact_argv "$pid" copilot)
 	[ "${#argv[@]}" -gt 0 ] || return 1
@@ -1647,14 +1688,15 @@ _copilot_args_from_exact_argv() {
 _claude_args_from_exact_argv() {
 	local pid="$1"
 	local -a argv=() out=()
-	local tok flag next
-	while IFS= read -r tok; do
+	local tok flag next dropped_restriction=0
+	while IFS= read -r -d '' tok; do
 		argv[${#argv[@]}]="$tok"
 	done < <(_exact_argv "$pid" claude)
 	[ "${#argv[@]}" -gt 0 ] || return 1
 
-	local value_flags
+	local value_flags variadic_flags
 	value_flags=" $(_discover_option_value_flags claude) "
+	variadic_flags=" $(_claude_variadic_flags) "
 
 	local i n=${#argv[@]}
 	for ((i = 0; i < n; i++)); do
@@ -1663,6 +1705,16 @@ _claude_args_from_exact_argv() {
 		-*) ;;
 		*)
 			# An initial prompt. Never replayed into a resumed conversation.
+			# Exact argv also lets us scan the discarded tail for a restriction;
+			# leaving an earlier grant alive after dropping that restriction would
+			# make the resumed process more powerful than the original.
+			local j
+			for ((j = i; j < n; j++)); do
+				if _claude_is_restriction_flag "${argv[$j]%%=*}"; then
+					dropped_restriction=1
+					break
+				fi
+			done
 			break
 			;;
 		esac
@@ -1672,7 +1724,10 @@ _claude_args_from_exact_argv() {
 			# `--flag=value` carries its own boundary; only its own content can
 			# be unrepresentable.
 			case "$tok" in
-			*[[:space:]]*) continue ;;
+			*[[:space:]]*)
+				_claude_is_restriction_flag "${tok%%=*}" && dropped_restriction=1
+				continue
+				;;
 			esac
 			out[${#out[@]}]="$tok"
 			continue
@@ -1688,6 +1743,36 @@ _claude_args_from_exact_argv() {
 			;;
 		esac
 
+		case "$variadic_flags" in
+		*" $flag "*)
+			# Commander-style variadic values continue until the next option.
+			# Preserve every exact single-token value; dropping one restriction
+			# value invalidates the complete replay set below.
+			out[${#out[@]}]="$tok"
+			local kept_value=0
+			while [ $((i + 1)) -lt "$n" ]; do
+				next="${argv[$((i + 1))]}"
+				case "$next" in
+				-*) break ;;
+				esac
+				i=$((i + 1))
+				case "$next" in
+				'' | *[[:space:]]*)
+					_claude_is_restriction_flag "$flag" && dropped_restriction=1
+					continue
+					;;
+				esac
+				out[${#out[@]}]="$next"
+				kept_value=1
+			done
+			if [ "$kept_value" -eq 0 ]; then
+				unset "out[$((${#out[@]} - 1))]"
+				out=(${out[@]+"${out[@]}"})
+			fi
+			continue
+			;;
+		esac
+
 		# A value-taking option at the end of argv has no value to lose.
 		if [ $((i + 1)) -ge "$n" ]; then
 			out[${#out[@]}]="$tok"
@@ -1695,15 +1780,31 @@ _claude_args_from_exact_argv() {
 		fi
 
 		next="${argv[$((i + 1))]}"
+		case "$next" in
+		-*)
+			# Optional-value options such as --debug may be followed directly by
+			# another flag. Reprocess it on the next iteration rather than
+			# consuming it as the optional value.
+			out[${#out[@]}]="$tok"
+			continue
+			;;
+		esac
 		i=$((i + 1))
 		case "$next" in
-		*[[:space:]]*) continue ;;
+		'' | *[[:space:]]*)
+			_claude_is_restriction_flag "$flag" && dropped_restriction=1
+			continue
+			;;
 		esac
 		out[${#out[@]}]="$tok"
 		out[${#out[@]}]="$next"
 	done
 
 	[ "${#out[@]}" -gt 0 ] && printf '%s' "${out[*]}"
+	# As with Copilot, signal that no remaining replay flags are safe once a
+	# restriction was lost. The caller discards this partial output and resumes
+	# with Claude's normal prompting defaults.
+	[ "$dropped_restriction" -eq 1 ] && return 9
 	return 0
 }
 
@@ -2002,7 +2103,10 @@ _drop_positional_args() {
 	local value_flags
 	value_flags=" $(_discover_option_value_flags "$tool") "
 	local variadic_flags=""
-	[ "$tool" = "copilot" ] && variadic_flags=" $(_copilot_variadic_flags) "
+	case "$tool" in
+	claude) variadic_flags=" $(_claude_variadic_flags) " ;;
+	copilot) variadic_flags=" $(_copilot_variadic_flags) " ;;
+	esac
 
 	# Word-split with pathname expansion disabled: argv is data, so values such
 	# as '*' must never expand against the save hook's working directory.
@@ -2183,6 +2287,7 @@ SESSION_FLAGS_FALLBACK_cursor="--continue
 _warm_cli_arg_helpers() {
 	local tool="$1"
 	_discover_option_value_flags "$tool" >/dev/null
+	[ "$tool" = "claude" ] && _claude_variadic_flags >/dev/null
 	[ "$tool" = "copilot" ] && _copilot_variadic_flags >/dev/null
 	return 0
 }
@@ -2298,7 +2403,9 @@ extract_cli_args() {
 	if [ "$tool" = "claude" ]; then
 		local exact_claude="" exact_claude_rc=0
 		exact_claude=$(_claude_args_from_exact_argv "$pid") || exact_claude_rc=$?
-		if [ "$exact_claude_rc" -eq 0 ]; then
+		if [ "$exact_claude_rc" -eq 9 ]; then
+			args=""
+		elif [ "$exact_claude_rc" -eq 0 ]; then
 			args="$exact_claude"
 		fi
 	fi
