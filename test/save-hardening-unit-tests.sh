@@ -385,6 +385,17 @@ assert_eq "a real secret flag alongside it is still stripped" \
 	"$(extract_cli_args copilot "copilot --secret-env-vars TOKEN --api-key sk-xxx --model gpt-4")"
 
 echo "== claude system-prompt file options keep their path =="
+# Help prose can mention a scalar option before a variadic one on the same
+# line. Only the option whose own metavar ends in `...` may be classified as
+# variadic; otherwise a scalar such as --model can consume a trailing prompt.
+assert_eq "Claude variadic discovery does not sweep in other flags on the line" \
+	"--disallowedTools --tools" \
+	"$(
+		_CLAUDE_VARIADIC_FLAGS=""
+		export SESSION_VARIADIC_FALLBACK_claude="--disallowedTools"
+		_tool_help() { printf '  --model <model>, --tools <tools...>\n'; }
+		_claude_variadic_flags
+	)"
 # --system-prompt-file and --append-system-prompt-file are accepted by claude
 # but missing from the option list in `claude --help`, so discovery cannot see
 # them and only the static fallback pins them as value-taking. Read as

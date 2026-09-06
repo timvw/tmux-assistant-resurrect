@@ -1519,8 +1519,17 @@ _claude_variadic_flags() {
 	help_out=$(_tool_help claude)
 	if [ -n "$help_out" ]; then
 		result=$(printf '%s\n' "$help_out" |
-			grep -E '^[[:space:]]+.*--[A-Za-z][A-Za-z0-9-]*.*\.\.\.' |
-			grep -oE -- '--[A-Za-z][A-Za-z0-9-]*' | sort -u | tr '\n' ' ') || true
+			awk '
+				match($0, /<[^>]*\.\.\.[^>]*>/) {
+					prefix = substr($0, 1, RSTART - 1)
+					# A scalar option may precede the variadic one in help prose.
+					# Keep only the alias group after its last completed metavar.
+					sub(/^.*>[[:space:],]*/, "", prefix)
+					while (match(prefix, /--[A-Za-z][A-Za-z0-9-]*/)) {
+						print substr(prefix, RSTART, RLENGTH)
+						prefix = substr(prefix, RSTART + RLENGTH)
+					}
+				}' | sort -u | tr '\n' ' ') || true
 		result="${result% }"
 	fi
 	result=$(printf '%s\n%s\n' "$result" "$SESSION_VARIADIC_FALLBACK_claude" |
