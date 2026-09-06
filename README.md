@@ -63,7 +63,7 @@ Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 
 | Tool | Primary method | Fallback 1 | Fallback 2 | Notes |
 |------|---------------|------------|------------|-------|
-| **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` / `--session-id` in process args | - | Claude overwrites its process title, so args fallback only works if args are visible |
+| **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` / `--session-id` in process args | Newest non-empty cwd-scoped transcript under `~/.claude/projects/` | Transcript lookup excludes IDs reserved by PID-specific state/argv and already emitted for another pane, but two unresolved Claude instances in one cwd remain ambiguous and an abandoned session can be selected |
 | **Cursor Agent CLI** | `sessionStart` hook state file (keyed by Cursor PID) | `--resume` in process args | - | Supports both the current `agent` and compatibility `cursor-agent` executable names; desktop Cursor hook events are ignored |
 | **GitHub Copilot CLI** | `$COPILOT_HOME/session-state/<uuid>/inuse.<pid>.lock` written by the live session | `--session-id` / `--resume` in process args | - | Plain glob keyed on the native PID — no `/proc`, no `lsof`, so it behaves identically on Linux, WSL and macOS |
 | **OpenCode** | `-s` / `--session` in process args | Plugin state file | SQLite DB query (`~/.local/share/opencode/opencode.db`) | Go binary overwrites process title; DB fallback matches most recent session by cwd |
