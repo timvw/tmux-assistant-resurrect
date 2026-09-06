@@ -147,6 +147,16 @@ process args as a reliable fallback.
   explicitly non-fatal (`|| true` inside the substitution), because a failed
   bare command-substitution assignment triggers `set -e` in supported Bash
   versions.
+- Claude's last-resort transcript lookup mirrors Claude Code's project-key
+  function: replace each non-ASCII-alphanumeric JavaScript UTF-16 code unit
+  with `-`; if the result exceeds 200 characters, keep the first 200 and append
+  the absolute signed 32-bit string hash in base36. It considers only non-empty,
+  regular UUID-named JSONL files immediately under that project directory. IDs
+  reserved by any candidate's PID-specific state/argv and IDs already emitted
+  for another pane are excluded. Older transcripts remain eligible so an idle
+  resumed session can still be recovered. The lookup is cwd-scoped rather than
+  PID-specific, so keep it deferred until every candidate's state file and argv
+  have had a chance to resolve.
 - Copilot accepts **zero** positional arguments, which makes flattened argv
   fatal rather than merely lossy: `--add-dir "/tmp/My Project"` reaches `ps` as
   three tokens, and replaying the tail makes Copilot exit with "too many
@@ -263,6 +273,7 @@ changes after an upgrade, check the relevant source to confirm.
 | Assumption | Why it matters | Where to verify |
 |-----------|---------------|----------------|
 | **Claude sets `process.title = 'claude'`** | Node.js sets the process title, but on macOS arm64 (v2.1.44) `ps -eo args=` still shows full args (e.g., `claude --dangerously-skip-permissions`). The save script's `extract_cli_args()` relies on this. If a future version hides args, `cli_args` will be empty and restore falls back to bare `<binary> <resume_arg>`. | Run `ps -eo args=` on a running Claude process; Claude Code source: search for `process.title` |
+| **Claude transcript project keys use ASCII replacement plus a 200-character hash cap** | The cwd-scoped last-resort resolver must name the same `~/.claude/projects/<key>` directory for underscores, Unicode, astral characters, and long paths. | Claude Code source: `L1o()` / `GV()` project-key helpers; inspect a transcript directory created from an edge-case cwd |
 | **Copilot writes `<session-state>/<uuid>/inuse.<pid>.lock`** | Primary PID-to-session mapping for bare launches and in-process `/resume`; avoids same-cwd ambiguity and stale npm-loader argv. Undocumented upstream, hence the contract test | `test/copilot-contract-test.sh` asserts it against the real binary; manually, `ls ~/.copilot/session-state/*/inuse.*.lock` while Copilot runs |
 | **Claude hook spawns intermediate `sh -c`** | `$PPID` in the hook is NOT Claude's PID; hooks walk the process tree via `find_claude_pid()` (max 5 levels) | Run `ps -eo pid=,ppid=,args=` while a hook is executing |
 | **OpenCode plugins run in-process** | `process.pid` in the plugin IS the opencode binary's PID; state file is keyed by this PID | OpenCode source: search for `await import(` in the plugin loader (approx. `packages/opencode/src/plugin/index.ts` -- path may move) |
