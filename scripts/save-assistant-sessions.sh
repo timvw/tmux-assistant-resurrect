@@ -189,7 +189,7 @@ migrate_legacy_state_files() {
 		[ -O "$legacy" ] || continue
 
 		local moved_here=0 dest
-		for f in "$legacy"/claude-*.json "$legacy"/opencode-*.json; do
+		for f in "$legacy"/claude-*.json "$legacy"/cursor-*.json "$legacy"/opencode-*.json; do
 			[ -f "$f" ] || continue
 			[ -O "$f" ] || continue
 
@@ -258,7 +258,7 @@ migrate_legacy_state_files() {
 # `kill -0 0` signals the caller's own process group and always succeeds.
 reap_stale_state_files() {
 	local reaped=0 f base pid stale
-	for f in "$STATE_DIR"/claude-*.json "$STATE_DIR"/opencode-*.json; do
+	for f in "$STATE_DIR"/claude-*.json "$STATE_DIR"/cursor-*.json "$STATE_DIR"/opencode-*.json; do
 		[ -f "$f" ] || continue
 		base=$(basename "$f")
 		pid="${base#*-}"
@@ -304,6 +304,7 @@ missing_session_hint() {
 	local tool="$1" pid="$2" state_file=""
 	case "$tool" in
 	claude) state_file="$STATE_DIR/claude-${pid}.json" ;;
+	cursor) state_file="$STATE_DIR/cursor-${pid}.json" ;;
 	opencode) state_file="$STATE_DIR/opencode-${pid}.json" ;;
 	*)
 		echo "(no session ID in args)"
@@ -398,6 +399,49 @@ get_claude_session() {
 			return
 		fi
 	fi
+}
+
+get_cursor_session() {
+	local cursor_pid="$1"
+	local args="$2"
+
+	# Cursor's user-level sessionStart hook receives the stable session_id and
+	# runs for both new sessions and in-process session switches. The hook maps
+	# it to the owning CLI PID; desktop Cursor invocations are ignored by the
+	# hook because they have no `agent` / `cursor-agent` ancestor.
+	local state_file="$STATE_DIR/cursor-${cursor_pid}.json"
+	local sid=""
+	if [ -f "$state_file" ]; then
+		sid=$(jq -r '.session_id // .conversation_id // empty' "$state_file" 2>/dev/null || true)
+		if [ -n "$sid" ]; then
+			printf '%s\n' "$sid"
+			return 0
+		fi
+	fi
+
+	# Chicken-and-egg fallback immediately after restore, before sessionStart
+	# has run. Both current `agent` and legacy `cursor-agent` accept either
+	# --resume=<id> or --resume <id>.
+	sid=$(_arg_value "$args" --resume)
+	[ -n "$sid" ] && printf '%s\n' "$sid"
+}
+
+cursor_binary_from_args() {
+	local args="$1" reglob="" binary=""
+	case "$-" in *f*) ;; *) reglob=1 ;; esac
+	set -f
+	# shellcheck disable=SC2086 # deliberate tokenization of flattened ps argv
+	set -- $args
+	if [ -n "$reglob" ]; then set +f; fi
+	[ "$#" -gt 0 ] || return 0
+	binary="${1##*/}"
+	case "$binary" in
+	agent | cursor-agent) printf '%s\n' "$binary" ;;
+	node | nodejs | bun | deno | bash | sh | dash | ksh | zsh)
+		[ "$#" -gt 1 ] || return 0
+		case "${2##*/}" in agent | cursor-agent) printf '%s\n' "${2##*/}" ;; esac
+		;;
+	esac
 }
 
 # --- GitHub Copilot CLI ---
@@ -1760,12 +1804,21 @@ _tool_help() {
 
 	local probe_env_var="HELP_PROBE_ENV_${tool}"
 	local probe_env="${!probe_env_var:-}"
-	local out=""
+	local out="" help_binary="$tool"
+	if [ "$tool" = "cursor" ]; then
+		# Prefer the Cursor-specific compatibility name. A generic unrelated
+		# `agent` on PATH must never be executed by a periodic save hook.
+		if command -v cursor-agent >/dev/null 2>&1; then
+			help_binary="cursor-agent"
+		else
+			help_binary=""
+		fi
+	fi
 	if [ -n "$probe_env" ]; then
 		# shellcheck disable=SC2086  # deliberate split into env KEY=VAL args
-		out=$(env $probe_env "$tool" --help 2>/dev/null) || out=""
-	else
-		out=$("$tool" --help 2>/dev/null) || out=""
+		[ -z "$help_binary" ] || out=$(env $probe_env "$help_binary" --help 2>/dev/null) || out=""
+	elif [ -n "$help_binary" ]; then
+		out=$("$help_binary" --help 2>/dev/null) || out=""
 	fi
 
 	printf -v "$cache_var" '%s' "${out:--}"
@@ -1783,6 +1836,7 @@ OPTION_VALUE_FLAGS_FALLBACK_codex="-c --config --enable --disable --remote --rem
 OPTION_VALUE_FLAGS_FALLBACK_pi="--provider --model --api-key --system-prompt --append-system-prompt --mode -n --name --models -t --tools -xt --exclude-tools --thinking -e --extension --skill --prompt-template --theme --use-theme --export --list-models --tui-mode"
 OPTION_VALUE_FLAGS_FALLBACK_omp="--model --smol --slow --plan --prewalk-into --plan-yolo-into --provider --api-key --system-prompt --append-system-prompt --profile --alias --cwd --mode --config --session-dir --models --tools --thinking --hook -e --extension --skills --export --max-time --approval-mode --plugin-dir"
 OPTION_VALUE_FLAGS_FALLBACK_grok="--model --effort --cwd"
+OPTION_VALUE_FLAGS_FALLBACK_cursor="--header -e --endpoint --output-format --mode --model --sandbox --workspace --add-dir --plugin-dir -w --worktree --worktree-base"
 
 # Discover options that accept a separate value from the top-level --help.
 # Commander/clap-style help marks values as <...> or [...]; yargs-style help
@@ -1987,6 +2041,7 @@ SESSION_FLAG_PATTERN_opencode='^--session$'
 SESSION_FLAG_PATTERN_pi='^--(session|resume|continue|fork)$'
 SESSION_FLAG_PATTERN_omp='^--(session|resume|continue|fork)$'
 SESSION_FLAG_PATTERN_grok='^--(resume|continue|session-id|fork-session)$'
+SESSION_FLAG_PATTERN_cursor='^--(resume|continue|new-session-id)$'
 # codex uses subcommands (resume, fork), not --flags — handled separately.
 SESSION_SUBCMD_PATTERN_codex='resume|fork'
 # Codex resume/fork have subcommand-specific picker flags that must also
@@ -2023,6 +2078,9 @@ SESSION_FLAGS_FALLBACK_grok="--continue -c
 --fork-session
 --resume -r
 --session-id -s"
+SESSION_FLAGS_FALLBACK_cursor="--continue
+--new-session-id
+--resume"
 
 # Every helper that parses --help must be warmed in main's shell so its cache
 # survives the per-pane extract_cli_args command substitutions. The Copilot
@@ -2041,6 +2099,7 @@ SESSION_EXTRA_WARM_codex=_warm_cli_arg_helpers
 SESSION_EXTRA_WARM_pi=_warm_cli_arg_helpers
 SESSION_EXTRA_WARM_omp=_warm_cli_arg_helpers
 SESSION_EXTRA_WARM_grok=_warm_cli_arg_helpers
+SESSION_EXTRA_WARM_cursor=_warm_cli_arg_helpers
 
 # Pre-warm session-identity discovery once per tool present in a tab-separated
 # MATCHES blob (tool name in field 2). extract_cli_args runs in a $() subshell
@@ -2116,6 +2175,26 @@ extract_cli_args() {
 		args="${args# }"
 		;;
 	esac
+
+	# Current Cursor launchers insert Node's `--use-system-ca` plus the packaged
+	# index.js before the user's argv. They are implementation details, not
+	# Cursor options; replaying them makes index.js look like an initial prompt
+	# and discards every real flag after it.
+	if [ "$tool" = "cursor" ]; then
+		case "$args" in
+		--use-system-ca\ *)
+			local cursor_runtime_tail cursor_runtime_script
+			cursor_runtime_tail="${args#--use-system-ca }"
+			cursor_runtime_script="${cursor_runtime_tail%% *}"
+			case "$cursor_runtime_script" in
+			*/index.js)
+				args="${cursor_runtime_tail#"$cursor_runtime_script"}"
+				args="${args# }"
+				;;
+			esac
+			;;
+		esac
+	fi
 
 	# `ps` flattens argv and loses the quoting boundary around a multi-word
 	# Copilot --prompt/-p and --interactive/-i values. Token-wise stripping
@@ -2293,6 +2372,10 @@ resolve_pane_candidates() {
 				# ambiguous cwd lookup only during resolver pass 2.
 				[ -z "$session_id" ] && session_id=$(get_claude_session "$cand_pid" "$cand_args" "$pane_cwd" "$allow_deferred_fallback" || true)
 				;;
+			cursor)
+				session_id="$cached_sid"
+				[ -z "$session_id" ] && session_id=$(get_cursor_session "$cand_pid" "$cand_args" || true)
+				;;
 			copilot) session_id=$(get_copilot_session "$cand_pid" "$cand_args" "$allow_deferred_fallback" "$copilot_state_dir" || true) ;;
 			opencode)
 				session_id="$cached_sid"
@@ -2305,8 +2388,11 @@ resolve_pane_candidates() {
 			esac
 
 			if [ -n "$session_id" ]; then
-				local cli_args model="" env_json="null" state_file="" copilot_home=""
+				local cli_args model="" env_json="null" state_file="" copilot_home="" cursor_binary=""
 				cli_args=$(extract_cli_args "$cand_tool" "$cand_args" "$cand_pid")
+				if [ "$cand_tool" = "cursor" ]; then
+					cursor_binary=$(cursor_binary_from_args "$cand_args")
+				fi
 				model="$cached_model"
 				env_json="$cached_env"
 				if [ "$cand_tool" = "copilot" ]; then
@@ -2316,6 +2402,7 @@ resolve_pane_candidates() {
 				# If cache wasn't available, fall back to direct state-file enrichment.
 				case "$cand_tool" in
 				claude) state_file="$STATE_DIR/claude-${cand_pid}.json" ;;
+				cursor) state_file="$STATE_DIR/cursor-${cand_pid}.json" ;;
 				opencode) state_file="$STATE_DIR/opencode-${cand_pid}.json" ;;
 				esac
 				if [ -n "$state_file" ] && [ -f "$state_file" ]; then
@@ -2335,9 +2422,9 @@ resolve_pane_candidates() {
 
 				# Write TSV for batch JSON conversion (replaces per-entry jq -n).
 				# New columns are appended so the existing indices stay put.
-				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 					"$pane_target" "$cand_tool" "$session_id" "$pane_cwd" "$cand_pid" "$model" "$cli_args" "$env_json" "$copilot_home" \
-					"$pane_session" "$pane_window" "$pane_pane_index" >>"$parts_file"
+					"$pane_session" "$pane_window" "$pane_pane_index" "$cursor_binary" >>"$parts_file"
 
 				case "$cand_tool" in
 				claude) register_claude_session_id "$session_id" ;;
@@ -2609,7 +2696,7 @@ main() {
 	# has valid JSON input — /dev/null has no content and causes a parse error.
 	if echo '{}' | jq 'input_filename' >/dev/null 2>&1; then
 		local state_files=()
-		for _f in "$STATE_DIR"/claude-*.json "$STATE_DIR"/opencode-*.json; do
+		for _f in "$STATE_DIR"/claude-*.json "$STATE_DIR"/cursor-*.json "$STATE_DIR"/opencode-*.json; do
 			[ -f "$_f" ] && state_files+=("$_f")
 		done
 		if [ ${#state_files[@]} -gt 0 ]; then
@@ -2692,7 +2779,8 @@ main() {
 			split("\n") | map(select(length > 0) | split("\t") |
 			{pane:.[0], tool:.[1], session_id:.[2], cwd:.[3], pid:.[4], model:.[5], cli_args:.[6],
 			 env:(.[7] // "null" | try fromjson catch null), copilot_home:(.[8] // ""),
-			 session_name:(.[9] // ""), window_index:(.[10] // ""), pane_index:(.[11] // "")})
+			 session_name:(.[9] // ""), window_index:(.[10] // ""), pane_index:(.[11] // ""),
+			 cursor_binary:(.[12] // "")})
 			| {timestamp: $ts, sessions: .}
 		' "$PARTS_FILE" >"$SESSIONS_TMP"; then
 		rm -f "$SESSIONS_TMP" "$OUTPUT_TMP"
@@ -2792,6 +2880,7 @@ emit_session() {
 	local session_id="" copilot_state_dir=""
 	case "$tool" in
 	claude) session_id=$(get_claude_session "$cpid" "$cargs" "$cwd" || true) ;;
+	cursor) session_id=$(get_cursor_session "$cpid" "$cargs" || true) ;;
 	copilot)
 		copilot_state_dir=$(copilot_session_state_dir "$cargs" "$cpid")
 		session_id=$(get_copilot_session "$cpid" "$cargs" 1 "$copilot_state_dir" || true)
@@ -2805,8 +2894,11 @@ emit_session() {
 
 	if [ -n "$session_id" ]; then
 		# Extract CLI args (flags without binary name and session/resume args)
-		local cli_args copilot_home=""
+		local cli_args copilot_home="" cursor_binary=""
 		cli_args=$(extract_cli_args "$tool" "$cargs" "$cpid")
+		if [ "$tool" = "cursor" ]; then
+			cursor_binary=$(cursor_binary_from_args "$cargs")
+		fi
 		if [ "$tool" = "copilot" ]; then
 			copilot_home="${copilot_state_dir%/session-state}"
 		fi
@@ -2815,6 +2907,7 @@ emit_session() {
 		local state_file="" model="" env_json="null"
 		case "$tool" in
 		claude) state_file="$STATE_DIR/claude-${cpid}.json" ;;
+		cursor) state_file="$STATE_DIR/cursor-${cpid}.json" ;;
 		opencode) state_file="$STATE_DIR/opencode-${cpid}.json" ;;
 		esac
 
@@ -2846,8 +2939,9 @@ emit_session() {
 			--arg session_name "$PANE_TARGET_SESSION" \
 			--arg window_index "$PANE_TARGET_WINDOW" \
 			--arg pane_index "$PANE_TARGET_INDEX" \
+			--arg cursor_binary "$cursor_binary" \
 			--argjson env "${env_json:-null}" \
-			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid, model: $model, cli_args: $cli_args, env: $env, copilot_home: $copilot_home, session_name: $session_name, window_index: $window_index, pane_index: $pane_index}' >>"$PARTS_FILE"
+			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid, model: $model, cli_args: $cli_args, env: $env, copilot_home: $copilot_home, session_name: $session_name, window_index: $window_index, pane_index: $pane_index, cursor_binary: $cursor_binary}' >>"$PARTS_FILE"
 		case "$tool" in
 		claude) register_claude_session_id "$session_id" ;;
 		codex) register_codex_session_id "$session_id" ;;

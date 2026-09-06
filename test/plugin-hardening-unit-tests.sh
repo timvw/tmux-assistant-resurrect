@@ -10,6 +10,7 @@ UNDER_TEST="${BASH:-bash}"
 
 passes=0
 failures=0
+skips=0
 
 pass() {
     printf 'PASS: %s\n' "$1"
@@ -19,6 +20,11 @@ pass() {
 fail() {
     printf 'FAIL: %s\n' "$1" >&2
     failures=$((failures + 1))
+}
+
+skip() {
+    printf 'SKIP: %s\n' "$1"
+    skips=$((skips + 1))
 }
 
 assert_eq() {
@@ -32,13 +38,34 @@ assert_eq() {
 
 assert_file_mode() {
     local label="$1" expected="$2" path="$3" actual
-    if actual=$(stat -f '%Lp' "$path" 2>/dev/null); then
-        :
-    else
-        actual=$(stat -c '%a' "$path")
-    fi
+    actual=$(stat -f 'mode:%p' "$path" 2>/dev/null || true)
+    case "$actual" in
+        mode:*) actual=${actual#mode:} ;;
+        *) actual="" ;;
+    esac
+    case "$actual" in
+        '' | *[!0-7]*) actual="" ;;
+        *)
+            if [ "${#actual}" -ge 4 ]; then
+                actual=${actual#"${actual%????}"}
+                actual="${actual#0}"
+            else
+                actual=""
+            fi
+            ;;
+    esac
+    case "$actual" in
+        '') actual=$(stat -c '%a' "$path" 2>/dev/null || true) ;;
+    esac
     assert_eq "$label" "$expected" "$actual"
 }
+
+# Owner-none modes make the old %Mp%Lp concatenation ambiguous on BSD stat
+# (2060 became 260), so pin the parser separately from writable JSON fixtures.
+MODE_PROBE="$TEST_ROOT/mode-probe"
+printf 'mode probe\n' > "$MODE_PROBE"
+chmod 2060 "$MODE_PROBE"
+assert_file_mode "BSD/GNU mode parser retains low owner bits and setgid" 2060 "$MODE_PROBE"
 
 # Stub only the tmux calls made by the entrypoint and hook. All arguments are
 # recorded one per line so hook command values remain inspectable.
@@ -73,6 +100,192 @@ else
 fi
 assert_file_mode "new Claude settings are private" 600 "$INSTALL_HOME/.claude/settings.json"
 
+cursor_track_cmd=$(jq -r '.hooks.sessionStart[0].command' "$INSTALL_HOME/.cursor/hooks.json")
+cursor_cleanup_cmd=$(jq -r '.hooks.sessionEnd[0].command' "$INSTALL_HOME/.cursor/hooks.json")
+if "$UNDER_TEST" -n -c "$cursor_track_cmd" && "$UNDER_TEST" -n -c "$cursor_cleanup_cmd"; then
+    pass "quoted checkout path produces valid Cursor hook commands"
+else
+    fail "quoted checkout path produces valid Cursor hook commands"
+fi
+assert_file_mode "new Cursor hooks config is private" 600 "$INSTALL_HOME/.cursor/hooks.json"
+
+# Cursor documents its global hook file at ~/.cursor/hooks.json. A desktop's
+# unrelated XDG_CONFIG_HOME must not redirect the integration to an unread path.
+XDG_HOME="$TEST_ROOT/xdg"
+XDG_CONFIG_HOME="$XDG_HOME" HOME="$INSTALL_HOME" PATH="$FAKE_BIN:$PATH" \
+    "$UNDER_TEST" "$QUOTED_PLUGIN/tmux-assistant-resurrect.tmux"
+if [ -f "$INSTALL_HOME/.cursor/hooks.json" ] && [ ! -e "$XDG_HOME/cursor/hooks.json" ]; then
+    pass "Cursor hook install ignores unrelated XDG_CONFIG_HOME"
+else
+    fail "Cursor hook install ignores unrelated XDG_CONFIG_HOME"
+fi
+
+# Re-running the entrypoint must not duplicate either hook.
+HOME="$INSTALL_HOME" PATH="$FAKE_BIN:$PATH" \
+    "$UNDER_TEST" "$QUOTED_PLUGIN/tmux-assistant-resurrect.tmux"
+assert_eq "Cursor SessionStart installation is idempotent" 1 \
+    "$(jq '[.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))] | length' "$INSTALL_HOME/.cursor/hooks.json")"
+assert_eq "Cursor SessionEnd installation is idempotent" 1 \
+    "$(jq '[.hooks.sessionEnd[]? | select((.command // "") | contains("cursor-session-cleanup"))] | length' "$INSTALL_HOME/.cursor/hooks.json")"
+
+# Dotfile managers commonly symlink hooks.json. Updating Cursor hooks must
+# preserve that file identity instead of replacing the link with a regular file.
+SYMLINK_CURSOR_HOME="$TEST_ROOT/symlink-cursor-home"
+SYMLINK_CURSOR_TARGET="$TEST_ROOT/cursor-hooks-target.json"
+SYMLINK_CURSOR_LINK="$TEST_ROOT/links/cursor-hooks-link.json"
+mkdir -p "$SYMLINK_CURSOR_HOME/.cursor" "$TEST_ROOT/links"
+printf '{"version":1,"hooks":{"sessionStart":[{"command":"user-own-hook"}],"sessionEnd":[{"command":"user-own-end"}]}}\n' > "$SYMLINK_CURSOR_TARGET"
+chmod 2640 "$SYMLINK_CURSOR_TARGET"
+ln -s ../cursor-hooks-target.json "$SYMLINK_CURSOR_LINK"
+ln -s ../../links/cursor-hooks-link.json "$SYMLINK_CURSOR_HOME/.cursor/hooks.json"
+HOME="$SYMLINK_CURSOR_HOME" PATH="$FAKE_BIN:$PATH" \
+    "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux"
+if [ -L "$SYMLINK_CURSOR_HOME/.cursor/hooks.json" ] && [ -L "$SYMLINK_CURSOR_LINK" ] && \
+   jq -e '
+       (.version == 1) and
+       ([.hooks.sessionStart[]? | select((.command // "") == "user-own-hook")] | length == 1) and
+       ([.hooks.sessionEnd[]? | select((.command // "") == "user-own-end")] | length == 1) and
+       ([.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))] | length == 1) and
+       ([.hooks.sessionEnd[]? | select((.command // "") | contains("cursor-session-cleanup"))] | length == 1)
+   ' \
+       "$SYMLINK_CURSOR_TARGET" >/dev/null; then
+    pass "Cursor hook update preserves a symlinked hooks.json"
+else
+    fail "Cursor hook update preserves a symlinked hooks.json"
+fi
+assert_file_mode "Cursor hook update preserves the symlink target mode" 2640 "$SYMLINK_CURSOR_TARGET"
+assert_eq "Cursor hook update cleans up its target-side temporary file" "" \
+    "$(find "$TEST_ROOT" -name 'cursor-hooks-target.json.tmp.*' -print -quit)"
+if command -v just >/dev/null 2>&1; then
+    if HOME="$SYMLINK_CURSOR_HOME" PATH="$FAKE_BIN:$PATH" \
+       just --justfile "$ROOT_DIR/justfile" uninstall-cursor-hook >/dev/null 2>&1; then
+        if [ -L "$SYMLINK_CURSOR_HOME/.cursor/hooks.json" ] && [ -L "$SYMLINK_CURSOR_LINK" ] && \
+           jq -e '
+               (.version == 1) and
+               ([.hooks.sessionStart[]? | select((.command // "") == "user-own-hook")] | length == 1) and
+               ([.hooks.sessionEnd[]? | select((.command // "") == "user-own-end")] | length == 1) and
+               ([.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))] | length == 0) and
+               ([.hooks.sessionEnd[]? | select((.command // "") | contains("cursor-session-cleanup"))] | length == 0)
+           ' "$SYMLINK_CURSOR_TARGET" >/dev/null; then
+            pass "Cursor uninstall atomically updates a symlink target"
+        else
+            fail "Cursor uninstall atomically updates a symlink target"
+        fi
+    else
+        fail "Cursor uninstall recipe succeeds for a symlink target"
+    fi
+    assert_file_mode "Cursor uninstall preserves the symlink target mode" 2640 "$SYMLINK_CURSOR_TARGET"
+    assert_eq "Cursor uninstall cleans up its target-side temporary file" "" \
+        "$(find "$TEST_ROOT" -name 'cursor-hooks-target.json.tmp.*' -print -quit)"
+else
+    skip "Cursor symlink uninstall test (just unavailable)"
+fi
+
+# A chain deeper than the bounded resolver must be refused without touching the
+# final file. This also pins the guard against cyclic links without relying on
+# platform-specific ELOOP behavior from test(1).
+DEEP_CURSOR_HOME="$TEST_ROOT/deep-cursor-home"
+DEEP_CURSOR_TARGET="$TEST_ROOT/deep-cursor-target.json"
+DEEP_CURSOR_LINKS="$TEST_ROOT/deep-links"
+mkdir -p "$DEEP_CURSOR_HOME/.cursor" "$DEEP_CURSOR_LINKS"
+printf '{"untouched":true}\n' > "$DEEP_CURSOR_TARGET"
+i=15
+while [ "$i" -ge 0 ]; do
+    if [ "$i" -eq 15 ]; then
+        ln -s ../deep-cursor-target.json "$DEEP_CURSOR_LINKS/link-$i"
+    else
+        ln -s "link-$((i + 1))" "$DEEP_CURSOR_LINKS/link-$i"
+    fi
+    i=$((i - 1))
+done
+ln -s ../../deep-links/link-0 "$DEEP_CURSOR_HOME/.cursor/hooks.json"
+deep_install_output=$(HOME="$DEEP_CURSOR_HOME" PATH="$FAKE_BIN:$PATH" \
+    "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux" 2>&1)
+case "$deep_install_output" in
+    *"refusing deep or cyclic symlink chain"*) pass "Cursor install refuses an over-deep symlink chain" ;;
+    *) fail "Cursor install refuses an over-deep symlink chain" ;;
+esac
+if jq -e '.untouched == true and (keys | length == 1)' "$DEEP_CURSOR_TARGET" >/dev/null; then
+    pass "Cursor install leaves an over-deep symlink target unchanged"
+else
+    fail "Cursor install leaves an over-deep symlink target unchanged"
+fi
+assert_eq "Cursor deep-link refusal leaves no temporary file" "" \
+    "$(find "$TEST_ROOT" -name 'deep-cursor-target.json.tmp.*' -print -quit)"
+if command -v just >/dev/null 2>&1; then
+    deep_uninstall_output=$(HOME="$DEEP_CURSOR_HOME" PATH="$FAKE_BIN:$PATH" \
+        just --justfile "$ROOT_DIR/justfile" uninstall-cursor-hook 2>&1)
+    case "$deep_uninstall_output" in
+        *"refusing deep or cyclic symlink chain"*) pass "Cursor uninstall refuses an over-deep symlink chain" ;;
+        *) fail "Cursor uninstall refuses an over-deep symlink chain" ;;
+    esac
+    if jq -e '.untouched == true and (keys | length == 1)' "$DEEP_CURSOR_TARGET" >/dev/null; then
+        pass "Cursor uninstall leaves an over-deep symlink target unchanged"
+    else
+        fail "Cursor uninstall leaves an over-deep symlink target unchanged"
+    fi
+else
+    skip "Cursor deep-link uninstall test (just unavailable)"
+fi
+
+# Exactly 16 symlink hops is the supported boundary and must still update the
+# target. Together with the over-deep fixture above, this pins the guard's edge.
+BOUNDARY_CURSOR_HOME="$TEST_ROOT/boundary-cursor-home"
+BOUNDARY_CURSOR_TARGET="$TEST_ROOT/boundary-cursor-target.json"
+BOUNDARY_CURSOR_LINKS="$TEST_ROOT/boundary-links"
+mkdir -p "$BOUNDARY_CURSOR_HOME/.cursor" "$BOUNDARY_CURSOR_LINKS"
+printf '{"version":1,"hooks":{"sessionStart":[{"command":"boundary-user-hook"}]}}\n' > "$BOUNDARY_CURSOR_TARGET"
+i=14
+while [ "$i" -ge 0 ]; do
+    if [ "$i" -eq 14 ]; then
+        ln -s ../boundary-cursor-target.json "$BOUNDARY_CURSOR_LINKS/link-$i"
+    else
+        ln -s "link-$((i + 1))" "$BOUNDARY_CURSOR_LINKS/link-$i"
+    fi
+    i=$((i - 1))
+done
+ln -s ../../boundary-links/link-0 "$BOUNDARY_CURSOR_HOME/.cursor/hooks.json"
+HOME="$BOUNDARY_CURSOR_HOME" PATH="$FAKE_BIN:$PATH" \
+    "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux"
+if jq -e '
+    ([.hooks.sessionStart[]? | select((.command // "") == "boundary-user-hook")] | length == 1) and
+    ([.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))] | length == 1) and
+    ([.hooks.sessionEnd[]? | select((.command // "") | contains("cursor-session-cleanup"))] | length == 1)
+' "$BOUNDARY_CURSOR_TARGET" >/dev/null; then
+    pass "Cursor install accepts exactly 16 symlink hops"
+else
+    fail "Cursor install accepts exactly 16 symlink hops"
+fi
+if command -v just >/dev/null 2>&1; then
+    if HOME="$BOUNDARY_CURSOR_HOME" PATH="$FAKE_BIN:$PATH" \
+       just --justfile "$ROOT_DIR/justfile" uninstall-cursor-hook >/dev/null 2>&1 &&
+       jq -e '
+           ([.hooks.sessionStart[]? | select((.command // "") == "boundary-user-hook")] | length == 1) and
+           ([.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))] | length == 0) and
+           ([.hooks.sessionEnd[]? | select((.command // "") | contains("cursor-session-cleanup"))] | length == 0)
+       ' "$BOUNDARY_CURSOR_TARGET" >/dev/null; then
+        pass "Cursor uninstall accepts exactly 16 symlink hops"
+    else
+        fail "Cursor uninstall accepts exactly 16 symlink hops"
+    fi
+else
+    skip "Cursor boundary-link uninstall test (just unavailable)"
+fi
+
+# A malformed user file must be preserved and must not make the aggregate
+# uninstall stop before the remaining integrations are cleaned up.
+MALFORMED_CURSOR_HOME="$TEST_ROOT/malformed-cursor-home"
+mkdir -p "$MALFORMED_CURSOR_HOME/.cursor"
+printf '{not-json\n' > "$MALFORMED_CURSOR_HOME/.cursor/hooks.json"
+if ! command -v just >/dev/null 2>&1; then
+    skip "Cursor malformed-config uninstall test (just unavailable)"
+elif HOME="$MALFORMED_CURSOR_HOME" just --justfile "$ROOT_DIR/justfile" uninstall-cursor-hook >/dev/null 2>&1 && \
+     [ "$(sed -n '1p' "$MALFORMED_CURSOR_HOME/.cursor/hooks.json")" = '{not-json' ]; then
+    pass "Cursor uninstall preserves malformed hooks.json and stays non-fatal"
+else
+    fail "Cursor uninstall preserves malformed hooks.json and stays non-fatal"
+fi
+
 save_cmd=$(sed -n 's/^set-option -g @resurrect-hook-post-save-all //p' "$TMUX_CALLS")
 if "$UNDER_TEST" -n -c "$save_cmd"; then
     pass "quoted checkout path produces a valid tmux save hook"
@@ -95,6 +308,11 @@ if [ ! -e "$NO_JQ_HOME/.claude/settings.json" ]; then
     pass "missing jq does not create an unusable Claude settings file"
 else
     fail "missing jq does not create an unusable Claude settings file"
+fi
+if [ ! -e "$NO_JQ_HOME/.cursor/hooks.json" ]; then
+    pass "missing jq does not create an unusable Cursor hooks file"
+else
+    fail "missing jq does not create an unusable Cursor hooks file"
 fi
 
 # A colliding regular plugin file is user data and must not be overwritten.
@@ -326,8 +544,12 @@ if command -v just >/dev/null 2>&1; then
             ;;
     esac
 else
-    printf 'SKIP: status resolver test (just is unavailable)\n'
+    skip "status resolver test (just is unavailable)"
 fi
 
-printf '\n%d passed, %d failed\n' "$passes" "$failures"
+if [ "${REQUIRE_JUST:-0}" = "1" ] && [ "$skips" -ne 0 ]; then
+    fail "this run requires every just-backed plugin-hardening test ($skips skipped)"
+fi
+
+printf '\n%d passed, %d failed, %d skipped\n' "$passes" "$failures" "$skips"
 [ "$failures" -eq 0 ]

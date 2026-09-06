@@ -223,6 +223,20 @@ expected_nu_cmd="send-keys|%9|cd r#'$nu_cwd'#; with-env { SAFE: r#'nu-value's'# 
 assert_contains "Nushell restore command preserves exact ordering and values" "$nu_tmux_log" "$expected_nu_cmd"
 assert_not_contains "Nushell cwd does not use unsupported &&" "$nu_tmux_log" " && "
 
+echo "== Cursor Agent CLI command reconstruction =="
+export MOCK_PANES='%14|0|0|cursor-test'
+export MOCK_SHELLS='%14|bash'
+export MOCK_CAPTURE_ENV=''
+jq -n '{sessions:[{
+  pane:"cursor-test:0.0", session_name:"cursor-test", window_index:"0", pane_index:"0",
+  tool:"cursor", session_id:"750b1c55-f1b2-4ff1-804e-9c38d1b2c7e2", cwd:"",
+  cursor_binary:"agent", cli_args:"--mode plan --model auto --sandbox enabled", env:{}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_eq "Cursor restore succeeds" "0" "$RESTORE_STATUS"
+assert_contains "Cursor resumes the exact session with saved invocation flags" "$(cat "$TMUX_LOG")" \
+	"command agent '--mode' 'plan' '--model' 'auto' '--sandbox' 'enabled' --resume '750b1c55-f1b2-4ff1-804e-9c38d1b2c7e2'"
+
 echo "== malformed entries are isolated =="
 export MOCK_PANES='%1|0|0|bad-env
 %2|0|0|bad-id

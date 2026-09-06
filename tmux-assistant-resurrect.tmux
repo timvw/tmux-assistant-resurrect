@@ -6,10 +6,11 @@
 # 1. tmux-resurrect + tmux-continuum settings
 # 2. Post-save/restore hooks for assistant session tracking
 # 3. Claude Code hooks in ~/.claude/settings.json
-# 4. OpenCode session-tracker plugin in ~/.config/opencode/plugins/
-# 5. GitHub Copilot CLI support via its open session database (no hook required)
-# 6. Pi and Oh My Pi support via local session-file lookup (no hook required)
-# 7. Grok support via the ~/.grok/active_sessions.json registry (no hook required)
+# 4. Cursor Agent CLI hooks in ~/.cursor/hooks.json
+# 5. OpenCode session-tracker plugin in ~/.config/opencode/plugins/
+# 6. GitHub Copilot CLI support via its open session database (no hook required)
+# 7. Pi and Oh My Pi support via local session-file lookup (no hook required)
+# 8. Grok support via the ~/.grok/active_sessions.json registry (no hook required)
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -163,6 +164,114 @@ install_claude_hooks() {
     fi
 }
 
+# --- Cursor Agent CLI hooks ---
+
+install_cursor_hooks() {
+    local settings="$HOME/.cursor/hooks.json"
+    local hooks_dir track_cmd cleanup_cmd
+    hooks_dir="${CURRENT_DIR}/hooks"
+
+    command -v jq >/dev/null 2>&1 || return
+    track_cmd=$(hook_command "${hooks_dir}/cursor-session-track.sh")
+    cleanup_cmd=$(hook_command "${hooks_dir}/cursor-session-cleanup.sh")
+
+    if [ ! -f "$settings" ]; then
+        (umask 077 && mkdir -p "$(dirname "$settings")" && printf '{"version":1}\n' > "$settings") || {
+            echo "tmux-assistant-resurrect: cannot create $settings" >&2
+            return
+        }
+    fi
+
+    local has_current_track has_stale_track has_current_cleanup has_stale_cleanup
+    has_current_track=$(jq --arg cmd "$track_cmd" '[.hooks.sessionStart[]? | select((.command // "") == $cmd)] | length' "$settings" 2>/dev/null || echo 0)
+    has_stale_track=$(jq --arg cmd "$track_cmd" '[.hooks.sessionStart[]? | select(((.command // "") | contains("cursor-session-track")) and ((.command // "") != $cmd))] | length' "$settings" 2>/dev/null || echo 0)
+    has_current_cleanup=$(jq --arg cmd "$cleanup_cmd" '[.hooks.sessionEnd[]? | select((.command // "") == $cmd)] | length' "$settings" 2>/dev/null || echo 0)
+    has_stale_cleanup=$(jq --arg cmd "$cleanup_cmd" '[.hooks.sessionEnd[]? | select(((.command // "") | contains("cursor-session-cleanup")) and ((.command // "") != $cmd))] | length' "$settings" 2>/dev/null || echo 0)
+
+    if [ "$has_current_track" = "0" ] || [ "$has_stale_track" != "0" ] || \
+       [ "$has_current_cleanup" = "0" ] || [ "$has_stale_cleanup" != "0" ]; then
+        # Keep this resolution/update sequence aligned with uninstall-cursor-hook
+        # in justfile; both operations must preserve the same user-owned file.
+        local target="$settings" link target_mode="" tmp link_depth=0
+        while [ -L "$target" ] && [ "$link_depth" -lt 16 ]; do
+            link=$(readlink "$target") || {
+                echo "tmux-assistant-resurrect: cannot read symlink $target; left unchanged" >&2
+                return
+            }
+            case "$link" in
+                /*) target="$link" ;;
+                *) target="$(dirname "$target")/$link" ;;
+            esac
+            link_depth=$((link_depth + 1))
+        done
+        if [ -L "$target" ]; then
+            echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
+            return
+        fi
+        # BSD stat's %p includes the file type plus all permission bits; keep its
+        # final four octal digits. The literal prefix makes GNU stat -f output
+        # fail the octal guard before -c retries.
+        target_mode=$(stat -f 'mode:%p' "$target" 2>/dev/null || true)
+        case "$target_mode" in
+            mode:*) target_mode=${target_mode#mode:} ;;
+            *) target_mode="" ;;
+        esac
+        case "$target_mode" in
+            '' | *[!0-7]*) target_mode="" ;;
+            *)
+                if [ "${#target_mode}" -ge 4 ]; then
+                    target_mode=${target_mode#"${target_mode%????}"}
+                else
+                    target_mode=""
+                fi
+                ;;
+        esac
+        case "$target_mode" in
+            '' | *[!0-7]*) target_mode=$(stat -c '%a' "$target" 2>/dev/null || true) ;;
+        esac
+        case "$target_mode" in
+            '' | *[!0-7]*)
+                echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
+                return
+                ;;
+        esac
+        tmp=$(mktemp "${target}.tmp.XXXXXX") || {
+            echo "tmux-assistant-resurrect: cannot prepare update for $settings; left unchanged" >&2
+            return
+        }
+        if jq --arg track "$track_cmd" --arg cleanup "$cleanup_cmd" '
+            .version //= 1 |
+            .hooks //= {} |
+            .hooks.sessionStart //= [] |
+            .hooks.sessionEnd //= [] |
+            .hooks.sessionStart |= map(select((.command // "") | contains("cursor-session-track") | not)) |
+            .hooks.sessionEnd |= map(select((.command // "") | contains("cursor-session-cleanup") | not)) |
+            .hooks.sessionStart += [{"command": $track}] |
+            .hooks.sessionEnd += [{"command": $cleanup}]
+        ' "$settings" > "$tmp"; then
+            if ! chmod "$target_mode" "$tmp"; then
+                rm -f "$tmp"
+                echo "tmux-assistant-resurrect: cannot preserve mode for $settings; left unchanged" >&2
+                return
+            fi
+            # Replace the target atomically. A dotfile-managed symlink and the
+            # target mode survive; hard links, ownership/group, ACLs and xattrs
+            # are intentionally not retained because atomic replacement requires
+            # a new inode. The resolved target directory must be writable; a
+            # target in a read-only dotfile store is safely left unchanged.
+            if ! mv -f "$tmp" "$target"; then
+                rm -f "$tmp"
+                echo "tmux-assistant-resurrect: cannot update $settings; left unchanged" >&2
+                return
+            fi
+        else
+            rm -f "$tmp"
+            echo "tmux-assistant-resurrect: $settings is not valid Cursor hooks JSON" >&2
+            return
+        fi
+    fi
+}
+
 # --- OpenCode plugin ---
 
 install_opencode_plugin() {
@@ -190,4 +299,5 @@ install_opencode_plugin() {
 # --- Run assistant hook installation ---
 
 install_claude_hooks
+install_cursor_hooks
 install_opencode_plugin

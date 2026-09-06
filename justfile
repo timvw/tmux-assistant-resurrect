@@ -44,8 +44,9 @@ install-plugins:
         echo "TPM not found — run 'just install-tpm' first, then press prefix+I in tmux"; \
     fi
 
-# Install assistant integrations (Claude hook + OpenCode plugin; Pi/Oh My Pi need no hook)
-install-hooks: install-claude-hook install-opencode-plugin
+# Install assistant integrations (Claude/Cursor hooks + OpenCode plugin;
+# Pi/Oh My Pi need no hook)
+install-hooks: install-claude-hook install-cursor-hook install-opencode-plugin
     @echo "All assistant hooks installed"
 
 # Install Claude Code hooks and OpenCode plugin via the TPM entry point.
@@ -66,6 +67,10 @@ install-claude-hook:
 # Install OpenCode session-tracker plugin (delegates to .tmux entry point above)
 install-opencode-plugin:
     @echo "OpenCode plugin installed via install-claude-hook (shared entry point)"
+
+# Cursor hooks are installed by the same shared TPM entry point.
+install-cursor-hook: install-claude-hook
+    @echo "Cursor Agent hooks installed via install-claude-hook (shared entry point)"
 
 # Add resurrect config to ~/.tmux.conf
 configure-tmux:
@@ -142,7 +147,7 @@ configure-tmux:
     fi
 
 # Remove all installed hooks and config
-uninstall: uninstall-claude-hook uninstall-opencode-plugin unconfigure-tmux
+uninstall: uninstall-claude-hook uninstall-cursor-hook uninstall-opencode-plugin unconfigure-tmux
     @echo ""
     @echo "Uninstalled. You may also want to:"
     @echo "  - Remove TPM: rm -rf ~/.tmux/plugins/"
@@ -187,6 +192,95 @@ uninstall-claude-hook:
     ' "$settings" > "$tmp" && mv "$tmp" "$settings"
 
     echo "Claude hooks removed"
+
+# Remove Cursor Agent CLI hooks without disturbing user-owned hooks.
+uninstall-cursor-hook:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    settings="$HOME/.cursor/hooks.json"
+    if [ ! -f "$settings" ]; then
+        echo "No Cursor hooks to modify"
+        exit 0
+    fi
+    # Keep this resolution/update sequence aligned with install_cursor_hooks()
+    # in tmux-assistant-resurrect.tmux.
+    target="$settings"
+    link_depth=0
+    while [ -L "$target" ] && [ "$link_depth" -lt 16 ]; do
+        link=$(readlink "$target") || {
+            echo "tmux-assistant-resurrect: cannot read symlink $target; left unchanged" >&2
+            exit 0
+        }
+        case "$link" in
+            /*) target="$link" ;;
+            *) target="$(dirname "$target")/$link" ;;
+        esac
+        link_depth=$((link_depth + 1))
+    done
+    if [ -L "$target" ]; then
+        echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
+        exit 0
+    fi
+    # BSD stat's %p includes the file type plus all permission bits; keep its
+    # final four octal digits. The literal prefix makes GNU stat -f output fail
+    # the octal guard before -c retries.
+    target_mode=$(stat -f 'mode:%p' "$target" 2>/dev/null || true)
+    case "$target_mode" in
+        mode:*) target_mode=${target_mode#mode:} ;;
+        *) target_mode="" ;;
+    esac
+    case "$target_mode" in
+        '' | *[!0-7]*) target_mode="" ;;
+        *)
+            if [ "${#target_mode}" -ge 4 ]; then
+                target_mode=${target_mode#"${target_mode%????}"}
+            else
+                target_mode=""
+            fi
+            ;;
+    esac
+    case "$target_mode" in
+        '' | *[!0-7]*) target_mode=$(stat -c '%a' "$target" 2>/dev/null || true) ;;
+    esac
+    case "$target_mode" in
+        '' | *[!0-7]*)
+            echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
+            exit 0
+            ;;
+    esac
+    tmp=$(mktemp "${target}.tmp.XXXXXX") || {
+        echo "tmux-assistant-resurrect: cannot prepare update for $settings; left unchanged" >&2
+        exit 0
+    }
+    if ! jq '
+        if .hooks.sessionStart then
+            .hooks.sessionStart |= map(select((.command // "") | contains("cursor-session-track") | not)) |
+            if .hooks.sessionStart | length == 0 then del(.hooks.sessionStart) else . end
+        else . end |
+        if .hooks.sessionEnd then
+            .hooks.sessionEnd |= map(select((.command // "") | contains("cursor-session-cleanup") | not)) |
+            if .hooks.sessionEnd | length == 0 then del(.hooks.sessionEnd) else . end
+        else . end |
+        if .hooks and (.hooks | length == 0) then del(.hooks) else . end
+    ' "$settings" > "$tmp"; then
+        rm -f "$tmp"
+        echo "tmux-assistant-resurrect: $settings is not valid JSON; left unchanged" >&2
+        exit 0
+    fi
+    if ! chmod "$target_mode" "$tmp"; then
+        rm -f "$tmp"
+        echo "tmux-assistant-resurrect: cannot preserve mode for $settings; left unchanged" >&2
+        exit 0
+    fi
+    if ! mv -f "$tmp" "$target"; then
+        rm -f "$tmp"
+        echo "tmux-assistant-resurrect: cannot update $settings; left unchanged" >&2
+        exit 0
+    fi
+    # Atomic replacement requires the resolved target directory to be writable.
+    # Hard links, ownership/group, ACLs and xattrs are intentionally not
+    # retained; a target in a read-only dotfile store is left unchanged above.
+    echo "Cursor Agent hooks removed"
 
 # Remove OpenCode session-tracker plugin
 uninstall-opencode-plugin:
@@ -276,6 +370,19 @@ status:
         echo "[ok] Claude SessionEnd hook installed"
     else
         echo "[--] Claude SessionEnd hook not installed"
+    fi
+
+    # Cursor Agent hooks
+    cursor_hooks="$HOME/.cursor/hooks.json"
+    if jq -e '.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))' "$cursor_hooks" >/dev/null 2>&1; then
+        echo "[ok] Cursor SessionStart hook installed"
+    else
+        echo "[--] Cursor SessionStart hook not installed"
+    fi
+    if jq -e '.hooks.sessionEnd[]? | select((.command // "") | contains("cursor-session-cleanup"))' "$cursor_hooks" >/dev/null 2>&1; then
+        echo "[ok] Cursor SessionEnd hook installed"
+    else
+        echo "[--] Cursor SessionEnd hook not installed"
     fi
 
     # OpenCode plugin
@@ -485,6 +592,10 @@ test:
 test-grok:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/grok-unit-tests.sh"
 
+# Run hermetic Cursor Agent CLI tests (no binary or login required)
+test-cursor:
+    @"${TEST_BASH:-bash}" "{{repo_dir}}/test/cursor-unit-tests.sh"
+
 # Run hermetic saved-pane target resolution tests (no Docker / no tmux needed)
 test-targets:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/target-resolution-unit-tests.sh"
@@ -506,7 +617,7 @@ test-save-hardening:
 
 # Run hook/plugin installer and helper hardening tests (no assistant login needed)
 test-plugin-hardening:
-    @bash "{{repo_dir}}/test/plugin-hardening-unit-tests.sh"
+    @REQUIRE_JUST=1 bash "{{repo_dir}}/test/plugin-hardening-unit-tests.sh"
 
 # Run hermetic Copilot session-discovery tests (no binary or login required)
 test-copilot:
