@@ -190,8 +190,55 @@ install_cursor_hooks() {
 
     if [ "$has_current_track" = "0" ] || [ "$has_stale_track" != "0" ] || \
        [ "$has_current_cleanup" = "0" ] || [ "$has_stale_cleanup" != "0" ]; then
-        local tmp
-        tmp=$(mktemp "${settings}.tmp.XXXXXX") || return
+        # Keep this resolution/update sequence aligned with uninstall-cursor-hook
+        # in justfile; both operations must preserve the same user-owned file.
+        local target="$settings" link target_mode="" tmp link_depth=0
+        while [ -L "$target" ] && [ "$link_depth" -lt 16 ]; do
+            link=$(readlink "$target") || {
+                echo "tmux-assistant-resurrect: cannot read symlink $target; left unchanged" >&2
+                return
+            }
+            case "$link" in
+                /*) target="$link" ;;
+                *) target="$(dirname "$target")/$link" ;;
+            esac
+            link_depth=$((link_depth + 1))
+        done
+        if [ -L "$target" ]; then
+            echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
+            return
+        fi
+        # BSD stat's %p includes the file type plus all permission bits; keep its
+        # final four octal digits. The literal prefix makes GNU stat -f output
+        # fail the octal guard before -c retries.
+        target_mode=$(stat -f 'mode:%p' "$target" 2>/dev/null || true)
+        case "$target_mode" in
+            mode:*) target_mode=${target_mode#mode:} ;;
+            *) target_mode="" ;;
+        esac
+        case "$target_mode" in
+            '' | *[!0-7]*) target_mode="" ;;
+            *)
+                if [ "${#target_mode}" -ge 4 ]; then
+                    target_mode=${target_mode#"${target_mode%????}"}
+                else
+                    target_mode=""
+                fi
+                ;;
+        esac
+        case "$target_mode" in
+            '' | *[!0-7]*) target_mode=$(stat -c '%a' "$target" 2>/dev/null || true) ;;
+        esac
+        case "$target_mode" in
+            '' | *[!0-7]*)
+                echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
+                return
+                ;;
+        esac
+        tmp=$(mktemp "${target}.tmp.XXXXXX") || {
+            echo "tmux-assistant-resurrect: cannot prepare update for $settings; left unchanged" >&2
+            return
+        }
         if jq --arg track "$track_cmd" --arg cleanup "$cleanup_cmd" '
             .version //= 1 |
             .hooks //= {} |
@@ -202,13 +249,21 @@ install_cursor_hooks() {
             .hooks.sessionStart += [{"command": $track}] |
             .hooks.sessionEnd += [{"command": $cleanup}]
         ' "$settings" > "$tmp"; then
-            # Preserve an existing symlink/inode and its user-chosen mode.
-            if ! cat "$tmp" > "$settings"; then
+            if ! chmod "$target_mode" "$tmp"; then
                 rm -f "$tmp"
-                echo "tmux-assistant-resurrect: cannot update $settings" >&2
+                echo "tmux-assistant-resurrect: cannot preserve mode for $settings; left unchanged" >&2
                 return
             fi
-            rm -f "$tmp"
+            # Replace the target atomically. A dotfile-managed symlink and the
+            # target mode survive; hard links, ownership/group, ACLs and xattrs
+            # are intentionally not retained because atomic replacement requires
+            # a new inode. The resolved target directory must be writable; a
+            # target in a read-only dotfile store is safely left unchanged.
+            if ! mv -f "$tmp" "$target"; then
+                rm -f "$tmp"
+                echo "tmux-assistant-resurrect: cannot update $settings; left unchanged" >&2
+                return
+            fi
         else
             rm -f "$tmp"
             echo "tmux-assistant-resurrect: $settings is not valid Cursor hooks JSON" >&2

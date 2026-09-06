@@ -202,8 +202,54 @@ uninstall-cursor-hook:
         echo "No Cursor hooks to modify"
         exit 0
     fi
-    tmp=$(mktemp "${settings}.tmp.XXXXXX") || {
-        echo "tmux-assistant-resurrect: cannot prepare update for $settings" >&2
+    # Keep this resolution/update sequence aligned with install_cursor_hooks()
+    # in tmux-assistant-resurrect.tmux.
+    target="$settings"
+    link_depth=0
+    while [ -L "$target" ] && [ "$link_depth" -lt 16 ]; do
+        link=$(readlink "$target") || {
+            echo "tmux-assistant-resurrect: cannot read symlink $target; left unchanged" >&2
+            exit 0
+        }
+        case "$link" in
+            /*) target="$link" ;;
+            *) target="$(dirname "$target")/$link" ;;
+        esac
+        link_depth=$((link_depth + 1))
+    done
+    if [ -L "$target" ]; then
+        echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
+        exit 0
+    fi
+    # BSD stat's %p includes the file type plus all permission bits; keep its
+    # final four octal digits. The literal prefix makes GNU stat -f output fail
+    # the octal guard before -c retries.
+    target_mode=$(stat -f 'mode:%p' "$target" 2>/dev/null || true)
+    case "$target_mode" in
+        mode:*) target_mode=${target_mode#mode:} ;;
+        *) target_mode="" ;;
+    esac
+    case "$target_mode" in
+        '' | *[!0-7]*) target_mode="" ;;
+        *)
+            if [ "${#target_mode}" -ge 4 ]; then
+                target_mode=${target_mode#"${target_mode%????}"}
+            else
+                target_mode=""
+            fi
+            ;;
+    esac
+    case "$target_mode" in
+        '' | *[!0-7]*) target_mode=$(stat -c '%a' "$target" 2>/dev/null || true) ;;
+    esac
+    case "$target_mode" in
+        '' | *[!0-7]*)
+            echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
+            exit 0
+            ;;
+    esac
+    tmp=$(mktemp "${target}.tmp.XXXXXX") || {
+        echo "tmux-assistant-resurrect: cannot prepare update for $settings; left unchanged" >&2
         exit 0
     }
     if ! jq '
@@ -221,12 +267,19 @@ uninstall-cursor-hook:
         echo "tmux-assistant-resurrect: $settings is not valid JSON; left unchanged" >&2
         exit 0
     fi
-    if ! cat "$tmp" > "$settings"; then
+    if ! chmod "$target_mode" "$tmp"; then
+        rm -f "$tmp"
+        echo "tmux-assistant-resurrect: cannot preserve mode for $settings; left unchanged" >&2
+        exit 0
+    fi
+    if ! mv -f "$tmp" "$target"; then
         rm -f "$tmp"
         echo "tmux-assistant-resurrect: cannot update $settings; left unchanged" >&2
         exit 0
     fi
-    rm -f "$tmp"
+    # Atomic replacement requires the resolved target directory to be writable.
+    # Hard links, ownership/group, ACLs and xattrs are intentionally not
+    # retained; a target in a read-only dotfile store is left unchanged above.
     echo "Cursor Agent hooks removed"
 
 # Remove OpenCode session-tracker plugin
