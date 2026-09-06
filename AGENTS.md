@@ -150,8 +150,9 @@ process args as a reliable fallback.
 - Claude's last-resort transcript lookup mirrors Claude Code's project-key
   function: replace each non-ASCII-alphanumeric JavaScript UTF-16 code unit
   with `-`; if the result exceeds 200 characters, keep the first 200 and append
-  the absolute signed 32-bit string hash in base36. It considers only non-empty,
-  regular UUID-named JSONL files immediately under that project directory. IDs
+  `-` followed by the absolute signed 32-bit string hash in base36. It considers
+  only non-empty, regular UUID-named JSONL files immediately under that project
+  directory. IDs
   reserved by any candidate's PID-specific state/argv and IDs already emitted
   for another pane are excluded. Older transcripts remain eligible so an idle
   resumed session can still be recovered. The lookup is cwd-scoped rather than
@@ -172,6 +173,25 @@ process args as a reliable fallback.
   against the hook's cwd. If a restriction cannot be reproduced exactly, all
   Copilot replay flags are dropped and restore uses a bare resume; keeping any
   remaining grant or MCP-enablement flag could silently widen permissions.
+- Claude has the same flattened-argv problem with the opposite constraint: it
+  **does** accept a positional prompt, so `--model opus my prompt` is genuinely
+  ambiguous once `ps` has joined it, and Copilot's "a bare run must be a lost
+  value" rule cannot be transplanted. `_claude_args_from_exact_argv()` therefore
+  reads `_exact_argv()` (the same `/proc/<pid>/cmdline` reader Copilot uses,
+  generalised over the tool name) and settles both questions exactly: an option
+  whose value contains whitespace is unrepresentable in a whitespace-joined
+  `cli_args` and is dropped, and the first genuine positional is truncated
+  without taking a following option with it. `_exact_argv()` must keep its
+  internal stream NUL-delimited: newline is legal inside one argv element, and
+  translating both boundaries to newline can fabricate a flag such as
+  `--dangerously-skip-permissions`. If a Claude restriction (`--disallowedTools`,
+  `--tools`, `--setting-sources`, `--settings`, or `--permission-mode`) cannot
+  be represented, drop every replay flag so a surviving grant cannot silently
+  widen permissions. Claude's variadic options must keep consuming exact argv
+  elements until the next flag; otherwise only the first denied tool survives.
+  Optional-value options must leave a following flag for the next iteration.
+  macOS keeps the flattened path, where a `*-file` value is still cut at its
+  first space.
 - `--attachment` is stripped unconditionally for Copilot: restore always resumes
   interactively and Copilot refuses it there ("only supported in non-interactive
   prompt mode"). The `--prompt`/`--interactive` truncation only reaches flags
@@ -278,6 +298,7 @@ changes after an upgrade, check the relevant source to confirm.
 | **Claude transcript project keys use ASCII replacement plus a 200-character hash cap** | The cwd-scoped last-resort resolver must name the same `~/.claude/projects/<key>` directory for underscores, Unicode, astral characters, and long paths. | Claude Code source: `L1o()` / `GV()` project-key helpers; inspect a transcript directory created from an edge-case cwd |
 | **Copilot writes `<session-state>/<uuid>/inuse.<pid>.lock`** | Primary PID-to-session mapping for bare launches and in-process `/resume`; avoids same-cwd ambiguity and stale npm-loader argv. Undocumented upstream, hence the contract test | `test/copilot-contract-test.sh` asserts it against the real binary; manually, `ls ~/.copilot/session-state/*/inuse.*.lock` while Copilot runs |
 | **Claude hook spawns intermediate `sh -c`** | `$PPID` in the hook is NOT Claude's PID; hooks walk the process tree via `find_claude_pid()` (max 5 levels) | Run `ps -eo pid=,ppid=,args=` while a hook is executing |
+| **Claude hides `--system-prompt-file` and `--append-system-prompt-file` from `--help`** | Both are accepted, but neither appears in the option list -- they are named only in the prose of `--setting-sources`. `_discover_option_value_flags()` therefore cannot see them, and only `OPTION_VALUE_FLAGS_FALLBACK_claude` pins them as value-taking. Read as booleans, the path becomes the first positional and `_drop_positional_args()` discards it along with the whole tail; restore then replays a bare flag and claude consumes the next one as its filename. If a future release documents them, discovery covers it and the fallback entries become redundant rather than wrong | `claude --help \| grep -- '--system-prompt-file'` -- currently no match in the option list; `test/save-hardening-unit-tests.sh` pins the resulting behaviour |
 | **OpenCode plugins run in-process** | `process.pid` in the plugin IS the opencode binary's PID; state file is keyed by this PID | OpenCode source: search for `await import(` in the plugin loader (approx. `packages/opencode/src/plugin/index.ts` -- path may move) |
 | **OpenCode Go binary overwrites process title** | `-s <id>` is NOT visible in `ps`; plugin state file or SQLite DB are the reliable sources | Run `ps -eo args=` on a running `opencode -s <id>` process |
 | **OpenCode SQLite DB** at `~/.local/share/opencode/opencode.db` | Fallback session ID extraction when plugin state file and args are unavailable; matches by cwd + most recent `time_updated` | Check DB schema: `sqlite3 ~/.local/share/opencode/opencode.db ".schema session"` |

@@ -384,6 +384,142 @@ assert_eq "a real secret flag alongside it is still stripped" \
 	"--secret-env-vars TOKEN --model gpt-4" \
 	"$(extract_cli_args copilot "copilot --secret-env-vars TOKEN --api-key sk-xxx --model gpt-4")"
 
+echo "== claude system-prompt file options keep their path =="
+# Help prose can mention a scalar option before a variadic one on the same
+# line. Only the option whose own metavar ends in `...` may be classified as
+# variadic; otherwise a scalar such as --model can consume a trailing prompt.
+assert_eq "Claude variadic discovery does not sweep in other flags on the line" \
+	"--disallowedTools --tools" \
+	"$(
+		_CLAUDE_VARIADIC_FLAGS=""
+		export SESSION_VARIADIC_FALLBACK_claude="--disallowedTools"
+		_tool_help() { printf '  --model <model>, --tools <tools...>\n'; }
+		_claude_variadic_flags
+	)"
+# --system-prompt-file and --append-system-prompt-file are accepted by claude
+# but missing from the option list in `claude --help`, so discovery cannot see
+# them and only the static fallback pins them as value-taking. Read as
+# booleans, their path becomes the first positional and the filter drops it
+# together with the whole tail -- restore then replays a bare
+# --append-system-prompt-file and claude eats the next flag as its filename.
+# These assertions hold whether or not a claude binary is on PATH: the
+# fallback is a superset of what --help exposes.
+assert_eq "--append-system-prompt-file keeps its path" \
+	"--append-system-prompt-file /tmp/sp.md" \
+	"$(extract_cli_args claude "claude --append-system-prompt-file /tmp/sp.md")"
+assert_eq "--system-prompt-file keeps its path and the flags after it" \
+	"--system-prompt-file /tmp/sp.md --model m" \
+	"$(extract_cli_args claude "claude --system-prompt-file /tmp/sp.md --model m")"
+# The tail-drop is what makes this more than a cosmetic loss: a mis-read flag
+# takes every later option with it, so pin a following flag's survival too.
+assert_eq "a flag after the file path is not swallowed with it" \
+	"--append-system-prompt-file /tmp/sp.md --model m" \
+	"$(extract_cli_args claude "claude --append-system-prompt-file /tmp/sp.md --model m")"
+# A genuine positional must still take the tail with it, fix or no fix.
+assert_eq "a prompt positional still discards the rest" \
+	"--append-system-prompt-file /tmp/sp.md" \
+	"$(extract_cli_args claude "claude --append-system-prompt-file /tmp/sp.md hi --model m")"
+
+# A path with a space in it survives ps as several bare tokens, so the flattened
+# form above keeps only the fragment before the space. Claude then exits with
+# "Append system prompt file not found: <fragment>" and the pane never resumes.
+# /proc keeps the boundary, so on Linux/WSL the option is recognised as
+# unrepresentable in a whitespace-joined cli_args and dropped instead -- losing
+# the extra system prompt, not the session. Claude also takes a positional
+# prompt, so exact argv is the only thing that can tell that case apart from a
+# split value; both are asserted here against the same binary.
+if [ -r "/proc/$$/cmdline" ]; then
+	echo "== claude exact argv (/proc/<pid>/cmdline) =="
+	# Mirror the real launcher shape: argv[0] is the interpreter and argv[1] a
+	# script path ending in /claude, as the node loader appears.
+	mkdir -p "$SANDBOX/launcher" "$SANDBOX/My Prompts"
+	printf '#!/usr/bin/env bash\nsleep 45\n' >"$SANDBOX/launcher/claude"
+	chmod +x "$SANDBOX/launcher/claude"
+	: >"$SANDBOX/My Prompts/sp.md"
+	: >"$SANDBOX/sp.md"
+	# stdout is redirected: the harness captures this suite in a command
+	# substitution, which would otherwise wait on a background job holding the
+	# pipe open.
+	bash "$SANDBOX/launcher/claude" --append-system-prompt-file \
+		"$SANDBOX/My Prompts/sp.md" --model opus >/dev/null 2>&1 &
+	SPACED_PID=$!
+	bash "$SANDBOX/launcher/claude" --append-system-prompt-file \
+		"$SANDBOX/sp.md" write me a haiku --model opus >/dev/null 2>&1 &
+	PROMPTED_PID=$!
+	# A newline is legal inside one argv element. The exact-argv reader must not
+	# turn it into a new argument: the second line can itself look like a
+	# permission-widening flag even though it is still part of the file path.
+	NEWLINE_PATH="$SANDBOX/sp.md"$'\n''--dangerously-skip-permissions'
+	bash "$SANDBOX/launcher/claude" --append-system-prompt-file \
+		"$NEWLINE_PATH" --model opus >/dev/null 2>&1 &
+	NEWLINE_PID=$!
+	bash "$SANDBOX/launcher/claude" --disallowedTools 'Bash(rm -rf /)' \
+		--dangerously-skip-permissions --model opus >/dev/null 2>&1 &
+	RESTRICTED_PID=$!
+	bash "$SANDBOX/launcher/claude" --disallowedTools Bash Write \
+		--dangerously-skip-permissions --model opus >/dev/null 2>&1 &
+	VARIADIC_PID=$!
+	bash "$SANDBOX/launcher/claude" --append-system-prompt-file '' \
+		--model opus >/dev/null 2>&1 &
+	EMPTY_PID=$!
+	bash "$SANDBOX/launcher/claude" --debug --model opus >/dev/null 2>&1 &
+	OPTIONAL_PID=$!
+	bash "$SANDBOX/launcher/claude" --dangerously-skip-permissions \
+		'write a haiku' --permission-mode plan >/dev/null 2>&1 &
+	TAIL_RESTRICTED_PID=$!
+	sleep 1
+	# ps flattens both to the same shape; only cmdline tells them apart.
+	assert_eq "a space-bearing path drops its option and keeps the tail" \
+		"--model opus" \
+		"$(extract_cli_args claude \
+			"claude --append-system-prompt-file $SANDBOX/My Prompts/sp.md --model opus" \
+			"$SPACED_PID")"
+	assert_eq "a real prompt after a valid path keeps the path, drops the tail" \
+		"--append-system-prompt-file $SANDBOX/sp.md" \
+		"$(extract_cli_args claude \
+			"claude --append-system-prompt-file $SANDBOX/sp.md write me a haiku --model opus" \
+			"$PROMPTED_PID")"
+	assert_eq "a newline inside one value cannot become an injected flag" \
+		"--model opus" \
+		"$(extract_cli_args claude \
+			"claude --append-system-prompt-file $SANDBOX/sp.md --dangerously-skip-permissions --model opus" \
+			"$NEWLINE_PID")"
+	assert_eq "losing a deny list drops permission-widening replay args" \
+		"" \
+		"$(extract_cli_args claude \
+			"claude --disallowedTools Bash(rm -rf /) --dangerously-skip-permissions --model opus" \
+			"$RESTRICTED_PID")"
+	case " $(_claude_variadic_flags) " in
+	*' --disallowedTools '*) assert_eq "Claude discovers variadic deny lists" yes yes ;;
+	*) assert_eq "Claude discovers variadic deny lists" yes no ;;
+	esac
+	assert_eq "a variadic deny list preserves every exact value" \
+		"--disallowedTools Bash Write --dangerously-skip-permissions --model opus" \
+		"$(extract_cli_args claude \
+			"claude --disallowedTools Bash Write --dangerously-skip-permissions --model opus" \
+			"$VARIADIC_PID")"
+	assert_eq "an empty value drops its option and keeps the tail" \
+		"--model opus" \
+		"$(extract_cli_args claude \
+			"claude --append-system-prompt-file --model opus" \
+			"$EMPTY_PID")"
+	assert_eq "an optional value cannot consume the following flag" \
+		"--debug --model opus" \
+		"$(extract_cli_args claude \
+			"claude --debug --model opus" \
+			"$OPTIONAL_PID")"
+	assert_eq "a restriction after a positional drops widening replay args" \
+		"" \
+		"$(extract_cli_args claude \
+			"claude --dangerously-skip-permissions write a haiku --permission-mode plan" \
+			"$TAIL_RESTRICTED_PID")"
+	kill "$SPACED_PID" "$PROMPTED_PID" "$NEWLINE_PID" \
+		"$RESTRICTED_PID" "$VARIADIC_PID" "$EMPTY_PID" "$OPTIONAL_PID" \
+		"$TAIL_RESTRICTED_PID" 2>/dev/null
+else
+	printf '  [skip] claude exact argv from /proc (not available on this platform)\n'
+fi
+
 echo "== session-less relaunch diagnostics =="
 # A pane launched with an inline key is precisely the case that reaches the
 # session-less path, and relaunch_shape_ok() rejects it -- so the rejection
