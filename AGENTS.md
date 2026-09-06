@@ -150,8 +150,9 @@ process args as a reliable fallback.
 - Claude's last-resort transcript lookup mirrors Claude Code's project-key
   function: replace each non-ASCII-alphanumeric JavaScript UTF-16 code unit
   with `-`; if the result exceeds 200 characters, keep the first 200 and append
-  the absolute signed 32-bit string hash in base36. It considers only non-empty,
-  regular UUID-named JSONL files immediately under that project directory. IDs
+  `-` followed by the absolute signed 32-bit string hash in base36. It considers
+  only non-empty, regular UUID-named JSONL files immediately under that project
+  directory. IDs
   reserved by any candidate's PID-specific state/argv and IDs already emitted
   for another pane are excluded. Older transcripts remain eligible so an idle
   resumed session can still be recovered. The lookup is cwd-scoped rather than
