@@ -3,9 +3,9 @@
 ## Project overview
 
 tmux-assistant-resurrect persists AI coding assistant sessions (Claude Code,
-GitHub Copilot CLI, OpenCode, Codex CLI, Pi, Oh My Pi, Grok) across tmux
-restarts. It hooks into
-tmux-resurrect to save session IDs and restore them automatically.
+Cursor Agent CLI, GitHub Copilot CLI, OpenCode, Codex CLI, Pi, Oh My Pi, Grok)
+across tmux restarts. It hooks into tmux-resurrect to save session IDs and
+restore them automatically.
 
 ## Architecture
 
@@ -22,8 +22,8 @@ tmux-resurrect to save session IDs and restore them automatically.
 ## Design constraints
 
 - **No wrapper scripts**: Do not create wrapper functions/aliases around
-  `claude`, `copilot`, `opencode`, `codex`, or `pi`. Use native runtime state or
-  hook/plugin systems instead.
+  `claude`, `agent`/`cursor-agent`, `copilot`, `opencode`, `codex`, or `pi`. Use
+  native runtime state or hook/plugin systems instead.
 - **Restore hook is the sole launcher**: Assistants must NOT be listed in
   `@resurrect-processes`. The post-restore hook handles all resuming with correct
   session IDs. Adding them to `@resurrect-processes` causes double-launch, and
@@ -263,6 +263,8 @@ changes after an upgrade, check the relevant source to confirm.
 | Assumption | Why it matters | Where to verify |
 |-----------|---------------|----------------|
 | **Claude sets `process.title = 'claude'`** | Node.js sets the process title, but on macOS arm64 (v2.1.44) `ps -eo args=` still shows full args (e.g., `claude --dangerously-skip-permissions`). The save script's `extract_cli_args()` relies on this. If a future version hides args, `cli_args` will be empty and restore falls back to bare `<binary> <resume_arg>`. | Run `ps -eo args=` on a running Claude process; Claude Code source: search for `process.title` |
+| **Cursor `sessionStart` includes a stable `session_id`** | The Cursor hook maps the exact conversation to the owning `agent` / `cursor-agent` PID; `--resume <id>` restores it. The same user hook also fires in Cursor Desktop, so the ancestry check must reject non-CLI processes. | Cursor Hooks and CLI parameter docs; run a CLI session and inspect `cursor-<pid>.json` |
+| **Cursor launchers expose `--use-system-ca <package>/index.js` before user argv** | These runtime-only tokens must be removed before `extract_cli_args()` drops positional prompts, otherwise all real user options after `index.js` are lost. | Run `ps -eo args=` on the current `agent` and `cursor-agent` installer symlinks |
 | **Copilot writes `<session-state>/<uuid>/inuse.<pid>.lock`** | Primary PID-to-session mapping for bare launches and in-process `/resume`; avoids same-cwd ambiguity and stale npm-loader argv. Undocumented upstream, hence the contract test | `test/copilot-contract-test.sh` asserts it against the real binary; manually, `ls ~/.copilot/session-state/*/inuse.*.lock` while Copilot runs |
 | **Claude hook spawns intermediate `sh -c`** | `$PPID` in the hook is NOT Claude's PID; hooks walk the process tree via `find_claude_pid()` (max 5 levels) | Run `ps -eo pid=,ppid=,args=` while a hook is executing |
 | **OpenCode plugins run in-process** | `process.pid` in the plugin IS the opencode binary's PID; state file is keyed by this PID | OpenCode source: search for `await import(` in the plugin loader (approx. `packages/opencode/src/plugin/index.ts` -- path may move) |

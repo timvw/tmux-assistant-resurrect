@@ -143,6 +143,7 @@ while read -r entry; do
 		and optional_string("cli_args")
 		and optional_string("model")
 		and optional_string("copilot_home")
+		and optional_string("cursor_binary")
 		and optional_string("session_name")
 		and optional_string("window_index")
 		and optional_string("pane_index")
@@ -168,6 +169,7 @@ while read -r entry; do
 	model=$(printf '%s\n' "$entry" | jq -r '.model // empty')
 	env_json=$(printf '%s\n' "$entry" | jq -c '.env // {}')
 	copilot_home=$(printf '%s\n' "$entry" | jq -r '.copilot_home // empty')
+	cursor_binary=$(printf '%s\n' "$entry" | jq -r '.cursor_binary // empty')
 
 	if [ "$kind" = "session" ]; then
 		if [ -z "$session_id" ] || [ "${#session_id}" -gt 256 ] ||
@@ -371,6 +373,19 @@ while read -r entry; do
 			resume_cmd="command claude${safe_cli_args}${safe_model_arg} --resume ${safe_sid}"
 		else
 			resume_cmd="command claude --resume ${safe_sid}"
+		fi
+		;;
+	cursor)
+		# Replay the executable actually observed at save time. Older sidecars
+		# predate this field and use Cursor's compatibility executable name.
+		case "$cursor_binary" in
+		agent) cursor_cmd="agent" ;;
+		*) cursor_cmd="cursor-agent" ;;
+		esac
+		if [ -n "$safe_cli_args" ]; then
+			resume_cmd="command ${cursor_cmd}${safe_cli_args} --resume ${safe_sid}"
+		else
+			resume_cmd="command ${cursor_cmd} --resume ${safe_sid}"
 		fi
 		;;
 	copilot)

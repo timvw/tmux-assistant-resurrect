@@ -378,6 +378,22 @@ else
 	fail "Copilot focused unit suite"
 fi
 
+# --- Focused Cursor Agent CLI unit suite ---
+
+suite "cursor_unit"
+echo ""
+echo "=== Focused Cursor Agent CLI hook/session tests ==="
+echo ""
+
+cursor_unit_output=""
+if cursor_unit_output=$("${TEST_BASH:-bash}" "$REPO_DIR/test/cursor-unit-tests.sh" 2>&1); then
+	echo "$cursor_unit_output"
+	pass "Cursor focused unit suite"
+else
+	echo "$cursor_unit_output"
+	fail "Cursor focused unit suite"
+fi
+
 # --- Session-less relaunch voucher unit suite ---
 
 suite "relaunch_unit"

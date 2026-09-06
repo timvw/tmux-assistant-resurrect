@@ -73,6 +73,65 @@ else
 fi
 assert_file_mode "new Claude settings are private" 600 "$INSTALL_HOME/.claude/settings.json"
 
+cursor_track_cmd=$(jq -r '.hooks.sessionStart[0].command' "$INSTALL_HOME/.cursor/hooks.json")
+cursor_cleanup_cmd=$(jq -r '.hooks.sessionEnd[0].command' "$INSTALL_HOME/.cursor/hooks.json")
+if "$UNDER_TEST" -n -c "$cursor_track_cmd" && "$UNDER_TEST" -n -c "$cursor_cleanup_cmd"; then
+    pass "quoted checkout path produces valid Cursor hook commands"
+else
+    fail "quoted checkout path produces valid Cursor hook commands"
+fi
+assert_file_mode "new Cursor hooks config is private" 600 "$INSTALL_HOME/.cursor/hooks.json"
+
+# Cursor documents its global hook file at ~/.cursor/hooks.json. A desktop's
+# unrelated XDG_CONFIG_HOME must not redirect the integration to an unread path.
+XDG_HOME="$TEST_ROOT/xdg"
+XDG_CONFIG_HOME="$XDG_HOME" HOME="$INSTALL_HOME" PATH="$FAKE_BIN:$PATH" \
+    "$UNDER_TEST" "$QUOTED_PLUGIN/tmux-assistant-resurrect.tmux"
+if [ -f "$INSTALL_HOME/.cursor/hooks.json" ] && [ ! -e "$XDG_HOME/cursor/hooks.json" ]; then
+    pass "Cursor hook install ignores unrelated XDG_CONFIG_HOME"
+else
+    fail "Cursor hook install ignores unrelated XDG_CONFIG_HOME"
+fi
+
+# Re-running the entrypoint must not duplicate either hook.
+HOME="$INSTALL_HOME" PATH="$FAKE_BIN:$PATH" \
+    "$UNDER_TEST" "$QUOTED_PLUGIN/tmux-assistant-resurrect.tmux"
+assert_eq "Cursor SessionStart installation is idempotent" 1 \
+    "$(jq '[.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))] | length' "$INSTALL_HOME/.cursor/hooks.json")"
+assert_eq "Cursor SessionEnd installation is idempotent" 1 \
+    "$(jq '[.hooks.sessionEnd[]? | select((.command // "") | contains("cursor-session-cleanup"))] | length' "$INSTALL_HOME/.cursor/hooks.json")"
+
+# Dotfile managers commonly symlink hooks.json. Updating Cursor hooks must
+# preserve that file identity instead of replacing the link with a regular file.
+SYMLINK_CURSOR_HOME="$TEST_ROOT/symlink-cursor-home"
+SYMLINK_CURSOR_TARGET="$TEST_ROOT/cursor-hooks-target.json"
+mkdir -p "$SYMLINK_CURSOR_HOME/.cursor"
+printf '{"version":1,"hooks":{"sessionStart":[]}}\n' > "$SYMLINK_CURSOR_TARGET"
+ln -s "$SYMLINK_CURSOR_TARGET" "$SYMLINK_CURSOR_HOME/.cursor/hooks.json"
+HOME="$SYMLINK_CURSOR_HOME" PATH="$FAKE_BIN:$PATH" \
+    "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux"
+if [ -L "$SYMLINK_CURSOR_HOME/.cursor/hooks.json" ] && \
+   jq -e '.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))' \
+       "$SYMLINK_CURSOR_TARGET" >/dev/null; then
+    pass "Cursor hook update preserves a symlinked hooks.json"
+else
+    fail "Cursor hook update preserves a symlinked hooks.json"
+fi
+
+# A malformed user file must be preserved and must not make the aggregate
+# uninstall stop before the remaining integrations are cleaned up.
+MALFORMED_CURSOR_HOME="$TEST_ROOT/malformed-cursor-home"
+mkdir -p "$MALFORMED_CURSOR_HOME/.cursor"
+printf '{not-json\n' > "$MALFORMED_CURSOR_HOME/.cursor/hooks.json"
+if ! command -v just >/dev/null 2>&1; then
+    pass "Cursor malformed-config uninstall test skipped (just unavailable)"
+elif HOME="$MALFORMED_CURSOR_HOME" just --justfile "$ROOT_DIR/justfile" uninstall-cursor-hook >/dev/null 2>&1 && \
+     [ "$(sed -n '1p' "$MALFORMED_CURSOR_HOME/.cursor/hooks.json")" = '{not-json' ]; then
+    pass "Cursor uninstall preserves malformed hooks.json and stays non-fatal"
+else
+    fail "Cursor uninstall preserves malformed hooks.json and stays non-fatal"
+fi
+
 save_cmd=$(sed -n 's/^set-option -g @resurrect-hook-post-save-all //p' "$TMUX_CALLS")
 if "$UNDER_TEST" -n -c "$save_cmd"; then
     pass "quoted checkout path produces a valid tmux save hook"
@@ -95,6 +154,11 @@ if [ ! -e "$NO_JQ_HOME/.claude/settings.json" ]; then
     pass "missing jq does not create an unusable Claude settings file"
 else
     fail "missing jq does not create an unusable Claude settings file"
+fi
+if [ ! -e "$NO_JQ_HOME/.cursor/hooks.json" ]; then
+    pass "missing jq does not create an unusable Cursor hooks file"
+else
+    fail "missing jq does not create an unusable Cursor hooks file"
 fi
 
 # A colliding regular plugin file is user data and must not be overwritten.

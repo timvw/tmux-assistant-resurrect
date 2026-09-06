@@ -44,8 +44,9 @@ install-plugins:
         echo "TPM not found — run 'just install-tpm' first, then press prefix+I in tmux"; \
     fi
 
-# Install assistant integrations (Claude hook + OpenCode plugin; Pi/Oh My Pi need no hook)
-install-hooks: install-claude-hook install-opencode-plugin
+# Install assistant integrations (Claude/Cursor hooks + OpenCode plugin;
+# Pi/Oh My Pi need no hook)
+install-hooks: install-claude-hook install-cursor-hook install-opencode-plugin
     @echo "All assistant hooks installed"
 
 # Install Claude Code hooks and OpenCode plugin via the TPM entry point.
@@ -66,6 +67,10 @@ install-claude-hook:
 # Install OpenCode session-tracker plugin (delegates to .tmux entry point above)
 install-opencode-plugin:
     @echo "OpenCode plugin installed via install-claude-hook (shared entry point)"
+
+# Cursor hooks are installed by the same shared TPM entry point.
+install-cursor-hook: install-claude-hook
+    @echo "Cursor Agent hooks installed via install-claude-hook (shared entry point)"
 
 # Add resurrect config to ~/.tmux.conf
 configure-tmux:
@@ -142,7 +147,7 @@ configure-tmux:
     fi
 
 # Remove all installed hooks and config
-uninstall: uninstall-claude-hook uninstall-opencode-plugin unconfigure-tmux
+uninstall: uninstall-claude-hook uninstall-cursor-hook uninstall-opencode-plugin unconfigure-tmux
     @echo ""
     @echo "Uninstalled. You may also want to:"
     @echo "  - Remove TPM: rm -rf ~/.tmux/plugins/"
@@ -187,6 +192,42 @@ uninstall-claude-hook:
     ' "$settings" > "$tmp" && mv "$tmp" "$settings"
 
     echo "Claude hooks removed"
+
+# Remove Cursor Agent CLI hooks without disturbing user-owned hooks.
+uninstall-cursor-hook:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    settings="$HOME/.cursor/hooks.json"
+    if [ ! -f "$settings" ]; then
+        echo "No Cursor hooks to modify"
+        exit 0
+    fi
+    tmp=$(mktemp "${settings}.tmp.XXXXXX") || {
+        echo "tmux-assistant-resurrect: cannot prepare update for $settings" >&2
+        exit 0
+    }
+    if ! jq '
+        if .hooks.sessionStart then
+            .hooks.sessionStart |= map(select((.command // "") | contains("cursor-session-track") | not)) |
+            if .hooks.sessionStart | length == 0 then del(.hooks.sessionStart) else . end
+        else . end |
+        if .hooks.sessionEnd then
+            .hooks.sessionEnd |= map(select((.command // "") | contains("cursor-session-cleanup") | not)) |
+            if .hooks.sessionEnd | length == 0 then del(.hooks.sessionEnd) else . end
+        else . end |
+        if .hooks and (.hooks | length == 0) then del(.hooks) else . end
+    ' "$settings" > "$tmp"; then
+        rm -f "$tmp"
+        echo "tmux-assistant-resurrect: $settings is not valid JSON; left unchanged" >&2
+        exit 0
+    fi
+    if ! cat "$tmp" > "$settings"; then
+        rm -f "$tmp"
+        echo "tmux-assistant-resurrect: cannot update $settings; left unchanged" >&2
+        exit 0
+    fi
+    rm -f "$tmp"
+    echo "Cursor Agent hooks removed"
 
 # Remove OpenCode session-tracker plugin
 uninstall-opencode-plugin:
@@ -276,6 +317,19 @@ status:
         echo "[ok] Claude SessionEnd hook installed"
     else
         echo "[--] Claude SessionEnd hook not installed"
+    fi
+
+    # Cursor Agent hooks
+    cursor_hooks="$HOME/.cursor/hooks.json"
+    if jq -e '.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))' "$cursor_hooks" >/dev/null 2>&1; then
+        echo "[ok] Cursor SessionStart hook installed"
+    else
+        echo "[--] Cursor SessionStart hook not installed"
+    fi
+    if jq -e '.hooks.sessionEnd[]? | select((.command // "") | contains("cursor-session-cleanup"))' "$cursor_hooks" >/dev/null 2>&1; then
+        echo "[ok] Cursor SessionEnd hook installed"
+    else
+        echo "[--] Cursor SessionEnd hook not installed"
     fi
 
     # OpenCode plugin
@@ -484,6 +538,10 @@ test:
 # Run hermetic Grok unit tests (no Docker / no grok binary needed)
 test-grok:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/grok-unit-tests.sh"
+
+# Run hermetic Cursor Agent CLI tests (no binary or login required)
+test-cursor:
+    @"${TEST_BASH:-bash}" "{{repo_dir}}/test/cursor-unit-tests.sh"
 
 # Run hermetic saved-pane target resolution tests (no Docker / no tmux needed)
 test-targets:

@@ -6,10 +6,11 @@
 # 1. tmux-resurrect + tmux-continuum settings
 # 2. Post-save/restore hooks for assistant session tracking
 # 3. Claude Code hooks in ~/.claude/settings.json
-# 4. OpenCode session-tracker plugin in ~/.config/opencode/plugins/
-# 5. GitHub Copilot CLI support via its open session database (no hook required)
-# 6. Pi and Oh My Pi support via local session-file lookup (no hook required)
-# 7. Grok support via the ~/.grok/active_sessions.json registry (no hook required)
+# 4. Cursor Agent CLI hooks in ~/.cursor/hooks.json
+# 5. OpenCode session-tracker plugin in ~/.config/opencode/plugins/
+# 6. GitHub Copilot CLI support via its open session database (no hook required)
+# 7. Pi and Oh My Pi support via local session-file lookup (no hook required)
+# 8. Grok support via the ~/.grok/active_sessions.json registry (no hook required)
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -163,6 +164,59 @@ install_claude_hooks() {
     fi
 }
 
+# --- Cursor Agent CLI hooks ---
+
+install_cursor_hooks() {
+    local settings="$HOME/.cursor/hooks.json"
+    local hooks_dir track_cmd cleanup_cmd
+    hooks_dir="${CURRENT_DIR}/hooks"
+
+    command -v jq >/dev/null 2>&1 || return
+    track_cmd=$(hook_command "${hooks_dir}/cursor-session-track.sh")
+    cleanup_cmd=$(hook_command "${hooks_dir}/cursor-session-cleanup.sh")
+
+    if [ ! -f "$settings" ]; then
+        (umask 077 && mkdir -p "$(dirname "$settings")" && printf '{"version":1}\n' > "$settings") || {
+            echo "tmux-assistant-resurrect: cannot create $settings" >&2
+            return
+        }
+    fi
+
+    local has_current_track has_stale_track has_current_cleanup has_stale_cleanup
+    has_current_track=$(jq --arg cmd "$track_cmd" '[.hooks.sessionStart[]? | select((.command // "") == $cmd)] | length' "$settings" 2>/dev/null || echo 0)
+    has_stale_track=$(jq --arg cmd "$track_cmd" '[.hooks.sessionStart[]? | select(((.command // "") | contains("cursor-session-track")) and ((.command // "") != $cmd))] | length' "$settings" 2>/dev/null || echo 0)
+    has_current_cleanup=$(jq --arg cmd "$cleanup_cmd" '[.hooks.sessionEnd[]? | select((.command // "") == $cmd)] | length' "$settings" 2>/dev/null || echo 0)
+    has_stale_cleanup=$(jq --arg cmd "$cleanup_cmd" '[.hooks.sessionEnd[]? | select(((.command // "") | contains("cursor-session-cleanup")) and ((.command // "") != $cmd))] | length' "$settings" 2>/dev/null || echo 0)
+
+    if [ "$has_current_track" = "0" ] || [ "$has_stale_track" != "0" ] || \
+       [ "$has_current_cleanup" = "0" ] || [ "$has_stale_cleanup" != "0" ]; then
+        local tmp
+        tmp=$(mktemp "${settings}.tmp.XXXXXX") || return
+        if jq --arg track "$track_cmd" --arg cleanup "$cleanup_cmd" '
+            .version //= 1 |
+            .hooks //= {} |
+            .hooks.sessionStart //= [] |
+            .hooks.sessionEnd //= [] |
+            .hooks.sessionStart |= map(select((.command // "") | contains("cursor-session-track") | not)) |
+            .hooks.sessionEnd |= map(select((.command // "") | contains("cursor-session-cleanup") | not)) |
+            .hooks.sessionStart += [{"command": $track}] |
+            .hooks.sessionEnd += [{"command": $cleanup}]
+        ' "$settings" > "$tmp"; then
+            # Preserve an existing symlink/inode and its user-chosen mode.
+            if ! cat "$tmp" > "$settings"; then
+                rm -f "$tmp"
+                echo "tmux-assistant-resurrect: cannot update $settings" >&2
+                return
+            fi
+            rm -f "$tmp"
+        else
+            rm -f "$tmp"
+            echo "tmux-assistant-resurrect: $settings is not valid Cursor hooks JSON" >&2
+            return
+        fi
+    fi
+}
+
 # --- OpenCode plugin ---
 
 install_opencode_plugin() {
@@ -190,4 +244,5 @@ install_opencode_plugin() {
 # --- Run assistant hook installation ---
 
 install_claude_hooks
+install_cursor_hooks
 install_opencode_plugin

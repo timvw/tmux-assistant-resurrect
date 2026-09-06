@@ -4,7 +4,8 @@
 > through conversation with AI coding assistants). It has been end-to-end tested
 > in Docker with real CLI binaries (Claude/Copilot/OpenCode/Codex/Pi/Oh My Pi)
 > (400+ automated tests + full save/kill/restore lifecycle smoke test).
-> Grok is supported with hermetic unit tests but has no Docker integration test.
+> Cursor and Grok are supported with hermetic unit tests but have no
+> authenticated Docker integration test.
 > **Limited real-world usage** so far — expect
 > rough edges. Contributions and bug reports welcome.
 
@@ -14,6 +15,7 @@ Persist and restore AI coding assistant sessions across tmux restarts and reboot
 
 When your computer shuts down, tmux sessions are lost -- including any running
 [Claude Code](https://github.com/anthropics/claude-code),
+[Cursor Agent CLI](https://cursor.com/docs/cli/overview),
 [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli),
 [OpenCode](https://github.com/opencode-ai/opencode),
 [Codex CLI](https://github.com/openai/codex),
@@ -31,7 +33,7 @@ then re-launch them with the exact same configuration after a restore.
 SAVE (every 5 min + manual prefix+Ctrl-s)
   tmux-resurrect saves pane layouts
     -> post-save hook inspects child processes of each pane
-    -> detects assistants by binary name (claude, copilot, opencode, codex, pi, omp, grok)
+    -> detects assistants by binary name (claude, agent/cursor-agent, copilot, opencode, codex, pi, omp, grok)
     -> extracts session IDs via native hooks/plugins/process args
     -> writes assistant-sessions.json in tmux-resurrect's save dir
 
@@ -41,6 +43,7 @@ RESTORE (on tmux start or manual prefix+Ctrl-r)
     -> reconstructs full CLI invocation with saved flags + env vars
     -> sends resume commands to each pane, e.g.:
          ANTHROPIC_BASE_URL='...' claude --dangerously-skip-permissions --resume <id>
+         agent --mode plan --resume <session-id>
          copilot --allow-all --resume=<id>
          opencode --verbose -s <session-id>
          codex --full-auto resume <session-id>
@@ -53,14 +56,15 @@ RESTORE (on tmux start or manual prefix+Ctrl-r)
 
 Detection is done via direct process inspection: the save script takes a
 single `ps` snapshot of all processes, finds children of each tmux pane shell,
-and matches known assistant binary names (`claude`, `copilot`, `opencode`,
-`codex`, `pi`, `omp`, `grok`).
+and matches known assistant binary names (`claude`, `agent`/`cursor-agent`,
+`copilot`, `opencode`, `codex`, `pi`, `omp`, `grok`).
 
 Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 
 | Tool | Primary method | Fallback 1 | Fallback 2 | Notes |
 |------|---------------|------------|------------|-------|
 | **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` / `--session-id` in process args | - | Claude overwrites its process title, so args fallback only works if args are visible |
+| **Cursor Agent CLI** | `sessionStart` hook state file (keyed by Cursor PID) | `--resume` in process args | - | Supports both the current `agent` and compatibility `cursor-agent` executable names; desktop Cursor hook events are ignored |
 | **GitHub Copilot CLI** | `$COPILOT_HOME/session-state/<uuid>/inuse.<pid>.lock` written by the live session | `--session-id` / `--resume` in process args | - | Plain glob keyed on the native PID — no `/proc`, no `lsof`, so it behaves identically on Linux, WSL and macOS |
 | **OpenCode** | `-s` / `--session` in process args | Plugin state file | SQLite DB query (`~/.local/share/opencode/opencode.db`) | Go binary overwrites process title; DB fallback matches most recent session by cwd |
 | **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | SQLite `~/.codex/state_*.sqlite` `threads` table (Codex >= 0.118); rollout JSONL `~/.codex/sessions/` (Codex ~0.100-0.117) | Codex runs via Node.js, so args are always visible in `ps` |
@@ -78,8 +82,8 @@ version-resilient session ID extraction even when the plugin hasn't fired.
 - [tmux](https://github.com/tmux/tmux) (tested with 3.4 through 3.7)
 - [TPM](https://github.com/tmux-plugins/tpm) (Tmux Plugin Manager)
 - [jq](https://jqlang.github.io/jq/) (used by save/restore scripts)
-- At least one of: Claude Code, GitHub Copilot CLI, OpenCode, Codex CLI, Pi,
-  Oh My Pi, Grok
+- At least one of: Claude Code, Cursor Agent CLI, GitHub Copilot CLI, OpenCode,
+  Codex CLI, Pi, Oh My Pi, Grok
 
 ## Installation
 
@@ -111,6 +115,7 @@ and automatically set up:
 
 - tmux-resurrect + tmux-continuum settings
 - Claude Code hooks in `~/.claude/settings.json`
+- Cursor Agent CLI hooks in `~/.cursor/hooks.json`
 - Copilot support via its per-session `inuse.<pid>.lock` file (no hook/plugin required)
 - OpenCode session-tracker plugin in `~/.config/opencode/plugins/`
 - Pi support via session-file lookup in `~/.pi/agent/sessions` (no hook/plugin required)
@@ -123,8 +128,8 @@ and automatically set up:
 `~/.tmux.conf`, then press `prefix + alt + u` inside tmux.
 
 **`just install` users**: Run `just uninstall` from the plugin directory — this
-removes the Claude hooks, the OpenCode plugin symlink, and the managed block
-from `~/.tmux.conf`.
+removes the Claude and Cursor hooks, the OpenCode plugin symlink, and the managed
+block from `~/.tmux.conf`.
 
 ## Usage
 
@@ -158,6 +163,9 @@ hooks/
   lib-claude-pid.sh               # Shared helper: walks process tree to find Claude PID
   claude-session-track.sh         # Claude SessionStart hook (writes session ID)
   claude-session-cleanup.sh       # Claude SessionEnd hook (removes state file)
+  lib-cursor-pid.sh               # Finds a Cursor Agent CLI ancestor (not Cursor Desktop)
+  cursor-session-track.sh         # Cursor sessionStart hook (writes session ID)
+  cursor-session-cleanup.sh       # Cursor sessionEnd hook (removes state file)
   opencode-session-track.js       # OpenCode plugin (tracks session ID + cleanup)
 scripts/
   lib-detect.sh                   # Shared library (detect_tool, pane_has_assistant, posix_quote)
@@ -188,6 +196,7 @@ Fast hermetic suites cover the hardened save, restore, and installer paths:
 ```bash
 just test-save-hardening
 just test-restore
+just test-cursor
 just test-plugin-hardening
 ```
 
@@ -670,6 +679,23 @@ Two hooks configured in `~/.claude/settings.json`:
 primary source of session IDs, with process args as a fallback. CLI flags like
 `--dangerously-skip-permissions` are captured from `ps` by the save script's
 `extract_cli_args()` function.
+
+### Cursor Agent CLI hooks (`hooks/cursor-session-track.sh`, `hooks/cursor-session-cleanup.sh`)
+
+Cursor's user-level `sessionStart` hook provides a stable `session_id` (the
+conversation ID used by `--resume`). The tracking hook preserves the complete
+hook payload, captures configured environment variables, and writes
+`cursor-<PID>.json`. Its ancestry check accepts the current `agent` executable
+and the legacy-compatible `cursor-agent` name, but deliberately writes nothing
+for hook events coming from Cursor Desktop. `sessionEnd` removes the state file;
+the save hook also reaps crash leftovers.
+
+The installed Cursor launcher injects `--use-system-ca <package>/index.js` into
+its visible process argv. Those runtime-only arguments are removed before
+replay; user-facing options such as `--mode`, `--model`, `--sandbox`, and
+`--force` are retained, while session selectors, credentials, and an initial
+prompt are not replayed. Restore reuses whichever supported executable name was
+observed (`agent` or `cursor-agent`) and passes `--resume <session-id>`.
 
 ### OpenCode plugin (`hooks/opencode-session-track.js`)
 

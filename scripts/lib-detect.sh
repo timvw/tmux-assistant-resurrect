@@ -17,6 +17,9 @@
 # Match the executable token (or a script passed directly to a known runtime),
 # standalone or with arguments. Handles: /path/to/claude, claude,
 # node /path/to/copilot, bash /path/to/opencode, etc.
+# Cursor's current executable is named `agent`; the legacy `cursor-agent`
+# symlink remains part of Cursor's installer. Both map to the canonical tool
+# name `cursor` in the sidecar.
 # Excludes: opencode run ... (LSP subprocesses), omp __omp_worker_* subprocesses
 detect_tool() {
 	local args="$1"
@@ -32,7 +35,7 @@ detect_tool() {
 	# assistant match.
 	# shellcheck disable=SC2086 # deliberate tokenization of flattened ps argv
 	set -- $args
-	[ -n "$reglob" ] && set +f
+	if [ -n "$reglob" ]; then set +f; fi
 	[ "$#" -gt 0 ] || return 0
 
 	first="${1##*/}"
@@ -41,10 +44,27 @@ detect_tool() {
 		tool="$first"
 		shift
 		;;
+	cursor-agent)
+		tool="cursor"
+		shift
+		;;
+	agent)
+		# `agent` is too generic to accept by name alone. Cursor's current
+		# launcher exposes this stable runtime prefix in the process argv.
+		[ "${2:-}" = "--use-system-ca" ] || return 0
+		case "${3:-}" in */index.js) ;; *) return 0 ;; esac
+		tool="cursor"
+		shift
+		;;
 	node | nodejs | bun | deno | bash | sh | dash | ksh | zsh)
 		[ "$#" -gt 1 ] || return 0
 		case "${2##*/}" in
 		claude | copilot | opencode | codex | pi | omp | grok) tool="${2##*/}" ;;
+		cursor-agent) tool="cursor" ;;
+		agent)
+			[ "${3:-}" = "--use-system-ca" ] || return 0
+			case "${4:-}" in */index.js) tool="cursor" ;; *) return 0 ;; esac
+			;;
 		*) return 0 ;;
 		esac
 		shift 2

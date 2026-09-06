@@ -18,14 +18,22 @@ function detect_tool(line) {
 	if (first == "claude" || first == "copilot" || first == "opencode" ||
 	    first == "codex" || first == "pi" || first == "omp" || first == "grok") {
 		tool = first
+	} else if (first == "cursor-agent") {
+		tool = "cursor"
+	} else if (first == "agent" && word[2] == "--use-system-ca" && word[3] ~ /\/index\.js$/) {
+		tool = "cursor"
 	} else if (first == "node" || first == "nodejs" || first == "bun" ||
 	           first == "deno" || first == "bash" || first == "sh" ||
 	           first == "dash" || first == "ksh" || first == "zsh") {
 		if (n < 2) return ""
 		tool = word[2]
 		sub(/^.*\//, "", tool)
-		if (!(tool == "claude" || tool == "copilot" || tool == "opencode" ||
-		      tool == "codex" || tool == "pi" || tool == "omp" || tool == "grok")) return ""
+		if (tool == "cursor-agent") {
+			tool = "cursor"
+		} else if (tool == "agent" && word[3] == "--use-system-ca" && word[4] ~ /\/index\.js$/) {
+			tool = "cursor"
+		} else if (!(tool == "claude" || tool == "copilot" || tool == "opencode" ||
+		             tool == "codex" || tool == "pi" || tool == "omp" || tool == "grok")) return ""
 		tool_at = 2
 	} else {
 		return ""
