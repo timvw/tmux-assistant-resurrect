@@ -1582,7 +1582,13 @@ _copilot_args_from_exact_argv() {
 	local tok dropped_permission=0
 	while IFS= read -r -d '' tok; do
 		argv[${#argv[@]}]="$tok"
-	done < <(_exact_argv "$pid" copilot | replay_filter_exact_argv copilot)
+	done < <(
+		if replay_has_exclusions copilot flags; then
+			_exact_argv "$pid" copilot | replay_filter_exact_argv copilot
+		else
+			_exact_argv "$pid" copilot
+		fi
+	)
 	[ "${#argv[@]}" -gt 0 ] || return 1
 
 	local i last
@@ -1644,7 +1650,13 @@ _claude_args_from_exact_argv() {
 	local tok flag next dropped_restriction=0
 	while IFS= read -r -d '' tok; do
 		argv[${#argv[@]}]="$tok"
-	done < <(_exact_argv "$pid" claude | replay_filter_exact_argv claude)
+	done < <(
+		if replay_has_exclusions claude flags; then
+			_exact_argv "$pid" claude | replay_filter_exact_argv claude
+		else
+			_exact_argv "$pid" claude
+		fi
+	)
 	[ "${#argv[@]}" -gt 0 ] || return 1
 
 	local value_flags variadic_flags
@@ -2052,8 +2064,10 @@ _warm_cli_arg_helpers() {
 	local tool="$1"
 	replay_load_tool_policy "$tool"
 	_discover_option_value_flags "$tool" >/dev/null
-	_discover_replay_aliases "$tool" >/dev/null
-	_discover_replay_optional_flags "$tool" >/dev/null
+	if replay_has_exclusions "$tool" flags; then
+		_discover_replay_aliases "$tool" >/dev/null
+		_discover_replay_optional_flags "$tool" >/dev/null
+	fi
 	[ "$tool" = "claude" ] && _claude_variadic_flags >/dev/null
 	[ "$tool" = "copilot" ] && _copilot_variadic_flags >/dev/null
 	return 0
@@ -2280,7 +2294,9 @@ extract_cli_args() {
 	# `--model sonnet`; a boolean option followed by a prompt is not mistaken for
 	# a value because option arity comes from --help rather than adjacency.
 	args=$(_drop_positional_args "$tool" "$args")
-	args=$(replay_filter_cli_args "$tool" "$args")
+	if replay_has_exclusions "$tool" flags; then
+		args=$(replay_filter_cli_args "$tool" "$args")
+	fi
 
 	# Normalize whitespace: collapse multiple spaces, trim leading/trailing
 	echo "$args" | sed -E 's/  +/ /g; s/^ //; s/ $//'
@@ -2395,7 +2411,9 @@ resolve_pane_candidates() {
 					fi
 				fi
 				env_json=$(merge_process_env "$cand_pid" "$env_json")
-				env_json=$(replay_filter_env "$cand_tool" "$env_json")
+				if replay_has_exclusions "$cand_tool" env; then
+					env_json=$(replay_filter_env "$cand_tool" "$env_json")
+				fi
 
 				# Fallback: parse --model from CLI args if not in state file.
 				# Regex stored in variable for bash 3.2 compat (inline capture groups fail).
@@ -2902,7 +2920,9 @@ emit_session() {
 			env_json=$(jq '.env // null' "$state_file" 2>/dev/null || echo "null")
 		fi
 		env_json=$(merge_process_env "$cpid" "$env_json")
-		env_json=$(replay_filter_env "$tool" "$env_json")
+		if replay_has_exclusions "$tool" env; then
+			env_json=$(replay_filter_env "$tool" "$env_json")
+		fi
 
 		# Fallback: parse --model from CLI args if not in state file
 		if [ -z "$model" ]; then

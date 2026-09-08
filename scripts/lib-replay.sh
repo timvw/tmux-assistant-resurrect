@@ -15,6 +15,18 @@ replay_load_tool_policy() {
 	printf -v "$loaded" '%s' 1
 }
 
+# Keep the default save path free of filter subprocesses. Read the cached
+# per-tool option directly; callers can still change global options in tests.
+replay_has_exclusions() {
+	local tool="$1" kind="$2" specific
+	replay_load_tool_policy "$tool"
+	case "$kind" in
+	flags) specific="_REPLAY_DROP_FLAGS_$tool"; [ -n "${DROP_FLAGS:-}${!specific:-}" ] ;;
+	env) specific="_REPLAY_DROP_ENV_$tool"; [ -n "${DROP_ENV:-}${!specific:-}" ] ;;
+	*) return 1 ;;
+	esac
+}
+
 replay_drop_names() {
 	local tool="$1" kind="$2" raw specific name result="" reglob="" valid
 	case "$kind" in
@@ -109,7 +121,7 @@ _discover_replay_optional_flags() {
 
 replay_flag_is_dropped() {
 	local tool="$1" flag="$2" names aliases name
-	replay_load_tool_policy "$tool"
+	replay_has_exclusions "$tool" flags || return 1
 	names=$(replay_drop_names "$tool" flags)
 	[ -n "$names" ] || return 1
 	aliases=$(_discover_replay_aliases "$tool")
