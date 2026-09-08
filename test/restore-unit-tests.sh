@@ -89,6 +89,10 @@ display-message)
 show-option)
 	case "${3:-}" in
 	@assistant-resurrect-capture-env) printf '%s\n' "${MOCK_CAPTURE_ENV:-}" ;;
+	@assistant-resurrect-drop-flags) printf '%s\n' "${MOCK_DROP_FLAGS:-}" ;;
+	@assistant-resurrect-drop-env) printf '%s\n' "${MOCK_DROP_ENV:-}" ;;
+	@assistant-resurrect-claude-drop-flags) printf '%s\n' "${MOCK_CLAUDE_DROP_FLAGS:-}" ;;
+	@assistant-resurrect-claude-drop-env) printf '%s\n' "${MOCK_CLAUDE_DROP_ENV:-}" ;;
 	@assistant-resurrect-relaunch) printf '%s\n' "${MOCK_RELAUNCH_ENABLED:-on}" ;;
 	@assistant-resurrect-relaunch-allow-file) printf '%s\n' "${MOCK_VOUCHER:-}" ;;
 	esac
@@ -103,7 +107,10 @@ send-keys)
 	command_text="${4:-}"
 	printf 'send-keys|%s|%s\n' "$pane" "$command_text" >>"$MOCK_TMUX_LOG"
 	if [ "$command_text" != "clear" ] && [ -n "${MOCK_EXEC_SHELL:-}" ]; then
-		"$MOCK_EXEC_SHELL" -fc "$command_text"
+		case "${MOCK_EXEC_SHELL##*/}" in
+		fish) "$MOCK_EXEC_SHELL" --no-config -c "$command_text" ;;
+		*) "$MOCK_EXEC_SHELL" -fc "$command_text" ;;
+		esac
 	fi
 	;;
 *) exit 1 ;;
@@ -115,6 +122,8 @@ cat >"$MOCK_BIN/claude" <<'MOCK_CLAUDE'
 {
 	printf 'cwd=%s\n' "$PWD"
 	printf 'SAFE=%s\n' "${SAFE:-}"
+	printf 'ANTHROPIC_MODEL=%s\n' "${ANTHROPIC_MODEL-UNSET}"
+	printf 'REPLAY_DROP_TEST=%s\n' "${REPLAY_DROP_TEST-UNSET}"
 	for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
 } >"$MOCK_ASSISTANT_MARKER"
 MOCK_CLAUDE
@@ -490,6 +499,89 @@ assert_not_contains "legacy sidecar secret is not sent to the pane" "$legacy_tmu
 assert_contains "legacy sidecar strip is reported" "$legacy_restore_log" "stripped credential flag(s) from saved pi cli_args: --api-key"
 assert_contains "surrounding args from the legacy sidecar survive" "$legacy_tmux_log" "'--model' 'gpt-4'"
 
+echo "== independent argument and environment opt-outs =="
+export MOCK_PANES='%14|0|0|opt-out'
+export MOCK_SHELLS='%14|bash'
+export MOCK_EXEC_SHELL=bash
+export MOCK_DROP_FLAGS=--model
+export MOCK_CLAUDE_DROP_FLAGS=--settings
+export MOCK_DROP_ENV='REPLAY_DROP_TEST BAD-NAME'
+export MOCK_CLAUDE_DROP_ENV=ANTHROPIC_MODEL
+export MOCK_CAPTURE_ENV='ANTHROPIC_MODEL REPLAY_DROP_TEST SAFE'
+export ANTHROPIC_MODEL=opus
+export REPLAY_DROP_TEST=inherited
+jq -n --arg cwd "$SANDBOX" '{sessions:[{
+  pane:"opt-out:0.0",session_name:"opt-out",window_index:"0",pane_index:"0",
+  tool:"claude",session_id:"sid-opt-out",cwd:$cwd,
+  cli_args:"--model opus --model=sonnet --settings old-pane.json --verbose",model:"opus",
+  env:{ANTHROPIC_MODEL:"haiku",REPLAY_DROP_TEST:"captured",SAFE:"retained"}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+for test_shell in bash zsh fish tcsh nu; do
+	export MOCK_SHELLS="%14|$test_shell"
+	export MOCK_EXEC_SHELL=''
+	if command -v "$test_shell" >/dev/null 2>&1; then
+		MOCK_EXEC_SHELL=$(command -v "$test_shell")
+	fi
+	run_restore
+	assert_eq "$test_shell restore succeeds with both opt-outs" 0 "$RESTORE_STATUS"
+	opt_out_cmd=$(cat "$TMUX_LOG")
+	assert_not_contains "$test_shell does not replay model metadata or flags" "$opt_out_cmd" --model
+	assert_not_contains "$test_shell does not replay the old settings" "$opt_out_cmd" old-pane.json
+	case "$test_shell" in
+	nu)
+		assert_contains "$test_shell removes the inherited model variable" "$opt_out_cmd" "-u r#'ANTHROPIC_MODEL'#"
+		assert_contains "$test_shell retains the session selector" "$opt_out_cmd" "--resume r#'sid-opt-out'#"
+		;;
+	*)
+		assert_contains "$test_shell removes the inherited model variable" "$opt_out_cmd" "-u 'ANTHROPIC_MODEL'"
+		assert_contains "$test_shell retains the session selector" "$opt_out_cmd" "--resume 'sid-opt-out'"
+		;;
+	esac
+	assert_contains "$test_shell retains unrelated flags" "$opt_out_cmd" "'--verbose'"
+	if [ -n "$MOCK_EXEC_SHELL" ]; then
+		opt_out_result=$(cat "$ASSISTANT_MARKER")
+		assert_contains "$test_shell child does not inherit a model override" "$opt_out_result" 'ANTHROPIC_MODEL=UNSET'
+		assert_contains "$test_shell drop wins over capture and inheritance" "$opt_out_result" 'REPLAY_DROP_TEST=UNSET'
+		assert_contains "$test_shell unrelated captured env survives" "$opt_out_result" 'SAFE=retained'
+	else
+		printf '  [skip] %s execution (binary unavailable); command checked\n' "$test_shell"
+	fi
+done
+assert_eq 'removing child environment does not mutate the parent' opus "$ANTHROPIC_MODEL"
+export MOCK_SHELLS='%14|bash'
+export MOCK_EXEC_SHELL=bash
+export MOCK_DROP_ENV='' MOCK_CLAUDE_DROP_ENV=''
+run_restore
+assert_contains 'argument opt-out alone still permits captured model env' "$(cat "$ASSISTANT_MARKER")" 'ANTHROPIC_MODEL=haiku'
+export MOCK_CAPTURE_ENV=''
+run_restore
+assert_contains 'argument opt-out alone still permits inherited model env' "$(cat "$ASSISTANT_MARKER")" 'ANTHROPIC_MODEL=opus'
+export MOCK_DROP_FLAGS='' MOCK_CLAUDE_DROP_FLAGS=''
+export MOCK_DROP_ENV=ANTHROPIC_MODEL
+run_restore
+assert_contains 'environment opt-out alone retains the CLI model' "$(cat "$ASSISTANT_MARKER")" 'arg=--model'
+assert_contains 'environment opt-out alone removes the inherited model' "$(cat "$ASSISTANT_MARKER")" 'ANTHROPIC_MODEL=UNSET'
+
+# A plugin-derived state root identifies a specific Copilot conversation.
+# Failing closed honors the exclusion without opening a different state root.
+export MOCK_EXEC_SHELL=''
+export MOCK_DROP_ENV=COPILOT_HOME
+jq --arg cwd "$SANDBOX" '.sessions[0] |= (.tool="copilot" | .copilot_home=$cwd)' \
+	"$RESURRECT_DIR/assistant-sessions.json" >"$SANDBOX/copilot.json"
+mv "$SANDBOX/copilot.json" "$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_eq 'conflicting required state root sends no command' '' "$(cat "$TMUX_LOG")"
+assert_contains 'conflicting required state root is diagnosed' "$RESTORE_OUTPUT" 'cannot drop COPILOT_HOME'
+
 echo
+# This suite is already run on Linux, macOS and the Windows portability canary.
+# Keep the shared policy regressions on that same matrix without a new workflow.
+if replay_policy_output=$("${TEST_BASH:-bash}" "$REPO_DIR/test/replay-policy-unit-tests.sh" 2>&1); then
+	echo "$replay_policy_output"
+	pass "shared replay policy suite"
+else
+	echo "$replay_policy_output"
+	fail "shared replay policy suite"
+fi
 echo "restore unit tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

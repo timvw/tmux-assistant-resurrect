@@ -281,6 +281,15 @@ process args as a reliable fallback.
   `--continue`. Returns normalized whitespace-trimmed string. (Grok's restore
   ignores the result — see `restore-assistant-sessions.sh` — but the field is
   still populated for the sidecar JSON.)
+- Replay exclusions live in `scripts/lib-replay.sh`, shared by save and restore.
+  `@assistant-resurrect-drop-flags` and `@assistant-resurrect-drop-env` are
+  independent; `@assistant-resurrect-<tool>-drop-{flags,env}` extend the global
+  lists. Drop wins over capture, including inherited child-process environment,
+  but must not mutate the pane shell's environment. Apply flag rules before
+  exact-argv restriction sanitization and after establishing the flattened
+  prompt boundary. Never let removal turn a quoted value or prompt into a flag.
+  Dropping `--model` must suppress metadata reconstruction too. Preserve the
+  necessary resume selector. Vouched session-less argv stays exact.
 - The restore script only restores env vars listed in
   `@assistant-resurrect-capture-env` (not `tmux_pane` or `shell`), prepended
   as `VAR='val'` prefix to the resume command
@@ -389,6 +398,8 @@ just test-targets                  # saved-pane target resolution
 just test-grok
 just test-copilot
 just test-save-hardening           # save/process detection and file safety
+bash test/replay-policy-unit-tests.sh  # argument/environment exclusions
+python3 test/claude-replay-contract.py # real Claude + local test API, no credentials
 just test-restore                  # restore validation, quoting, failure isolation
 just test-plugin-hardening         # hooks, installers, and Python helpers
 
