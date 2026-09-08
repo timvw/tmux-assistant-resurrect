@@ -14,6 +14,9 @@ function detect_tool(line) {
 
 	first = word[1]
 	sub(/^.*\//, "", first)
+	# Native-install Claude exec'd by its versioned path: see detect_tool in
+	# lib-detect.sh.
+	if (word[1] ~ /\/claude\/versions\/[0-9]/) first = "claude"
 	tool_at = 1
 	if (first == "claude" || first == "copilot" || first == "opencode" ||
 	    first == "codex" || first == "pi" || first == "omp" || first == "grok") {

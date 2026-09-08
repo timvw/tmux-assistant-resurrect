@@ -60,6 +60,14 @@ assert_eq "prompt text does not trigger OMP worker exclusion" "omp" \
 assert_eq "shell and awk detectors retain parity" \
 	"$(detect_tool 'opencode --prompt explain opencode run mode')" \
 	"$(awk_detect_tool 'opencode --prompt explain opencode run mode')"
+assert_eq "native-install Claude exec'd by its versioned path is claude" claude \
+	"$(detect_tool '/home/u/.local/share/claude/versions/2.1.263 --resume abc')"
+assert_eq "awk detector agrees on the versioned Claude path" claude \
+	"$(awk_detect_tool '/home/u/.local/share/claude/versions/2.1.263 --resume abc')"
+assert_eq "an unrelated versions/ path is not claude" "" \
+	"$(detect_tool '/opt/tool/versions/2.1.263 --resume abc')"
+assert_eq "awk detector agrees an unrelated versions/ path is not claude" "" \
+	"$(awk_detect_tool '/opt/tool/versions/2.1.263 --resume abc')"
 assert_eq "awk detector clears argv state portably between records" opencode \
 	"$(printf 'opencode run worker\nopencode\n' | awk -v classify_only=1 -f "$REPO_DIR/scripts/lib-detect.awk")"
 
