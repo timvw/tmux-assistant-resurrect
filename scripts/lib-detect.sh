@@ -39,6 +39,14 @@ detect_tool() {
 	[ "$#" -gt 0 ] || return 0
 
 	first="${1##*/}"
+	# Claude's native installer keeps the real binary at
+	# ~/.local/share/claude/versions/<version> behind a `claude` symlink. When
+	# that resolved path is what got exec'd (a launcher that resolves the
+	# symlink, or Claude re-executing itself after a self-update), argv[0] has
+	# no `claude` token at all, only the version number.
+	case "$1" in
+	*/claude/versions/[0-9]*) first="claude" ;;
+	esac
 	case "$first" in
 	claude | copilot | opencode | codex | pi | omp | grok)
 		tool="$first"

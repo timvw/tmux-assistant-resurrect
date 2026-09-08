@@ -21,6 +21,18 @@ find_claude_pid() {
 			return
 			;;
 		esac
+		# Native-install Claude exec'd by its versioned path
+		# (~/.local/share/claude/versions/<version>): comm is then the version
+		# number, which is what Linux reports for the exec'd file, and only
+		# argv[0] still names claude.
+		local args
+		args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+		case "${args%% *}" in
+		*/claude/versions/[0-9]*)
+			echo "$pid"
+			return
+			;;
+		esac
 		# Move to parent
 		pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
 		max_depth=$((max_depth - 1))
