@@ -442,6 +442,16 @@ else
 	fail "Save and process-detection hardening unit suite"
 fi
 
+# Real Claude chooses the model; a loopback API supplies deterministic replies.
+suite "claude_replay_contract"
+if claude_replay_output=$(python3 "$REPO_DIR/test/claude-replay-contract.py" 2>&1); then
+	echo "$claude_replay_output"
+	pass "Claude replay model contract"
+else
+	echo "$claude_replay_output"
+	fail "Claude replay model contract"
+fi
+
 # --- Hook/plugin hardening unit suite ---
 
 suite "plugin_hardening_unit"

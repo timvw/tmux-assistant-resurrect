@@ -542,21 +542,65 @@ Prefer keeping keys in your shell profile or a secrets manager over passing them
 on the command line or capturing them. State files persist to disk and may
 outlive the process they were captured from.
 
-### Dropping flags from the replayed command
+### Excluding replayed flags and environment variables
 
-Exact replay is the default, but some flags are only right at launch: a
-`--model` you later changed with `/model`, or a `--settings` document a launcher
-wrapper derived from the pane the session started in. List the ones that should
-never be replayed, space-separated, in `tmux.conf`:
+By default, existing replay behavior is preserved. Flags and environment
+variables have **separate opt-outs**. For example, to stop Claude from reusing a
+launch-time model and a pane-specific settings document:
 
 ```bash
-set -g @assistant-resurrect-drop-flags '--model --settings'
+set -g @assistant-resurrect-claude-drop-flags '--model --settings'
+set -g @assistant-resurrect-claude-drop-env 'ANTHROPIC_MODEL'
 ```
 
-Each entry is removed together with its value, in both `--flag value` and
-`--flag=value` form, for every assistant. Only option-shaped words (`--name` or
-`-x`) are honoured; anything else is logged and ignored. Unset, nothing is
-dropped.
+Both are needed if the original model was supplied through both CLI arguments
+and `ANTHROPIC_MODEL`. Dropping only the flag still leaves the environment
+variable able to override the resumed session's model; dropping only the
+variable still leaves the explicit flag. A dropped `--model` also suppresses
+the plugin's fallback from the sidecar `model` field.
+
+For a policy shared by every assistant, use the global forms:
+
+```bash
+set -g @assistant-resurrect-drop-flags '--model'
+set -g @assistant-resurrect-drop-env 'OLD_LAUNCH_SETTING'
+```
+
+Global and assistant-specific lists are combined; duplicates are harmless.
+Assistant-specific lists add exclusions and cannot re-enable a global exclusion.
+Replace `claude` in the option name with `cursor`, `copilot`, `opencode`, `codex`,
+`pi`, `omp`, or `grok` to scope a rule to that assistant. All lists are
+whitespace-separated and empty by default.
+
+**Flag exclusions** remove every occurrence, together with its values. They
+handle `--flag value`, `--flag=value`, known short aliases, and attached short
+values such as Codex's `-mopus`. Option arity and aliases are taken from the
+assistant's help with pinned fallbacks for common options. Boolean flags do not
+consume a prompt word; variadic flags lose all their values. Only option-shaped
+names are accepted; invalid entries are logged and ignored. No glob patterns
+are supported.
+
+**Environment exclusions** win over `@assistant-resurrect-capture-env`: excluded
+values are omitted from the sidecar, are not restored from older sidecars, and
+are unset in the new process even if inherited from the pane shell. The parent
+shell and tmux server environment are unchanged. Only valid environment variable
+names are accepted. If an exclusion conflicts with a required saved Copilot
+state root (`COPILOT_HOME`), that pane is skipped with a diagnostic rather than
+opening a different conversation.
+
+Both policies are checked at save and restore time, so new exclusions also
+apply to old saves. Removing an exclusion cannot recover a value already omitted
+from a save; save a running session again to capture it. Flag exclusions affect
+optional arguments of resumed sessions, not the required session selector or
+exact, explicitly vouched session-less commands. Environment exclusions also
+apply to session-less relaunches.
+
+These are replay controls, not a general configuration reset. An assistant can
+still obtain settings from its own configuration files, provider defaults, or
+model-alias overrides. In particular, a settings file can introduce an environment
+variable again after the process starts. The plugin does not rewrite JSON inside
+`--settings` or alter those files. Exclude the whole `--settings` option when its
+launch-time document should not be replayed.
 
 ### Session-less relaunch vouchers
 

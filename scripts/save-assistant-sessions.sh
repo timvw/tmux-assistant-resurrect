@@ -39,6 +39,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-detect.sh
 source "$SCRIPT_DIR/lib-detect.sh"
+# shellcheck source=lib-replay.sh
+source "$SCRIPT_DIR/lib-replay.sh"
 
 # Directory of helper Python programs. These live as standalone files (rather
 # than inline heredocs) so python3 receives them via argv instead of a shell
@@ -65,6 +67,7 @@ LOG_FILE="${RESURRECT_DIR}/assistant-save.log"
 LOG_ENABLED=0
 CAPTURE_ENV=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
 DROP_FLAGS=$(tmux show-option -gqv @assistant-resurrect-drop-flags 2>/dev/null || true)
+DROP_ENV=$(tmux show-option -gqv @assistant-resurrect-drop-env 2>/dev/null || true)
 RELAUNCH_ENABLED=$(tmux show-option -gqv @assistant-resurrect-relaunch 2>/dev/null || true)
 RELAUNCH_ENABLED="${RELAUNCH_ENABLED:-on}"
 RELAUNCH_LEDGER_FILE="${RESURRECT_DIR}/assistant-relaunch-candidates.json"
@@ -1504,66 +1507,6 @@ merge_process_env() {
 
 # --- CLI args extraction helpers ---
 
-# Copilot's variadic options -- the ones whose --help spelling ends in `...`,
-# e.g. `--allow-tool[=tools...]`. They legitimately occupy several argv tokens.
-SESSION_VARIADIC_FALLBACK_copilot="--allow-tool --allow-url --available-tools --deny-tool --deny-url --excluded-tools --secret-env-vars"
-SESSION_VARIADIC_FALLBACK_claude="--add-dir --allowedTools --allowed-tools --betas --disallowedTools --disallowed-tools --file --mcp-config --tools"
-
-_claude_variadic_flags() {
-	local cached="${_CLAUDE_VARIADIC_FLAGS:-}"
-	if [ -n "$cached" ]; then
-		[ "$cached" = "-" ] || echo "$cached"
-		return 0
-	fi
-
-	local help_out result=""
-	help_out=$(_tool_help claude)
-	if [ -n "$help_out" ]; then
-		result=$(printf '%s\n' "$help_out" |
-			awk '
-				match($0, /<[^>]*\.\.\.[^>]*>/) {
-					prefix = substr($0, 1, RSTART - 1)
-					# A scalar option may precede the variadic one in help prose.
-					# Keep only the alias group after its last completed metavar.
-					sub(/^.*>[[:space:],]*/, "", prefix)
-					while (match(prefix, /--[A-Za-z][A-Za-z0-9-]*/)) {
-						print substr(prefix, RSTART, RLENGTH)
-						prefix = substr(prefix, RSTART + RLENGTH)
-					}
-				}' | sort -u | tr '\n' ' ') || true
-		result="${result% }"
-	fi
-	result=$(printf '%s\n%s\n' "$result" "$SESSION_VARIADIC_FALLBACK_claude" |
-		tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')
-	result="${result% }"
-
-	printf -v _CLAUDE_VARIADIC_FLAGS '%s' "${result:--}"
-	[ -n "$result" ] && echo "$result"
-	return 0
-}
-
-_copilot_variadic_flags() {
-	local cached="${_COPILOT_VARIADIC_FLAGS:-}"
-	if [ -n "$cached" ]; then
-		[ "$cached" = "-" ] || echo "$cached"
-		return 0
-	fi
-
-	local help_out result=""
-	help_out=$(_tool_help copilot)
-	if [ -n "$help_out" ]; then
-		result=$(echo "$help_out" |
-			grep -E '^[[:space:]]+(-[a-zA-Z],[[:space:]]+)?--[a-z][-a-z]*\[=[^]]*\.\.\.\]' |
-			grep -oE -- '--[a-z][-a-z]*' | sort -u | tr '\n' ' ')
-		result="${result% }"
-	fi
-	[ -n "$result" ] || result="$SESSION_VARIADIC_FALLBACK_copilot"
-
-	printf -v _COPILOT_VARIADIC_FLAGS '%s' "${result:--}"
-	[ -n "$result" ] && echo "$result"
-	return 0
-}
-
 # Exact argv, boundaries intact, from /proc/<pid>/cmdline (NUL-separated).
 # `ps` flattens argv and destroys the quoting, which makes a single value
 # containing spaces indistinguishable from several values -- and for Copilot's
@@ -1639,7 +1582,7 @@ _copilot_args_from_exact_argv() {
 	local tok dropped_permission=0
 	while IFS= read -r -d '' tok; do
 		argv[${#argv[@]}]="$tok"
-	done < <(_exact_argv "$pid" copilot)
+	done < <(_exact_argv "$pid" copilot | replay_filter_exact_argv copilot)
 	[ "${#argv[@]}" -gt 0 ] || return 1
 
 	local i last
@@ -1701,7 +1644,7 @@ _claude_args_from_exact_argv() {
 	local tok flag next dropped_restriction=0
 	while IFS= read -r -d '' tok; do
 		argv[${#argv[@]}]="$tok"
-	done < <(_exact_argv "$pid" claude)
+	done < <(_exact_argv "$pid" claude | replay_filter_exact_argv claude)
 	[ "${#argv[@]}" -gt 0 ] || return 1
 
 	local value_flags variadic_flags
@@ -1980,195 +1923,6 @@ _strip_subcmds() {
 	return 0
 }
 
-# Run `<tool> --help`, neutralizing any side effects the tool performs on
-# startup. The save hook fires every few minutes, so a probe that phones home is
-# not acceptable: Copilot's native binary runs its auto-updater unless told not
-# to. Per-tool overrides live in HELP_PROBE_ENV_<tool> (word-split on purpose).
-HELP_PROBE_ENV_copilot="COPILOT_AUTO_UPDATE=false"
-
-# Cached per tool in _TOOL_HELP_<tool>: several discovery passes read the same
-# help text, and the callers run in a $() subshell per pane.
-# shellcheck disable=SC2178,SC2128  # out is a plain string; printf -v writes to a dynamic name
-_tool_help() {
-	local tool="$1"
-	local cache_var="_TOOL_HELP_${tool}"
-	local cached="${!cache_var:-}"
-	if [ -n "$cached" ]; then
-		[ "$cached" = "-" ] || printf '%s\n' "$cached"
-		return 0
-	fi
-
-	local probe_env_var="HELP_PROBE_ENV_${tool}"
-	local probe_env="${!probe_env_var:-}"
-	local out="" help_binary="$tool"
-	if [ "$tool" = "cursor" ]; then
-		# Prefer the Cursor-specific compatibility name. A generic unrelated
-		# `agent` on PATH must never be executed by a periodic save hook.
-		if command -v cursor-agent >/dev/null 2>&1; then
-			help_binary="cursor-agent"
-		else
-			help_binary=""
-		fi
-	fi
-	if [ -n "$probe_env" ]; then
-		# shellcheck disable=SC2086  # deliberate split into env KEY=VAL args
-		[ -z "$help_binary" ] || out=$(env $probe_env "$help_binary" --help 2>/dev/null) || out=""
-	elif [ -n "$help_binary" ]; then
-		out=$("$help_binary" --help 2>/dev/null) || out=""
-	fi
-
-	printf -v "$cache_var" '%s' "${out:--}"
-	[ -n "$out" ] && printf '%s\n' "$out"
-	return 0
-}
-
-# Static value-taking option fallbacks for when a running assistant is not on
-# the save hook's PATH. Dynamic discovery below is authoritative when --help is
-# available; these keep common replay settings intact in the degraded path.
-#
-# claude's --system-prompt-file and --append-system-prompt-file are the
-# exception to "dynamic discovery is authoritative": they are accepted but
-# absent from the option list in `claude --help`, named only in the prose of
-# --setting-sources. Discovery cannot see them even with --help available, so
-# the argv filter reads them as booleans, takes the path for the first
-# positional, and drops it along with the whole tail. Restore then replays a
-# bare --append-system-prompt-file and claude consumes the next flag as its
-# filename ("Append system prompt file not found: --model"). Pinning them here
-# is load-bearing on the normal path, not just the degraded one.
-OPTION_VALUE_FLAGS_FALLBACK_claude="--add-dir --agent --agents --allowedTools --allowed-tools --append-system-prompt --append-system-prompt-file --autocompact --betas --cloud -d --debug --debug-file --disallowedTools --disallowed-tools --effort --environment --fallback-model --file --input-format --json-schema --max-budget-usd --mcp-config --model -n --name --output-format --permission-mode --plugin-dir --plugin-url --prompt-suggestions --remote-control --remote-control-session-name-prefix --setting-sources --settings --system-prompt --system-prompt-file --teleport --tools -w --worktree"
-OPTION_VALUE_FLAGS_FALLBACK_copilot="--add-dir --add-github-mcp-tool --add-github-mcp-toolset --additional-mcp-config --agent --allow-tool --allow-url --attachment --available-tools --bash-env -C --context --deny-tool --deny-url --disable-mcp-server --effort --reasoning-effort --excluded-tools --extension-sdk-path --log-dir --log-level --max-ai-credits --max-autopilot-continues --mode --model --mouse --output-format --plugin-dir --secret-env-vars --share --stream"
-OPTION_VALUE_FLAGS_FALLBACK_opencode="--log-level --port --hostname --mdns-domain --cors -m --model --prompt --agent --replay-limit"
-OPTION_VALUE_FLAGS_FALLBACK_codex="-c --config --enable --disable --remote --remote-auth-token-env -i --image -m --model --local-provider -p --profile -s --sandbox -C --cd --add-dir -a --ask-for-approval"
-OPTION_VALUE_FLAGS_FALLBACK_pi="--provider --model --api-key --system-prompt --append-system-prompt --mode -n --name --models -t --tools -xt --exclude-tools --thinking -e --extension --skill --prompt-template --theme --use-theme --export --list-models --tui-mode"
-OPTION_VALUE_FLAGS_FALLBACK_omp="--model --smol --slow --plan --prewalk-into --plan-yolo-into --provider --api-key --system-prompt --append-system-prompt --profile --alias --cwd --mode --config --session-dir --models --tools --thinking --hook -e --extension --skills --export --max-time --approval-mode --plugin-dir"
-OPTION_VALUE_FLAGS_FALLBACK_grok="--model --effort --cwd"
-OPTION_VALUE_FLAGS_FALLBACK_cursor="--header -e --endpoint --output-format --mode --model --sandbox --workspace --add-dir --plugin-dir -w --worktree --worktree-base"
-
-# Discover options that accept a separate value from the top-level --help.
-# Commander/clap-style help marks values as <...> or [...]; yargs-style help
-# uses type annotations such as [string], [number], or [array], sometimes on a
-# continuation line. Emit both long and short spellings so the argv filter can
-# distinguish an option value from a positional prompt.
-_discover_option_value_flags() {
-	local tool="$1"
-	local cache_var="_OPTION_VALUE_FLAGS_${tool}"
-	local cached="${!cache_var:-}"
-	if [ -n "$cached" ]; then
-		[ "$cached" = "-" ] || echo "$cached"
-		return 0
-	fi
-
-	local fallback_var="OPTION_VALUE_FLAGS_FALLBACK_${tool}"
-	local fallback="${!fallback_var:-}"
-	local help_out result=""
-	help_out=$(_tool_help "$tool") || true
-	if [ -n "$help_out" ]; then
-		result=$(printf '%s\n' "$help_out" | awk '
-			function flush() {
-				if (head == "") return
-				decl = head
-				sub(/^[[:space:]]+/, "", decl)
-				sub(/[[:space:]][[:space:]].*$/, "", decl)
-				if (decl ~ /<[^>]+>/ ||
-				    (decl ~ /\[[^]]+\]/ && decl !~ /\[boolean\]/) ||
-				    entry ~ /\[(string|number|array)\]/) {
-					print decl
-				}
-				head = ""
-				entry = ""
-			}
-			/^[[:space:]]+(-[A-Za-z][A-Za-z0-9-]*[[:space:],]|--[A-Za-z][A-Za-z0-9-]*)/ {
-				flush()
-				head = $0
-				entry = $0
-				next
-			}
-			{ if (head != "") entry = entry "\n" $0 }
-			END { flush() }
-		' | grep -oE -- '--[A-Za-z][A-Za-z0-9-]*|(^|[[:space:],])-[A-Za-z][A-Za-z0-9-]*' |
-			sed -E 's/^[[:space:],]+//') || true
-	fi
-
-	# Help output can be partial (and some supported options are hidden), so
-	# supplement discovery with the pinned safe fallback just as session-flag
-	# discovery does.
-	result=$(printf '%s\n%s\n' "$result" "$fallback" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')
-	result="${result% }"
-	printf -v "$cache_var" '%s' "${result:--}"
-	[ -n "$result" ] && echo "$result"
-	return 0
-}
-
-# Remove positional argv while retaining values belonging to known options.
-# Once the first positional is seen, discard it and the entire remaining tail:
-# a prompt can contain flag-looking words that must never become replayed flags.
-_drop_positional_args() {
-	local tool="$1" args="$2"
-	# Bash 3.2 treats an empty array expansion as an unbound variable under
-	# nounset.  Avoid constructing/iterating that array when there is no argv.
-	case "$args" in
-	*[![:space:]]*) ;;
-	*) return 0 ;;
-	esac
-	local value_flags
-	value_flags=" $(_discover_option_value_flags "$tool") "
-	local variadic_flags=""
-	case "$tool" in
-	claude) variadic_flags=" $(_claude_variadic_flags) " ;;
-	copilot) variadic_flags=" $(_copilot_variadic_flags) " ;;
-	esac
-
-	# Word-split with pathname expansion disabled: argv is data, so values such
-	# as '*' must never expand against the save hook's working directory.
-	local reglob=""
-	case "$-" in
-	*f*) ;;
-	*) reglob=1 ;;
-	esac
-	set -f
-	# shellcheck disable=SC2206  # deliberate word-split of flattened argv
-	local -a words=($args)
-	[ -n "$reglob" ] && set +f
-
-	local -a out=()
-	local word flag="" expects_value=0 variadic=0
-	for word in "${words[@]}"; do
-		case "$word" in
-		-*)
-			out[${#out[@]}]="$word"
-			flag="${word%%=*}"
-			expects_value=0
-			variadic=0
-			case "$word" in
-			*=*) ;;
-			*)
-				case "$value_flags" in
-				*" $flag "*) expects_value=1 ;;
-				esac
-				case "$variadic_flags" in
-				*" $flag "*) variadic=1 ;;
-				esac
-				;;
-			esac
-			;;
-		*)
-			if [ "$expects_value" -eq 1 ]; then
-				out[${#out[@]}]="$word"
-				if [ "$variadic" -eq 0 ]; then
-					expects_value=0
-					flag=""
-				fi
-			else
-				break
-			fi
-			;;
-		esac
-	done
-
-	[ "${#out[@]}" -gt 0 ] && echo "${out[*]}"
-	return 0
-}
-
 # Discover session-identity flags from a tool's --help output.
 # Matches long option names against a keyword pattern and emits lines of
 # "long [short]" pairs (e.g. "--resume -r" or "--fork-session").
@@ -2296,7 +2050,10 @@ SESSION_FLAGS_FALLBACK_cursor="--continue
 # wrapper also retains the existing variadic-option discovery warmup.
 _warm_cli_arg_helpers() {
 	local tool="$1"
+	replay_load_tool_policy "$tool"
 	_discover_option_value_flags "$tool" >/dev/null
+	_discover_replay_aliases "$tool" >/dev/null
+	_discover_replay_optional_flags "$tool" >/dev/null
 	[ "$tool" = "claude" ] && _claude_variadic_flags >/dev/null
 	[ "$tool" = "copilot" ] && _copilot_variadic_flags >/dev/null
 	return 0
@@ -2366,6 +2123,7 @@ _warm_session_discovery() {
 extract_cli_args() {
 	local tool="$1" raw_args="$2" pid="${3:-}"
 	local _COPILOT_DROPPED_PERMISSION=0
+	replay_load_tool_policy "$tool"
 
 	# Strip binary name/path: remove first token (which is the binary or /path/to/binary).
 	local args="${raw_args#* }"
@@ -2516,29 +2274,13 @@ extract_cli_args() {
 	# it; the flag name (never its value) is logged so the difference is visible.
 	args=$(strip_credential_flags "$args" "$tool cli_args")
 
-	# Flags the user asked never to replay (@assistant-resurrect-drop-flags),
-	# removed with their value. These are flags that were right at launch and
-	# wrong at restore: a --model chosen before /model switched it, or a
-	# --settings document a launcher wrapper derived from the pane it started
-	# in. Only option-shaped words are honoured, because each one becomes part
-	# of a sed pattern.
-	local drop_flag
-	for drop_flag in $DROP_FLAGS; do
-		if printf '%s' "$drop_flag" | grep -Eq '^--[A-Za-z0-9][A-Za-z0-9-]*$'; then
-			args=$(_strip_long_opt "$drop_flag" "$args")
-		elif printf '%s' "$drop_flag" | grep -Eq '^-[A-Za-z0-9]$'; then
-			args=$(_strip_short_opt "$drop_flag" "$args")
-		else
-			log "ignoring @assistant-resurrect-drop-flags entry '$drop_flag': not an option"
-		fi
-	done
-
 	# A remaining positional is an initial prompt (or, for OpenCode, a project
 	# path already represented by pane cwd). Never replay it into a resumed
 	# conversation. Preserve recognized separate option values such as
 	# `--model sonnet`; a boolean option followed by a prompt is not mistaken for
 	# a value because option arity comes from --help rather than adjacency.
 	args=$(_drop_positional_args "$tool" "$args")
+	args=$(replay_filter_cli_args "$tool" "$args")
 
 	# Normalize whitespace: collapse multiple spaces, trim leading/trailing
 	echo "$args" | sed -E 's/  +/ /g; s/^ //; s/ $//'
@@ -2653,6 +2395,7 @@ resolve_pane_candidates() {
 					fi
 				fi
 				env_json=$(merge_process_env "$cand_pid" "$env_json")
+				env_json=$(replay_filter_env "$cand_tool" "$env_json")
 
 				# Fallback: parse --model from CLI args if not in state file.
 				# Regex stored in variable for bash 3.2 compat (inline capture groups fail).
@@ -2660,6 +2403,8 @@ resolve_pane_candidates() {
 				if [ -z "$model" ] && [[ "$cand_args" =~ $_model_re ]]; then
 					model="${BASH_REMATCH[1]}"
 				fi
+
+				if replay_flag_is_dropped "$cand_tool" --model; then model=""; fi
 
 				# Write TSV for batch JSON conversion (replaces per-entry jq -n).
 				# New columns are appended so the existing indices stay put.
@@ -3157,11 +2902,14 @@ emit_session() {
 			env_json=$(jq '.env // null' "$state_file" 2>/dev/null || echo "null")
 		fi
 		env_json=$(merge_process_env "$cpid" "$env_json")
+		env_json=$(replay_filter_env "$tool" "$env_json")
 
 		# Fallback: parse --model from CLI args if not in state file
 		if [ -z "$model" ]; then
 			model=$(echo "$cargs" | sed -n 's/.*--model[= ] *\([^ ]*\).*/\1/p')
 		fi
+
+		if replay_flag_is_dropped "$tool" --model; then model=""; fi
 
 		# This shim only receives the composed target, so recover the parts from
 		# it. Splitting from the right is exact — see split_pane_target().

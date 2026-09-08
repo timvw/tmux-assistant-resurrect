@@ -12,6 +12,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-detect.sh
 source "$SCRIPT_DIR/lib-detect.sh"
+# shellcheck source=lib-replay.sh
+source "$SCRIPT_DIR/lib-replay.sh"
 
 # Follow tmux-resurrect's own save-dir resolution (resurrect_data_dir in
 # lib-detect.sh) so we read the sidecar from wherever resurrect saved it.
@@ -115,6 +117,11 @@ if [ "$count" -eq 0 ]; then
 	exit 0
 fi
 
+# shellcheck disable=SC2034 # consumed by the shared replay policy
+DROP_FLAGS=$(tmux show-option -gqv @assistant-resurrect-drop-flags 2>/dev/null || true)
+# shellcheck disable=SC2034 # consumed by the shared replay policy
+DROP_ENV=$(tmux show-option -gqv @assistant-resurrect-drop-env 2>/dev/null || true)
+
 # Wait for panes to be fully initialized after resurrect restore
 sleep 2
 
@@ -156,6 +163,11 @@ while read -r entry; do
 
 	pane=$(printf '%s\n' "$entry" | jq -r '.pane')
 	tool=$(printf '%s\n' "$entry" | jq -r '.tool')
+	case "$tool" in
+	claude | cursor | copilot | opencode | codex | pi | omp | grok) ;;
+	*) log "unknown tool $tool in $pane, skipping"; continue ;;
+	esac
+	replay_load_tool_policy "$tool"
 	kind=$(printf '%s\n' "$entry" | jq -r '.kind')
 	session_id=$(printf '%s\n' "$entry" | jq -r '.session_id // empty')
 	relaunch_cmd=$(printf '%s\n' "$entry" | jq -r '.cmd // empty')
@@ -166,9 +178,20 @@ while read -r entry; do
 	# this the old value would be replayed into the pane and copied into the
 	# restore log, so the save-side fix alone would not close the leak.
 	cli_args=$(strip_credential_flags "$cli_args" "saved $tool cli_args")
+	cli_args=$(replay_filter_cli_args "$tool" "$cli_args")
 	model=$(printf '%s\n' "$entry" | jq -r '.model // empty')
 	env_json=$(printf '%s\n' "$entry" | jq -c '.env // {}')
+	env_json=$(replay_filter_env "$tool" "$env_json")
+	drop_env_names=$(replay_drop_names "$tool" env)
 	copilot_home=$(printf '%s\n' "$entry" | jq -r '.copilot_home // empty')
+	if [ "$tool" = copilot ] && [ -n "$copilot_home" ]; then
+		case " $drop_env_names " in
+		*' COPILOT_HOME '*)
+			log "cannot drop COPILOT_HOME required for the saved session in $pane, skipping"
+			continue
+			;;
+		esac
+	fi
 	cursor_binary=$(printf '%s\n' "$entry" | jq -r '.cursor_binary // empty')
 
 	if [ "$kind" = "session" ]; then
@@ -361,7 +384,7 @@ while read -r entry; do
 		# Add --model from the sidecar model field if not already in cli_args.
 		# Only for Claude — OpenCode and Codex don't support --model.
 		safe_model_arg=""
-		if [ -n "$model" ] && [ "$tool" = "claude" ]; then
+		if [ -n "$model" ] && [ "$tool" = "claude" ] && ! replay_flag_is_dropped "$tool" --model; then
 			if [ "${cli_has_model:-0}" -eq 0 ]; then
 				safe_model_arg=" --model $(shell_quote "$pane_cmd" "$model")"
 			fi
@@ -462,7 +485,12 @@ while read -r entry; do
 	#
 	# These are variables rather than a separate case arm so csh/tcsh keep
 	# sharing every other transformation applied below.
+	env_unset_args=""
+	for var in $drop_env_names; do
+		env_unset_args="$env_unset_args -u $(shell_quote "$pane_cmd" "$var")"
+	done
 	force_env=0
+	[ -z "$env_unset_args" ] || force_env=1
 	env_launcher="env"
 	case "$pane_cmd" in
 	csh | tcsh)
@@ -479,8 +507,12 @@ while read -r entry; do
 	log_cmd="$resume_cmd"
 	case "$pane_cmd" in
 	nu)
-		resume_cmd="^${resume_cmd#command }"
-		log_cmd="^${log_cmd#command }"
+		if [ -n "$env_unset_args" ]; then
+			resume_cmd="^env${env_unset_args} ${resume_cmd#command }"
+		else
+			resume_cmd="^${resume_cmd#command }"
+		fi
+		log_cmd="$resume_cmd"
 		if [ -n "$nu_env" ]; then
 			nu_env="${nu_env%, }"
 			resume_cmd="with-env { ${nu_env} } { ${resume_cmd} }"
@@ -493,13 +525,13 @@ while read -r entry; do
 		;;
 	*)
 		if [ -n "$env_prefix" ] || [ "$force_env" -eq 1 ]; then
-			resume_cmd="${env_launcher} ${env_prefix}${resume_cmd#command }"
+			resume_cmd="${env_launcher}${env_unset_args} ${env_prefix}${resume_cmd#command }"
 		fi
 		if [ -n "$redacted_env_prefix" ]; then
 			# Mirror whatever launcher the resume line above used, so the log
 			# keeps describing the command that was actually sent rather than a
 			# plain `env` the csh/tcsh panes never received.
-			log_cmd="${env_launcher} ${redacted_env_prefix}${log_cmd#command }"
+			log_cmd="${env_launcher}${env_unset_args} ${redacted_env_prefix}${log_cmd#command }"
 		elif [ -n "$env_prefix" ] || [ "$force_env" -eq 1 ]; then
 			# force_env covers shells that are routed through `env` even with no
 			# captured vars; without it the log would keep the untransformed
