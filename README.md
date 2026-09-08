@@ -542,6 +542,22 @@ Prefer keeping keys in your shell profile or a secrets manager over passing them
 on the command line or capturing them. State files persist to disk and may
 outlive the process they were captured from.
 
+### Dropping flags from the replayed command
+
+Exact replay is the default, but some flags are only right at launch: a
+`--model` you later changed with `/model`, or a `--settings` document a launcher
+wrapper derived from the pane the session started in. List the ones that should
+never be replayed, space-separated, in `tmux.conf`:
+
+```bash
+set -g @assistant-resurrect-drop-flags '--model --settings'
+```
+
+Each entry is removed together with its value, in both `--flag value` and
+`--flag=value` form, for every assistant. Only option-shaped words (`--name` or
+`-x`) are honoured; anything else is logged and ignored. Unset, nothing is
+dropped.
+
 ### Session-less relaunch vouchers
 
 Long-lived modes such as `claude agents`, `claude gateway`, and

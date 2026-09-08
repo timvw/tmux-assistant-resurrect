@@ -64,6 +64,7 @@ OUTPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
 LOG_FILE="${RESURRECT_DIR}/assistant-save.log"
 LOG_ENABLED=0
 CAPTURE_ENV=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
+DROP_FLAGS=$(tmux show-option -gqv @assistant-resurrect-drop-flags 2>/dev/null || true)
 RELAUNCH_ENABLED=$(tmux show-option -gqv @assistant-resurrect-relaunch 2>/dev/null || true)
 RELAUNCH_ENABLED="${RELAUNCH_ENABLED:-on}"
 RELAUNCH_LEDGER_FILE="${RESURRECT_DIR}/assistant-relaunch-candidates.json"
@@ -2514,6 +2515,23 @@ extract_cli_args() {
 	# cannot drift. A user who launched with an inline key will restore without
 	# it; the flag name (never its value) is logged so the difference is visible.
 	args=$(strip_credential_flags "$args" "$tool cli_args")
+
+	# Flags the user asked never to replay (@assistant-resurrect-drop-flags),
+	# removed with their value. These are flags that were right at launch and
+	# wrong at restore: a --model chosen before /model switched it, or a
+	# --settings document a launcher wrapper derived from the pane it started
+	# in. Only option-shaped words are honoured, because each one becomes part
+	# of a sed pattern.
+	local drop_flag
+	for drop_flag in $DROP_FLAGS; do
+		if printf '%s' "$drop_flag" | grep -Eq '^--[A-Za-z0-9][A-Za-z0-9-]*$'; then
+			args=$(_strip_long_opt "$drop_flag" "$args")
+		elif printf '%s' "$drop_flag" | grep -Eq '^-[A-Za-z0-9]$'; then
+			args=$(_strip_short_opt "$drop_flag" "$args")
+		else
+			log "ignoring @assistant-resurrect-drop-flags entry '$drop_flag': not an option"
+		fi
+	done
 
 	# A remaining positional is an initial prompt (or, for OpenCode, a project
 	# path already represented by pane cwd). Never replay it into a resumed

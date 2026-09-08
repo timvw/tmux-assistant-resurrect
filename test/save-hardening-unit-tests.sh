@@ -351,6 +351,34 @@ assert_eq "--secret-key VALUE form is stripped" \
 assert_eq "--auth-token VALUE form is stripped" \
 	"--model gpt-4" \
 	"$(extract_cli_args pi "pi --auth-token bearer-xyz --model gpt-4")"
+
+# @assistant-resurrect-drop-flags removes user-listed flags with their values,
+# in every spelling, and ignores entries that are not option-shaped.
+echo "== drop-flags =="
+# shellcheck disable=SC2034  # read by extract_cli_args in the sourced save script
+DROP_FLAGS='--thinking -t'
+assert_eq "drop-flags removes a separate-value flag" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --thinking high --model gpt-4")"
+assert_eq "drop-flags removes the = spelling" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --thinking=high --model gpt-4")"
+assert_eq "drop-flags removes a short flag with its value" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi -t high --model gpt-4")"
+assert_eq "drop-flags leaves unlisted flags alone" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --model gpt-4")"
+# shellcheck disable=SC2034
+DROP_FLAGS='not-a-flag'
+assert_eq "drop-flags ignores an entry that is not option-shaped" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --model gpt-4" 2>/dev/null)"
+# shellcheck disable=SC2034
+DROP_FLAGS=''
+assert_eq "drop-flags unset replays the flag" \
+	"--thinking high --model gpt-4" \
+	"$(extract_cli_args pi "pi --thinking high --model gpt-4")"
 assert_eq "non-credential flags around credential survive" \
 	"--verbose --model gpt-4 --debug" \
 	"$(extract_cli_args pi "pi --verbose --api-key sk-xxx --model gpt-4 --debug")"
