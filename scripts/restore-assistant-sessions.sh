@@ -90,6 +90,48 @@ log() {
 	fi
 }
 
+# Best-effort mitigation for boot flows where tmux-continuum restores the
+# server before any terminal client has attached. TUI tools that query the
+# terminal at startup (OSC 11 background-color for theme detection,
+# cursor-shape, hyperlinks, etc.) get a null response if no client is
+# attached when the query fires -- tmux silently drops the query because
+# there's no client to forward it to. crossterm-based tools cache that null
+# response in a OnceLock and never retry, so a single bad startup
+# permanently locks the tool to its fallback state for the lifetime of the
+# process. Symptom seen in the wild: codex's diff palette permanently dark
+# on a light terminal after every reboot, requiring a manual `codex resume`
+# to clear. `list-clients` proves a client is attached to the session
+# tmux resolves for the given pane at lookup time; it does not prove this
+# particular pane is visible or focused, so this is a mitigation for "no
+# client at all", not a guarantee that a startup probe gets an answer.
+#
+# Polls every 100ms, capped at 5s so a session with no client does not hang
+# the rest of the restore. In normal boot flows where a kitty/wezterm/etc
+# auto-attaches via `tmux new-session -A`, the wait resolves in < 200ms --
+# but that first `list-clients` call still takes real time, so a caller must
+# not treat a zero-sleep return as proof nothing changed in the pane.
+wait_for_session_client() {
+	local pane_id="$1" client_wait=0
+	while [ "$(tmux list-clients -t "$pane_id" 2>/dev/null | wc -l)" -eq 0 ] && [ $client_wait -lt 50 ]; do
+		sleep 0.1
+		client_wait=$((client_wait + 1))
+	done
+	[ $client_wait -lt 50 ]
+}
+
+# Echoes the pane's current foreground command, normalized (leading '-'
+# stripped for login shells), or nothing if it is not one of the whitelisted
+# shells.
+pane_shell_name() {
+	local pane_id="$1" cmd
+	cmd=$(tmux display-message -t "$pane_id" -p '#{pane_current_command}' 2>/dev/null || true)
+	# Strip leading '-' from login shells (e.g., -bash -> bash, -zsh -> zsh)
+	cmd="${cmd#-}"
+	case "$cmd" in
+	bash | zsh | fish | sh | dash | ksh | tcsh | csh | nu) printf '%s\n' "$cmd" ;;
+	esac
+}
+
 if [ ! -f "$INPUT_FILE" ]; then
 	log "no saved sessions found at $INPUT_FILE"
 	exit 0
@@ -135,6 +177,10 @@ printf '%s\n' "$entries" | jq -c '.[]' >"$tmpfile"
 restored=0
 entry_number=0
 claimed_panes="|"
+# Sessions that have already paid the client wait below (same delimited-string
+# idiom as claimed_panes, for bash 3.2): a later pane in an already-waited
+# session skips straight to replay.
+waited_sessions="|"
 while read -r entry; do
 	entry_number=$((entry_number + 1))
 	# Treat the sidecar as untrusted input. Besides preventing surprising jq
@@ -238,49 +284,26 @@ while read -r entry; do
 		;;
 	esac
 
-	# Wait for at least one client to attach to this pane's session before
-	# replaying. TUI tools that query the terminal at startup (OSC 11
-	# background-color for theme detection, cursor-shape, hyperlinks, etc.)
-	# get a null response if no terminal is attached when the query fires
-	# — tmux silently drops the query because there's no client to forward
-	# it to. crossterm-based tools cache that null response in a OnceLock
-	# and never retry, so a single bad startup permanently locks the tool
-	# to its fallback state for the lifetime of the process. Symptom seen
-	# in the wild: codex's diff palette permanently dark on a light
-	# terminal after every reboot, requiring a manual `codex resume` to
-	# clear.
-	#
-	# Poll every 100ms, cap at 5s so we don't hang the rest of the restore
-	# if the user never attaches a client. In normal boot flows where a
-	# kitty/wezterm/etc auto-attaches via `tmux new-session -A`, the wait
-	# resolves in < 200ms.
-	#
-	# `list-clients` takes a session target, and the session name cannot be one
-	# (see above) — but a pane id resolves to its own session, so target that.
-	client_wait=0
-	while [ "$(tmux list-clients -t "$pane_id" 2>/dev/null | wc -l)" -eq 0 ] && [ $client_wait -lt 50 ]; do
-		sleep 0.1
-		client_wait=$((client_wait + 1))
-	done
-	if [ $client_wait -ge 50 ]; then
-		log "no client attached to session '$tmux_session' after 5s; replaying anyway (TUI startup queries may miss responses)"
-	fi
+	# Used below to key the once-per-session client wait. Validated against
+	# "$" + digits before being trusted as a cache key: a name can contain
+	# '|', the delimiter this cache and the existing claimed_panes both use,
+	# and an ordinary name can also collide with another session's real id,
+	# so anything else is treated as unresolvable and the pane below falls
+	# through to its own uncached wait rather than a name-shaped key.
+	tmux_session_id=$(tmux display-message -t "$pane_id" -p '#{session_id}' 2>/dev/null || true)
+	[[ "$tmux_session_id" =~ ^\$[0-9]+$ ]] || tmux_session_id=""
 
 	# Guard 1: skip if the pane is not running a shell.
 	# After tmux-resurrect restore, panes should be running a shell (bash, zsh,
 	# etc.). If something else is running (e.g., the user manually started vim,
 	# or @resurrect-processes restored a non-assistant program), injecting
 	# send-keys would feed commands into the wrong program.
-	pane_cmd=$(tmux display-message -t "$pane_id" -p '#{pane_current_command}' 2>/dev/null || true)
-	# Strip leading '-' from login shells (e.g., -bash -> bash, -zsh -> zsh)
-	pane_cmd="${pane_cmd#-}"
-	case "$pane_cmd" in
-	bash | zsh | fish | sh | dash | ksh | tcsh | csh | nu) ;;
-	*)
-		log "pane $pane is running '$pane_cmd' (not a shell), skipping"
+	pane_cmd=$(pane_shell_name "$pane_id")
+	if [ -z "$pane_cmd" ]; then
+		reported_cmd=$(tmux display-message -t "$pane_id" -p '#{pane_current_command}' 2>/dev/null || true)
+		log "pane $pane is running '${reported_cmd#-}' (not a shell), skipping"
 		continue
-		;;
-	esac
+	fi
 
 	# Guard 2: skip if the pane already has a running assistant (e.g., if
 	# @resurrect-processes launched it, or user restarted manually).
@@ -562,6 +585,43 @@ while read -r entry; do
 		esac
 	else
 		full_cmd="$resume_cmd"
+	fi
+
+	# A timed-out wait consumes the session's budget too; later panes do not
+	# retry.
+	wait_invoked=0
+	if [ -n "$tmux_session_id" ]; then
+		case "$waited_sessions" in
+		*"|${tmux_session_id}|"*) ;;
+		*)
+			waited_sessions="${waited_sessions}${tmux_session_id}|"
+			wait_invoked=1
+			wait_for_session_client "$pane_id" ||
+				log "no client attached to session '$tmux_session' after 5s; replaying anyway (TUI startup queries may miss responses)"
+			;;
+		esac
+	else
+		wait_invoked=1
+		wait_for_session_client "$pane_id" ||
+			log "no client attached to session '$tmux_session' after 5s; replaying anyway (TUI startup queries may miss responses)"
+	fi
+
+	# After any invoked wait, re-check shell identity and assistant presence:
+	# the command was built for the shell observed before waiting.
+	if [ "$wait_invoked" -eq 1 ]; then
+		recheck_cmd=$(pane_shell_name "$pane_id")
+		if [ -z "$recheck_cmd" ] || [ "$recheck_cmd" != "$pane_cmd" ]; then
+			log "pane $pane changed while waiting for a client, skipping"
+			continue
+		fi
+		pane_shell_pid=$(tmux display-message -t "$pane_id" -p '#{pane_pid}' 2>/dev/null || true)
+		if [ -n "$pane_shell_pid" ]; then
+			existing=$(pane_has_assistant "$pane_shell_pid" || true)
+			if [ -n "$existing" ]; then
+				log "pane $pane already has a running assistant (pid $existing), skipping"
+				continue
+			fi
+		fi
 	fi
 
 	if [ "$kind" = "relaunch" ]; then
