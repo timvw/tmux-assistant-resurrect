@@ -43,7 +43,7 @@ restore them automatically.
   emit two tagged records joined on a `|`-free key rather than widening one.
   Never place a session name or path before another field. The join key must be
   `#{pane_id}`, never `#{pane_pid}`: both are `|`-free, but the kernel can hand
-  a dead pane's pid to a new pane between the two `list-panes` calls and pair
+  a dead pane's pid to a new pane between separate `list-panes` calls and pair
   one pane's metadata with another's cwd, whereas tmux never reuses a pane id
   within a server.
 - **Two-guard restore**: The restore script has two independent guards before
@@ -357,13 +357,26 @@ what it emits or what it accepts:
 |-------|------|---------|
 | Contract | `test/tmux-target-contract-test.sh` | tmux changing session-name handling or its target grammar (needs tmux >= 3.7; skips below) |
 | End-to-end | `test/run-tests.sh` `hostile_session_names` | save/restore wiring for a `\|` name; `:`/`.` names when tmux keeps them |
-| Hermetic | `test/target-resolution-unit-tests.sh` | `split_pane_target` / `match_pane_id` parsing, on every platform; plus static guards on the save hook's two `-F` record shapes |
+| Hermetic | `test/target-resolution-unit-tests.sh` | `split_pane_target` / `match_pane_id` parsing, on every platform; plus static guards on the save hook's three `-F` record shapes |
 
-The static guards in the hermetic suite exist because the awk that joins those
-two records is embedded in the save hook and cannot be driven in isolation.
-They pin the join key to `#{pane_id}` and keep each record's free-form field
-last. Swapping the key back to `#{pane_pid}` looks harmless and no behavioural
-test would notice it -- see the pipe delimiter rule at the top of this file.
+The static guards in the hermetic suite pin the tmux producer's side of the
+contract -- the join key and field order in the `-F` strings the save hook
+hands to `list-panes` -- while other fixtures in the same suite exercise the
+standalone awk consumer directly. They pin the join key to `#{pane_id}` and
+keep each record's free-form field last. Swapping the key back to
+`#{pane_pid}` looks harmless and these consumer-only fixtures would not
+notice it -- see the pipe delimiter rule at the top of this file.
+
+Grouped membership has a real-tmux contract in
+`test/grouped-session-contract-test.sh` (including renamed group-name reuse,
+linked-window indices, multiple groups, and pipe names). The separate
+`test/grouped-session-lifecycle-test.sh /path/to/tmux-resurrect` runs upstream
+save/restart/restore with a recording CLI fixture. It proves stock grouped
+restore works, then explicitly reaps the clone before the assistant hook to
+reproduce the missing-clone condition; it does not establish the ordering of
+any user's attach script or test an authenticated conversation. Both own their
+sockets. For reproducible lifecycle runs, use tmux-resurrect commit
+`cff343cf9e81983d3da0c8562b01616f12e8d548`.
 
 **Run the authenticated test after touching Copilot session discovery**
 (`GH_TOKEN=$(gh auth token) just test-copilot-e2e`). It is the only layer that

@@ -468,6 +468,17 @@ else
 	fail "Hook and plugin hardening unit suite"
 fi
 
+# Group membership is available on older tmux too. Keep this on both Linux
+# Bash versions as well as macOS; it owns a separate socket.
+suite "grouped_session_contract"
+if grouped_contract_output=$("${TEST_BASH:-bash}" "$REPO_DIR/test/grouped-session-contract-test.sh" 2>&1); then
+	echo "$grouped_contract_output"
+	pass "Grouped session membership contract"
+else
+	echo "$grouped_contract_output"
+	fail "Grouped session membership contract"
+fi
+
 # --- Copilot upstream contract ---
 #
 # The suite above fabricates the artifacts it looks for, so on its own it cannot

@@ -2629,30 +2629,36 @@ main() {
 		rm -f "$PS_FILE" "$PANE_FILE" "$PARTS_FILE" "$RELAUNCH_PARTS_FILE"
 		return 1
 	fi
-	# Two tagged records per pane, both ending in the one field that may itself
-	# contain the '|' delimiter (the session name / the pane path). Everything
-	# before it is '|'-free — a pane id, a pid, numeric indices, a /dev/... tty —
-	# so awk can peel those off the front by position and take the rest verbatim.
-	# Emitting the two free-form fields on separate records is what keeps them
-	# from shifting each other.
+	# Three tagged records per pane, each ending in the one field that may
+	# itself contain the '|' delimiter (the session name / the pane path / the
+	# session group). Everything before it is '|'-free — a pane id, a pid,
+	# numeric indices, a /dev/... tty — so awk can peel those off the front by
+	# position and take the rest verbatim. Emitting each free-form field on its
+	# own record is what keeps them from shifting each other.
 	#
 	# A control-character delimiter would be simpler but is not portable: tmux
 	# < 3.7 rewrites those in -F output, and differently per version (3.4 emits
 	# the octal escape, 3.5 the hex escape, 3.6 an underscore).
 	#
-	# The records join on #{pane_id}, not #{pane_pid}: it is '%' plus digits (so
-	# still delimiter-free), and tmux never reuses one within a server, whereas
-	# the kernel can hand a dead pane's pid to a new one between the two calls
-	# and silently pair one pane's metadata with another's cwd.
+	# All three records join on #{pane_id}, not #{pane_pid}: it is '%' plus
+	# digits (so still delimiter-free), and tmux never reuses one within a
+	# server, whereas the kernel can hand a dead pane's pid to a new one
+	# between separate list-panes calls and silently pair one pane's metadata
+	# with another's cwd.
 	#
-	# The calls are a moment apart either way. A pane that dies in between has a
-	# P record but no C record, so it saves with an empty cwd; one created in
-	# between has a C record but no P record, so it is not saved at all. Both are
-	# bounded and self-correcting on the next save — restore skips the `cd` in
-	# the first case, and the pane had no assistant to save in the second.
+	# The three calls are separate snapshots. A pane with P but no C saves an
+	# empty cwd; without G it uses the membership fallback. A pane with no P
+	# record is not saved.
+	#
+	# G carries #{session_group}, which is the same for every member of a
+	# tmux session group and is what lets the awk pass prefer a group's own
+	# member name over whichever one list-panes happened to list last. A pane
+	# is listed once per session it belongs to, so an ungrouped membership
+	# reported after the grouped ones produces an empty G row here too.
 	{
 		tmux list-panes -a -F "P|#{pane_id}|#{pane_pid}|#{window_index}|#{pane_index}|#{pane_tty}|#{session_name}"
 		tmux list-panes -a -F "C|#{pane_id}|#{pane_current_path}"
+		tmux list-panes -a -F "G|#{pane_id}|#{session_group}"
 	} >"$PANE_FILE"
 
 	# --- Single awk pass: detect assistant tools across ALL pane process trees ---

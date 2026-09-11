@@ -13,16 +13,29 @@ function peel(   i, field) {
 }
 
 NR == FNR {
-	# First file: pane data, two record types keyed by pane id:
+	# First file: pane data, three record types keyed by pane id:
 	#   P|pane_id|pane_pid|window_index|pane_index|pane_tty|session_name
 	#   C|pane_id|pane_current_path
-	# Both end in a field that may contain the delimiter itself, so peel the
+	#   G|pane_id|session_group
+	# Each ends in a field that may contain the delimiter itself, so peel the
 	# fixed-shape fields and keep the rest of the line verbatim.
 	rec = $0
 	tag = peel()
 	key = peel()
 	if (tag == "" || key == "") next
 	if (tag == "C") { pane_cwd[key] = rec; next }
+	if (tag == "G") {
+		# A pane can be listed under several sessions (any combination of
+		# groups and ungrouped link-window targets), each producing its own
+		# G row. An ungrouped membership's row is empty and is skipped, not
+		# recorded. Distinct non-empty groups are kept in listing order, each
+		# once, for the selection below to try in that order.
+		if (rec != "" && !((key, rec) in pane_group_seen)) {
+			pane_group_seen[key, rec] = 1
+			pane_group_at[key, ++pane_group_count[key]] = rec
+		}
+		next
+	}
 	if (tag != "P") next
 	pid = peel()
 	win = peel()
@@ -33,9 +46,20 @@ NR == FNR {
 	pane_session[key] = rec
 	pane_window[key] = win
 	pane_index[key] = idx
-	pane_target[key] = rec ":" win "." idx
 	pane_tty[key] = tty
-	pane_list[++pane_count] = key
+	# A pane listed under several sessions produces one P row per
+	# membership, sharing this key. Later rows overwrite these scalars
+	# (last write wins); dedup below keeps this pane to one traversal.
+	if (!(key in pane_seen)) {
+		pane_seen[key] = 1
+		pane_list[++pane_count] = key
+	}
+	# Record this membership and its own window/pane index, keyed by
+	# (pane_id, session_name). This is what lets the selection below use
+	# the address from the one row a chosen name actually came from.
+	member_win[key, rec] = win
+	member_idx[key, rec] = idx
+	pane_member[key, rec] = 1
 	next
 }
 
@@ -61,12 +85,30 @@ END {
 		# pane_list holds pane ids; the BFS below roots at the pid.
 		key = pane_list[i]
 		root = pane_pid[key]+0
-		target = pane_target[key]
 		cwd = pane_cwd[key]
 		tty = pane_tty[key]
 		sess = pane_session[key]
 		win = pane_window[key]
 		idx = pane_index[key]
+
+		# A window can be linked across sessions that belong to different
+		# groups, so one pane can carry more than one distinct group value.
+		# Try each in listing order and take the first one this pane also
+		# has a membership row under; a group name existing on some other
+		# pane's session does not qualify. The window and pane index come
+		# from that same membership row, so the saved address always names
+		# one real row for this pane. No qualifying group falls back to
+		# whichever membership was listed last.
+		for (g = 1; g <= pane_group_count[key]; g++) {
+			candidate = pane_group_at[key, g]
+			if ((key, candidate) in pane_member) {
+				sess = candidate
+				win = member_win[key, candidate]
+				idx = member_idx[key, candidate]
+				break
+			}
+		}
+		target = sess ":" win "." idx
 
 		# Check pane PID itself (handles exec-replaced shells)
 		if (root in proc_tool && proc_tool[root] != "") {
