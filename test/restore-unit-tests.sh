@@ -69,21 +69,143 @@ lookup_shell() {
 	printf '%s\n' "${MOCK_SHELLS:-}" | awk -F '|' -v pane="$1" '$1 == pane { print $2; exit }'
 }
 
+# Maps a pane id to a tmux #{session_id}-shaped value ("$" + digits, the
+# same $0/$1/... syntax real tmux uses -- this models the ID syntax only,
+# not tmux's actual session-selection behavior for linked/grouped panes) by
+# looking up which session name MOCK_PANES says that pane belongs to, then
+# mapping session names to small integers in first-seen order, so panes
+# sharing a session name share an id and panes in different sessions get
+# different ids.
+# Session names are matched on the FULL tail after the third '|' (fields 4+
+# rejoined on '|'), the same "free-form field is last, take the remainder
+# verbatim" convention the production -F strings use -- a session literally
+# named "weird|one" must stay distinct from "weird|two", not collapse to a
+# shared field-4 prefix "weird".
+#
+# MOCK_SESSION_ID_OVERRIDE, if set, is returned verbatim instead (used to
+# simulate a malformed or failed #{session_id} lookup returning empty, or
+# any other edge value).
+# MOCK_SESSION_ID_OVERRIDE_PANE, if set, scopes that override to one pane id
+# so a fixture can mix an unresolvable pane with an ordinary, correctly
+# resolved one in the same run.
+lookup_session_id() {
+	local pane="$1" sess
+	if [ -n "${MOCK_SESSION_ID_OVERRIDE+x}" ] &&
+		{ [ -z "${MOCK_SESSION_ID_OVERRIDE_PANE:-}" ] || [ "${MOCK_SESSION_ID_OVERRIDE_PANE}" = "$pane" ]; }; then
+		printf '%s\n' "$MOCK_SESSION_ID_OVERRIDE"
+		return
+	fi
+	sess=$(printf '%s\n' "${MOCK_PANES:-}" | awk -F '|' -v pane="$pane" '
+		$1 == pane {
+			rest = $4
+			for (i = 5; i <= NF; i++) rest = rest "|" $i
+			print rest
+			exit
+		}')
+	[ -n "$sess" ] || { printf '\n'; return; }
+	printf '%s\n' "${MOCK_PANES:-}" | awk -F '|' -v want="$sess" '
+		{
+			rest = $4
+			for (i = 5; i <= NF; i++) rest = rest "|" $i
+			if (!(rest in seen)) { seen[rest] = n++ }
+		}
+		{
+			rest = $4
+			for (i = 5; i <= NF; i++) rest = rest "|" $i
+		}
+		rest == want { print "$" seen[want]; exit }
+	'
+}
+
 case "${1:-}" in
 list-panes)
 	printf '%s\n' "${MOCK_PANES:-}"
 	;;
 list-clients)
-	printf 'client\n'
+	if [ -n "${MOCK_REMOVE_CWD_ON_WAIT:-}" ] && [ -d "$MOCK_REMOVE_CWD_ON_WAIT" ]; then
+		rmdir "$MOCK_REMOVE_CWD_ON_WAIT"
+	fi
+	# Attribute calls by target (server-wide "" vs -t <target>) so tests can
+	# assert which pane/session actually polled, and how many times, without
+	# actually waiting out the 5s cap (sleep is mocked to a no-op).
+	target="${3:-server}"
+	if [ -n "${MOCK_LIST_CLIENTS_LOG:-}" ]; then
+		printf '%s\n' "$target" >>"$MOCK_LIST_CLIENTS_LOG"
+	fi
+	# Reproduces the exact race the wait_invoked=1, zero-sleep case must still
+	# catch: a client found on this call's very first check still leaves a
+	# window in which the pane can change, because answering the check is
+	# itself real elapsed time. Marks the flip pane changed, then answers
+	# this call with a client attached immediately.
+	if [ -n "${MOCK_FLIP_ON_LIST_CLIENTS_PANE:-}" ] && [ "$target" = "$MOCK_FLIP_ON_LIST_CLIENTS_PANE" ]; then
+		: >"${MOCK_FLIP_ON_LIST_CLIENTS_MARKER:?}"
+		printf 'client\n'
+		exit 0
+	fi
+	if [ -n "${MOCK_CLIENT_AFTER_CALLS:-}" ]; then
+		# Simulates a client attaching to a session mid-poll: stays empty for
+		# the first MOCK_CLIENT_AFTER_CALLS calls (any target), then reports
+		# one client on every call after that. This fixture only ever uses
+		# one session, so applying the attach to every target is equivalent
+		# to attaching to that one session; it is not a model of a client
+		# reaching multiple independent sessions at once.
+		count_file="${MOCK_LIST_CLIENTS_LOG:-/dev/null}.count"
+		n=$(($(cat "$count_file" 2>/dev/null || echo 0) + 1))
+		printf '%s' "$n" >"$count_file"
+		if [ "$n" -gt "$MOCK_CLIENT_AFTER_CALLS" ]; then
+			printf 'client\n'
+		fi
+	elif [ "${MOCK_NO_CLIENT:-}" != 1 ]; then
+		printf 'client\n'
+	fi
 	;;
 display-message)
 	pane="${3:-}"
 	case "${5:-}" in
 	'#{pane_current_command}')
+		if [ -n "${MOCK_PANE_CMD_CALLS_LOG:-}" ]; then
+			printf '%s\n' "$pane" >>"$MOCK_PANE_CMD_CALLS_LOG"
+		fi
+		# MOCK_SHELL_FLIP_PANE, if set, makes this pane report
+		# MOCK_SHELL_FLIP_TO starting from its second #{pane_current_command}
+		# query onward -- simulates the pane's foreground process changing
+		# between guard 1's first check and the post-wait re-check.
+		if [ "${MOCK_SHELL_FLIP_PANE:-}" = "$pane" ]; then
+			flip_count_file="${MOCK_PANE_CMD_CALLS_LOG:-/dev/null}.flip-$pane"
+			n=$(($(cat "$flip_count_file" 2>/dev/null || echo 0) + 1))
+			printf '%s' "$n" >"$flip_count_file"
+			if [ "$n" -gt 1 ]; then
+				printf '%s\n' "${MOCK_SHELL_FLIP_TO:-vim}"
+				exit 0
+			fi
+		fi
+		# The MOCK_FLIP_ON_LIST_CLIENTS_PANE marker (see list-clients above)
+		# is written during the wait, inside that first list-clients call's
+		# own handler, before this query ever runs -- so any
+		# #{pane_current_command} query for that pane sees the changed value
+		# once the marker exists. Guard 1's original query already ran
+		# before the wait started, so only the post-wait re-check observes it.
+		if [ -n "${MOCK_FLIP_ON_LIST_CLIENTS_PANE:-}" ] && [ "$pane" = "$MOCK_FLIP_ON_LIST_CLIENTS_PANE" ] &&
+			[ -e "${MOCK_FLIP_ON_LIST_CLIENTS_MARKER:-/nonexistent}" ]; then
+			printf '%s\n' "${MOCK_FLIP_ON_LIST_CLIENTS_TO:-vim}"
+			exit 0
+		fi
 		shell_name=$(lookup_shell "$pane")
 		printf '%s\n' "${shell_name:-bash}"
 		;;
-	'#{pane_pid}') printf '%s\n' "${MOCK_PANE_PID:-999999}" ;;
+	'#{pane_pid}')
+		[ -z "${MOCK_PANE_PID_CALLS_LOG:-}" ] || printf '%s\n' "$pane" >>"$MOCK_PANE_PID_CALLS_LOG"
+		if [ "${MOCK_PANE_PID_PANE:-}" = "$pane" ]; then
+			printf '%s\n' "${MOCK_PANE_PID:-999999}"
+		else
+			# A pid distinct from MOCK_PANE_PID/MOCK_PS_FLIP_SNAPSHOT's tree, so
+			# a fixture that scopes an assistant-appearing snapshot to one pane
+			# (MOCK_PANE_PID_PANE) doesn't also make every OTHER pane in the same
+			# run walk that same fake tree and find the same assistant.
+			printf '999999\n'
+		fi
+		;;
+	'#{session_id}') lookup_session_id "$pane" ;;
 	esac
 	;;
 show-option)
@@ -128,7 +250,36 @@ cat >"$MOCK_BIN/claude" <<'MOCK_CLAUDE'
 } >"$MOCK_ASSISTANT_MARKER"
 MOCK_CLAUDE
 
-chmod +x "$MOCK_BIN/sleep" "$MOCK_BIN/tmux" "$MOCK_BIN/claude"
+# pane_has_assistant() takes an explicit process snapshot as its second
+# argument in the other suites' unit tests, but restore-assistant-sessions.sh
+# calls it with only a pid, so it falls back to a live `ps -eo
+# pid=,ppid=,args=` snapshot. Mock that fallback here: MOCK_PS_SNAPSHOT, if
+# set, is echoed verbatim (one "pid ppid args" row per line, matching what
+# pane_has_assistant's own tree walk expects); otherwise this reports no
+# processes at all, which is a safe default for every test that never sets
+# it (pane_has_assistant then finds nothing, guard 2 passes as before).
+# MOCK_PS_FLIP_AFTER_CALLS, if set, makes ps report MOCK_PS_FLIP_SNAPSHOT
+# starting from that call number onward -- simulates an assistant process
+# starting up inside the pane's tree partway through the restore (e.g.
+# during the wait), the same "flips on a later query" idiom
+# MOCK_SHELL_FLIP_PANE uses for #{pane_current_command}.
+cat >"$MOCK_BIN/ps" <<'MOCK_PS'
+#!/usr/bin/env bash
+if [ -n "${MOCK_PS_FLIP_AFTER_CALLS:-}" ]; then
+	count_file="${MOCK_PS_FLIP_COUNT_FILE:?}"
+	n=$(($(cat "$count_file" 2>/dev/null || echo 0) + 1))
+	printf '%s' "$n" >"$count_file"
+	if [ "$n" -ge "$MOCK_PS_FLIP_AFTER_CALLS" ]; then
+		printf '%s\n' "$MOCK_PS_FLIP_SNAPSHOT"
+		exit 0
+	fi
+fi
+if [ -n "${MOCK_PS_SNAPSHOT+x}" ]; then
+	printf '%s\n' "$MOCK_PS_SNAPSHOT"
+fi
+MOCK_PS
+
+chmod +x "$MOCK_BIN/sleep" "$MOCK_BIN/tmux" "$MOCK_BIN/claude" "$MOCK_BIN/ps"
 
 export PATH="$MOCK_BIN:$PATH"
 export TMUX_RESURRECT_DIR="$RESURRECT_DIR"
@@ -150,6 +301,422 @@ file_mode() {
 	*) stat -c '%a' "$1" ;;
 	esac
 }
+
+echo "== client wait runs once per session, not once per pane =="
+client_wait_log="$SANDBOX/list-clients.log"
+export MOCK_LIST_CLIENTS_LOG="$client_wait_log"
+export MOCK_NO_CLIENT=1
+export MOCK_EXEC_SHELL=''
+export MOCK_FAIL_CLEAR_PANE=''
+export MOCK_CAPTURE_ENV=''
+# 5 panes across 2 sessions (3 + 2). lookup_session_id in the mock maps pane
+# ids to realistic "$N" session ids from MOCK_PANES' session-name column, so
+# wait-a's three panes share one id and wait-b's two panes share another.
+# Each fully-timed-out wait starts one list-clients poll sequence; count wait
+# STARTS per session (a fresh, otherwise-empty target appearing in the log)
+# rather than the raw call count, which is coupled to the 50-attempts/100ms
+# constants and would break if those ever change without the policy changing.
+export MOCK_PANES='%20|0|0|wait-a
+%21|0|1|wait-a
+%22|0|2|wait-a
+%23|0|0|wait-b
+%24|0|1|wait-b'
+export MOCK_SHELLS=''
+jq -n '{sessions:[
+  {pane:"wait-a:0.0",session_name:"wait-a",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-a0",cwd:""},
+  {pane:"wait-a:0.1",session_name:"wait-a",window_index:"0",pane_index:"1",tool:"claude",session_id:"sid-a1",cwd:""},
+  {pane:"wait-a:0.2",session_name:"wait-a",window_index:"0",pane_index:"2",tool:"claude",session_id:"sid-a2",cwd:""},
+  {pane:"wait-b:0.0",session_name:"wait-b",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-b0",cwd:""},
+  {pane:"wait-b:0.1",session_name:"wait-b",window_index:"0",pane_index:"1",tool:"claude",session_id:"sid-b1",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$client_wait_log"
+run_restore
+# A wait for any of these panes is logged under its pane id (this call
+# passes a pane id); each poll sequence for an unseen target is a genuine
+# new wait, so distinct targets polled == number of waits run.
+distinct_targets_polled=$(sort -u "$client_wait_log" | grep -c '^%')
+assert_eq "restore succeeds even when no client ever attaches" "0" "$RESTORE_STATUS"
+assert_eq "all 5 panes across 2 sessions are still replayed" "5" "$(grep -c '^send-keys|%2[0-4]|command claude' "$TMUX_LOG")"
+assert_eq "only one pane per session actually polls list-clients" "2" "$distinct_targets_polled"
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_eq "per-session no-client warning is logged exactly once per distinct session" "2" \
+	"$(grep -c "no client attached to session 'wait-" <<<"$restore_log")"
+unset MOCK_NO_CLIENT
+
+echo "== a pane skipped by an eligibility guard does not consume the session's wait budget =="
+: >"$client_wait_log"
+export MOCK_NO_CLIENT=1
+export MOCK_PANES='%30|0|0|budget-sess
+%31|0|1|budget-sess'
+# %30 is "vim" (fails guard 1, skipped before it can reach the wait at all);
+# %31 is a normal shell and must still get its own full wait, not inherit a
+# non-answer from the pane that never asked.
+export MOCK_SHELLS='%30|vim
+%31|bash'
+jq -n '{sessions:[
+  {pane:"budget-sess:0.0",session_name:"budget-sess",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-skip",cwd:""},
+  {pane:"budget-sess:0.1",session_name:"budget-sess",window_index:"0",pane_index:"1",tool:"claude",session_id:"sid-eligible",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_contains "the ineligible pane is skipped by guard 1, before any wait" "$restore_log" "pane budget-sess:0.0 is running 'vim' (not a shell), skipping"
+assert_contains "the eligible pane in the same session still gets its wait" "$restore_log" "no client attached to session 'budget-sess' after 5s"
+assert_eq "only the eligible pane polled list-clients" "1" "$(sort -u "$client_wait_log" | grep -c '^%')"
+assert_contains "the eligible pane is still replayed" "$(cat "$TMUX_LOG")" "send-keys|%31|command claude --resume 'sid-eligible'"
+export MOCK_SHELLS=''
+unset MOCK_NO_CLIENT
+
+echo "== other eligibility failures also leave the session wait to the next pane =="
+for rejection in assistant missing-cwd unvouched; do
+	: >"$client_wait_log"
+	export MOCK_NO_CLIENT=1
+	export MOCK_PANE_PID_PANE='%30' MOCK_PANE_PID='42000'
+	export MOCK_PS_SNAPSHOT=''
+	first_cwd=''
+	if [ "$rejection" = assistant ]; then
+		export MOCK_PS_SNAPSHOT='42001 42000 claude --resume existing
+42000 1 bash'
+	elif [ "$rejection" = missing-cwd ]; then
+		first_cwd="$SANDBOX/does-not-exist"
+	fi
+	export MOCK_VOUCHER="$SANDBOX/budget-voucher"
+	printf '%s\n' 'claude agents' >"$MOCK_VOUCHER"
+	expected_replay="command claude --resume 'sid-eligible'"
+	if [ "$rejection" = unvouched ]; then
+		expected_replay="command claude 'agents'"
+	fi
+	jq -n --arg cwd "$first_cwd" --arg rejection "$rejection" '{sessions:[
+      {pane:"budget-sess:0.1",tool:"claude",session_id:"sid-eligible",cwd:""}
+    ], relaunch:[]} |
+    if $rejection == "unvouched" then
+      .sessions = [] | .relaunch = [
+        {pane:"budget-sess:0.0",tool:"claude",cmd:"claude agents --name unvouched",cwd:""},
+        {pane:"budget-sess:0.1",tool:"claude",cmd:"claude agents",cwd:""}
+      ]
+    else
+      .sessions = [{pane:"budget-sess:0.0",tool:"claude",session_id:"sid-skip",cwd:$cwd}] + .sessions
+    end' >"$RESURRECT_DIR/assistant-sessions.json"
+	run_restore
+	assert_eq "$rejection: restore succeeds" "0" "$RESTORE_STATUS"
+	assert_not_contains "$rejection: rejected pane never polls" "$(cat "$client_wait_log")" '%30'
+	assert_contains "$rejection: eligible pane still polls" "$(cat "$client_wait_log")" '%31'
+	assert_not_contains "$rejection: rejected pane stays untouched" "$(cat "$TMUX_LOG")" 'send-keys|%30|'
+	assert_contains "$rejection: eligible pane replays" "$(cat "$TMUX_LOG")" "$expected_replay"
+done
+unset MOCK_NO_CLIENT MOCK_PANE_PID_PANE MOCK_PANE_PID MOCK_PS_SNAPSHOT MOCK_VOUCHER
+
+echo "== a saved directory removed during the wait leaves the pane untouched =="
+export MOCK_REMOVE_CWD_ON_WAIT="$SANDBOX/removed-during-wait"
+mkdir -p "$MOCK_REMOVE_CWD_ON_WAIT"
+export MOCK_PANES='%30|0|0|budget-sess
+%31|0|1|budget-sess'
+: >"$client_wait_log"
+jq -n --arg cwd "$MOCK_REMOVE_CWD_ON_WAIT" '{sessions:[
+  {pane:"budget-sess:0.0",tool:"claude",session_id:"sid-removed",cwd:$cwd},
+  {pane:"budget-sess:0.1",tool:"claude",session_id:"sid-eligible",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_eq "cwd disappears: restore succeeds" "0" "$RESTORE_STATUS"
+assert_not_contains "cwd disappears: no clear or resume reaches the pane" "$(cat "$TMUX_LOG")" 'send-keys|%30|'
+assert_contains "cwd disappears: next pane still replays" "$(cat "$TMUX_LOG")" "send-keys|%31|command claude --resume 'sid-eligible'"
+assert_not_contains "cwd disappears: consumed wait is not retried for the next pane" "$(cat "$client_wait_log")" '%31'
+unset MOCK_REMOVE_CWD_ON_WAIT
+
+echo "== an unresolvable session id disables the cache instead of falling back to a name =="
+: >"$client_wait_log"
+export MOCK_NO_CLIENT=1
+export MOCK_SESSION_ID_OVERRIDE=''
+# Defensive case: the #{session_id} lookup returns empty (a malformed or
+# failed answer -- this asserts our handling of that response, not a claim
+# about when real tmux produces it). If that empty result fell back to the
+# session name for the cache key, a session literally named '$1' would
+# silently reuse -- or poison -- an unrelated real session whose id happens
+# to be $1. Assert the opposite: with no valid id, the pane still gets its
+# own ordinary wait rather than being folded into any cache entry, and a
+# same-named-as-a-real-id session does not short-circuit.
+export MOCK_PANES='%40|0|0|$1'
+jq -n '{sessions:[{pane:"$1:0.0",session_name:"$1",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-dollar1",cwd:""}]}' \
+	>"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_contains "a pane with no resolvable session id still waits (fails open to the ordinary wait, not the cache)" \
+	"$restore_log" "no client attached to session '\$1' after 5s"
+assert_contains "the pane is still replayed despite the unresolvable id" "$(cat "$TMUX_LOG")" "send-keys|%40|command claude --resume 'sid-dollar1'"
+unset MOCK_SESSION_ID_OVERRIDE
+
+echo "== unresolvable identity on one otherwise-eligible pane does not poison a later session whose real id equals its name =="
+: >"$client_wait_log"
+export MOCK_SESSION_ID_OVERRIDE=''
+export MOCK_SESSION_ID_OVERRIDE_PANE='%43'
+# %43 is an otherwise eligible pane whose #{session_id} lookup returns empty
+# (a malformed/failed answer, scoped to that one pane via
+# MOCK_SESSION_ID_OVERRIDE_PANE) and is saved with the session name '$1'.
+# %44 is an ordinary, correctly resolving pane in a DIFFERENT real session
+# that lookup_session_id happens to map to the id '$1' (it is the second
+# distinct session name seen by the mock in this run, so it gets '$1' in
+# first-seen order). If the unresolvable pane's name had leaked into
+# waited_sessions as a fallback key, %44's wait would incorrectly cache-hit
+# against it. It must not: %44 gets its own
+# full wait.
+export MOCK_PANES='%43|0|0|$1
+%44|0|0|second-real-session'
+jq -n --arg dollar1 '$1' '{sessions:[
+  {pane:($dollar1+":0.0"),session_name:$dollar1,window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-unresolved",cwd:""},
+  {pane:"second-real-session:0.0",session_name:"second-real-session",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-second-real",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_contains "the unresolvable pane still gets its own uncached wait" "$restore_log" "no client attached to session '\$1' after 5s"
+assert_contains "the later session with a colliding real id ('\$1') still gets its own wait, not a poisoned cache hit" \
+	"$restore_log" "no client attached to session 'second-real-session' after 5s"
+assert_eq "both panes still poll list-clients independently (no cache reuse across the collision)" "2" \
+	"$(sort -u "$client_wait_log" | grep -c '^%')"
+assert_contains "the unresolvable pane is still replayed" "$(cat "$TMUX_LOG")" "send-keys|%43|command claude --resume 'sid-unresolved'"
+assert_contains "the colliding-id session's pane is still replayed" "$(cat "$TMUX_LOG")" "send-keys|%44|command claude --resume 'sid-second-real'"
+unset MOCK_SESSION_ID_OVERRIDE MOCK_SESSION_ID_OVERRIDE_PANE MOCK_NO_CLIENT
+
+echo "== a name containing '|' does not corrupt the session cache =="
+: >"$client_wait_log"
+export MOCK_NO_CLIENT=1
+# lookup_session_id derives ids from MOCK_PANES' real session-name column
+# (not the sidecar's), so a '|' here exercises the same delimited-string
+# scan waited_sessions and claimed_panes both use, without relying on the
+# fallback path removed above -- the id itself is what must stay '|'-free.
+export MOCK_PANES='%41|0|0|weird|name
+%42|0|1|weird|name'
+jq -n '{sessions:[
+  {pane:"weird|name:0.0",session_name:"weird|name",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-weird0",cwd:""},
+  {pane:"weird|name:0.1",session_name:"weird|name",window_index:"0",pane_index:"1",tool:"claude",session_id:"sid-weird1",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+assert_eq "both panes of a '|'-named session are replayed" "2" "$(grep -c '^send-keys|%4[12]|command claude' "$TMUX_LOG")"
+assert_eq "the two panes still share one wait (same resolved session id)" "1" "$(sort -u "$client_wait_log" | grep -c '^%')"
+unset MOCK_NO_CLIENT MOCK_LIST_CLIENTS_LOG
+
+echo "== two DIFFERENT '|'-containing session names stay distinct, not collapsed onto a shared prefix =="
+: >"$client_wait_log"
+export MOCK_LIST_CLIENTS_LOG="$client_wait_log"
+export MOCK_NO_CLIENT=1
+# lookup_session_id must key on the full tail after the third '|' (fields 4+
+# rejoined), not just field 4 -- otherwise "weird|one" and "weird|two" would
+# both map to field 4 "weird" and incorrectly share one cached wait.
+export MOCK_PANES='%45|0|0|weird|one
+%46|0|0|weird|two'
+jq -n '{sessions:[
+  {pane:"weird|one:0.0",session_name:"weird|one",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-weird-one",cwd:""},
+  {pane:"weird|two:0.0",session_name:"weird|two",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-weird-two",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_contains "weird|one gets its own wait" "$restore_log" "no client attached to session 'weird|one' after 5s"
+assert_contains "weird|two gets its own separate wait, not weird|one's cached result" "$restore_log" "no client attached to session 'weird|two' after 5s"
+assert_eq "both distinctly-named sessions poll list-clients independently" "2" "$(sort -u "$client_wait_log" | grep -c '^%')"
+unset MOCK_NO_CLIENT MOCK_LIST_CLIENTS_LOG
+
+echo "== a client attaching partway through the FIRST pane's wait is cached for the second pane, without a second poll =="
+# This documents the chosen policy rather than claiming it is invisible: the
+# wait is a single best-effort five-second budget per resolved session, spent
+# by whichever eligible pane asks first. MOCK_CLIENT_AFTER_CALLS=30 means the
+# very first wait's poll sequence sees the client attach partway through its
+# own 50 attempts (at call 31, well under the 50-attempt cap) -- pane 1's
+# wait succeeds without timing out. Pane 2 in the same session then skips
+# the wait entirely (cache hit): it does not re-poll to confirm the client
+# is still there, and it is not itself put in a position to time out. (The
+# separate, already-timed-out-session case is covered below by "a pane that
+# invokes the wait (it times out) is re-checked...".)
+attach_log="$SANDBOX/attach-timing.log"
+: >"$attach_log"
+export MOCK_LIST_CLIENTS_LOG="$attach_log"
+export MOCK_CLIENT_AFTER_CALLS=30
+export MOCK_PANES='%50|0|0|late-attach
+%51|0|1|late-attach'
+jq -n '{sessions:[
+  {pane:"late-attach:0.0",session_name:"late-attach",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-late0",cwd:""},
+  {pane:"late-attach:0.1",session_name:"late-attach",window_index:"0",pane_index:"1",tool:"claude",session_id:"sid-late1",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+poll_calls=$(wc -l <"$attach_log" | tr -d ' ')
+assert_eq "restore succeeds when a client attaches mid-poll" "0" "$RESTORE_STATUS"
+assert_not_contains "the session's one wait succeeds once the client attaches (no timeout logged)" "$restore_log" "no client attached to session"
+assert_eq "both panes are still replayed" "2" "$(grep -c '^send-keys|%5[01]|command claude' "$TMUX_LOG")"
+if [ "$poll_calls" -gt 30 ] && [ "$poll_calls" -lt 50 ]; then
+	pass "pane 1 actually polled past the attach point ($poll_calls calls, between 30 and 50) -- the wait ran, it did not just cache-hit immediately"
+else
+	fail "pane 1's poll count ($poll_calls) is outside the expected mid-wait attach window (30, 50)"
+fi
+assert_eq "pane 2 in the same session made no list-clients calls of its own (cache hit, no second roll)" "0" \
+	"$(grep -vc '^%50$' "$attach_log")"
+unset MOCK_CLIENT_AFTER_CALLS MOCK_LIST_CLIENTS_LOG
+
+echo "== no polling sleep when a client is already attached, and the cache is reused across panes =="
+reuse_log="$SANDBOX/reuse.log"
+cmd_calls_log="$SANDBOX/pane-cmd-calls.log"
+: >"$reuse_log"
+: >"$cmd_calls_log"
+export MOCK_LIST_CLIENTS_LOG="$reuse_log"
+export MOCK_PANE_CMD_CALLS_LOG="$cmd_calls_log"
+export MOCK_PANES='%25|0|0|wait-fast
+%26|0|1|wait-fast'
+jq -n '{sessions:[
+  {pane:"wait-fast:0.0",session_name:"wait-fast",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-fast",cwd:""},
+  {pane:"wait-fast:0.1",session_name:"wait-fast",window_index:"0",pane_index:"1",tool:"claude",session_id:"sid-fast-2",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_not_contains "no wait warning is logged when a client is already attached" "$restore_log" "no client attached"
+assert_contains "the first pane is still replayed" "$(cat "$TMUX_LOG")" "send-keys|%25|command claude --resume 'sid-fast'"
+assert_contains "the second pane in the same session is still replayed" "$(cat "$TMUX_LOG")" "send-keys|%26|command claude --resume 'sid-fast-2'"
+assert_eq "only the first pane in the session polled list-clients; the second reused the cached result" "1" "$(sort -u "$reuse_log" | grep -c '^%')"
+# The wait's own list-clients RPC sits between guard 1 and the re-check for
+# whichever pane actually invokes wait_for_session_client, even when a
+# client is already attached and the RPC returns on its very first call --
+# that RPC still ran, so the guards are re-checked for that one pane (query
+# count 2: guard 1, then the re-check). A cache hit adds no wait-related RPC
+# or sleep after guard 1 for its own pane, so it alone skips the re-check
+# (query count 1). The additional post-wait re-check runs once per resolved
+# session, not once per pane.
+assert_eq "total #{pane_current_command} queries: one pane pays for the (instant) wait, the other is a pure cache hit" "3" \
+	"$(wc -l <"$cmd_calls_log" | tr -d ' ')"
+assert_eq "pane %25 (first in session, invokes the wait) is queried twice: guard 1, then the re-check" "2" \
+	"$(grep -c '^%25$' "$cmd_calls_log")"
+assert_eq "pane %26 (cache hit, no wait RPC of its own) is queried only once" "1" \
+	"$(grep -c '^%26$' "$cmd_calls_log")"
+unset MOCK_LIST_CLIENTS_LOG MOCK_PANE_CMD_CALLS_LOG
+
+echo "== a pane that invokes the wait (it times out) is re-checked; the same session's cache-hit pane is not =="
+cmd_calls_log="$SANDBOX/pane-cmd-calls-2.log"
+: >"$cmd_calls_log"
+export MOCK_PANE_CMD_CALLS_LOG="$cmd_calls_log"
+export MOCK_NO_CLIENT=1
+export MOCK_PANES='%60|0|0|blocked-sess
+%61|0|1|blocked-sess'
+jq -n '{sessions:[
+  {pane:"blocked-sess:0.0",session_name:"blocked-sess",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-b0",cwd:""},
+  {pane:"blocked-sess:0.1",session_name:"blocked-sess",window_index:"0",pane_index:"1",tool:"claude",session_id:"sid-b1",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_contains "the session's one wait times out (never a client)" "$restore_log" "no client attached to session 'blocked-sess' after 5s"
+assert_eq "both panes are still replayed" "2" "$(grep -c '^send-keys|%6[01]|command claude' "$TMUX_LOG")"
+# %60 invokes wait_for_session_client (it consumes the session's budget and
+# times out), so it is re-checked: guard 1 fires once before the wait and
+# once after == 2 #{pane_current_command} queries. %61 never invokes the
+# wait at all (cache hit) -- not "invoked but resolved fast" -- so it never
+# reaches the re-check and keeps only its original guard-1 query == 1.
+assert_eq "the pane that invoked the wait is queried twice (pre-wait guard 1, post-wait re-check)" "2" \
+	"$(grep -c '^%60$' "$cmd_calls_log")"
+assert_eq "the cache-hit pane in the same session is queried only once (no re-check)" "1" \
+	"$(grep -c '^%61$' "$cmd_calls_log")"
+unset MOCK_NO_CLIENT MOCK_PANE_CMD_CALLS_LOG
+
+echo "== a pane that changes while its wait blocks is skipped by the post-wait re-check =="
+export MOCK_NO_CLIENT=1
+export MOCK_PANE_CMD_CALLS_LOG="$SANDBOX/pane-cmd-calls-flip.log"
+: >"$MOCK_PANE_CMD_CALLS_LOG"
+export MOCK_PANES='%70|0|0|flip-sess'
+export MOCK_SHELL_FLIP_PANE='%70'
+export MOCK_SHELL_FLIP_TO='vim'
+jq -n '{sessions:[{pane:"flip-sess:0.0",session_name:"flip-sess",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-flip",cwd:""}]}' \
+	>"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_contains "the changed pane is caught by the post-wait re-check, not sent a command" "$restore_log" "pane flip-sess:0.0 changed while waiting for a client, skipping"
+assert_not_contains "the changed pane never receives the clear command" "$(cat "$TMUX_LOG")" "send-keys|%70|clear"
+assert_not_contains "the changed pane never receives the resume command" "$(cat "$TMUX_LOG")" "send-keys|%70|command claude"
+unset MOCK_NO_CLIENT MOCK_SHELL_FLIP_PANE MOCK_SHELL_FLIP_TO MOCK_PANE_CMD_CALLS_LOG
+
+echo "== an assistant that starts inside the pane's tree during the wait is caught by the post-wait guard-2 re-check =="
+# #{pane_current_command} stays bash throughout (guard 1 alone would pass
+# both times); only the process-tree walk in pane_has_assistant changes.
+# ps's FIRST call is guard 2's pre-wait check and reports no assistant; ps's
+# SECOND call is the post-wait re-check and reports a claude process now
+# parented under the pane's shell pid. Two panes share the session so the
+# other pane's replay proves the skip is scoped to the one pane whose tree
+# changed.
+export MOCK_NO_CLIENT=1
+export MOCK_PANE_PID='42000'
+export MOCK_PANE_PID_PANE='%90'
+export MOCK_PS_FLIP_AFTER_CALLS=2
+export MOCK_PS_FLIP_COUNT_FILE="$SANDBOX/ps-flip-count"
+rm -f "$MOCK_PS_FLIP_COUNT_FILE"
+export MOCK_PS_FLIP_SNAPSHOT=' 42001 42000 claude --resume ses_appeared
+ 42000 1 bash'
+export MOCK_PANES='%90|0|0|assistant-appears-sess
+%91|0|1|assistant-appears-sess'
+jq -n '{sessions:[
+  {pane:"assistant-appears-sess:0.0",session_name:"assistant-appears-sess",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-appears",cwd:""},
+  {pane:"assistant-appears-sess:0.1",session_name:"assistant-appears-sess",window_index:"0",pane_index:"1",tool:"claude",session_id:"sid-appears-2",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_contains "the pane whose tree gained an assistant is caught by the re-check, not sent a command" \
+	"$restore_log" "pane assistant-appears-sess:0.0 already has a running assistant"
+assert_not_contains "the clear is never sent to the pane that gained an assistant" "$(cat "$TMUX_LOG")" "send-keys|%90|clear"
+assert_not_contains "the resume command is never sent to the pane that gained an assistant" "$(cat "$TMUX_LOG")" "send-keys|%90|command claude"
+assert_contains "the other pane in the same session still replays" "$(cat "$TMUX_LOG")" "send-keys|%91|command claude --resume 'sid-appears-2'"
+unset MOCK_NO_CLIENT MOCK_PANE_PID MOCK_PANE_PID_PANE MOCK_PS_FLIP_AFTER_CALLS MOCK_PS_FLIP_COUNT_FILE MOCK_PS_FLIP_SNAPSHOT
+
+echo "== a foreground switch between two whitelisted shells during the wait is still caught (command was quoted for the original shell) =="
+# Both shells are whitelisted, so a recheck that only rejects a non-shell
+# value would let this switch through even though the command was quoted
+# for bash and tcsh needs different quoting rules.
+export MOCK_NO_CLIENT=1
+export MOCK_PANE_CMD_CALLS_LOG="$SANDBOX/pane-cmd-calls-shellswitch.log"
+: >"$MOCK_PANE_CMD_CALLS_LOG"
+export MOCK_PANES='%92|0|0|shell-switch-sess
+%93|0|1|shell-switch-sess'
+export MOCK_SHELLS='%92|bash
+%93|bash'
+export MOCK_SHELL_FLIP_PANE='%92'
+export MOCK_SHELL_FLIP_TO='tcsh'
+jq -n '{sessions:[
+  {pane:"shell-switch-sess:0.0",session_name:"shell-switch-sess",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-switch",cwd:""},
+  {pane:"shell-switch-sess:0.1",session_name:"shell-switch-sess",window_index:"0",pane_index:"1",tool:"claude",session_id:"sid-switch-2",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_contains "the pane that switched shells is caught by the re-check, not sent a command" \
+	"$restore_log" "pane shell-switch-sess:0.0 changed while waiting for a client, skipping"
+assert_not_contains "the clear is never sent to the pane that switched shells" "$(cat "$TMUX_LOG")" "send-keys|%92|clear"
+assert_not_contains "the bash-quoted resume command is never sent to the now-tcsh pane" "$(cat "$TMUX_LOG")" "send-keys|%92|command claude"
+assert_contains "the other pane in the same session still replays" "$(cat "$TMUX_LOG")" "send-keys|%93|command claude --resume 'sid-switch-2'"
+unset MOCK_NO_CLIENT MOCK_PANE_CMD_CALLS_LOG MOCK_SHELLS MOCK_SHELL_FLIP_PANE MOCK_SHELL_FLIP_TO
+
+echo "== a pane that changes during the wait's first (and only) list-clients call is still caught, even though the wait never sleeps =="
+# Zero sleeps does not mean zero elapsed time: a client found on the very
+# first check still leaves a window in which the pane can change, because
+# answering that check is itself real elapsed time. If the re-check were
+# skipped whenever the wait resolved without sleeping, this pane would be
+# sent a resume command while a different program owns its foreground.
+flip_marker="$SANDBOX/flip-on-list-clients.marker"
+rm -f "$flip_marker"
+export MOCK_FLIP_ON_LIST_CLIENTS_PANE='%80'
+export MOCK_FLIP_ON_LIST_CLIENTS_MARKER="$flip_marker"
+export MOCK_FLIP_ON_LIST_CLIENTS_TO='sleep'
+export MOCK_PANES='%80|0|0|zero-sleep-sess'
+jq -n '{sessions:[{pane:"zero-sleep-sess:0.0",session_name:"zero-sleep-sess",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-zero-sleep",cwd:""}]}' \
+	>"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/assistant-restore.log"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_not_contains "the wait never times out (client attached on its first call)" "$restore_log" "no client attached to session"
+assert_contains "the pane is still caught by the re-check despite the wait resolving on its first poll" \
+	"$restore_log" "pane zero-sleep-sess:0.0 changed while waiting for a client, skipping"
+assert_not_contains "the changed pane never receives the clear command, even at zero sleeps" "$(cat "$TMUX_LOG")" "send-keys|%80|clear"
+assert_not_contains "the changed pane never receives the resume command, even at zero sleeps" "$(cat "$TMUX_LOG")" "send-keys|%80|command claude"
+unset MOCK_FLIP_ON_LIST_CLIENTS_PANE MOCK_FLIP_ON_LIST_CLIENTS_MARKER MOCK_FLIP_ON_LIST_CLIENTS_TO
 
 echo "== csh/tcsh-safe command reconstruction =="
 csh_cwd="$SANDBOX/cwd!bang"
