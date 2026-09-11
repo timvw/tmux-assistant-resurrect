@@ -375,7 +375,8 @@ save/restart/restore with a recording CLI fixture. It proves stock grouped
 restore works, then explicitly reaps the clone before the assistant hook to
 reproduce the missing-clone condition; it does not establish the ordering of
 any user's attach script or test an authenticated conversation. Both own their
-sockets. CI pins the upstream checkout for the lifecycle test.
+sockets. For reproducible lifecycle runs, use tmux-resurrect commit
+`cff343cf9e81983d3da0c8562b01616f12e8d548`.
 
 **Run the authenticated test after touching Copilot session discovery**
 (`GH_TOKEN=$(gh auth token) just test-copilot-e2e`). It is the only layer that
