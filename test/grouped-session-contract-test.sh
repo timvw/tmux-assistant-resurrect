@@ -47,13 +47,17 @@ snapshot() {
 		-f "$REPO_DIR/scripts/save-assistant-sessions.awk" \
 		"$TEST_DIR/panes" "$TEST_DIR/ps" >"$TEST_DIR/matches"
 	assert_eq 'shared pane is traversed once' 1 "$(wc -l <"$TEST_DIR/matches" | tr -d ' ')"
-	IFS=$'\t' read -r label _tool pid _args _cwd _tty session window index <"$TEST_DIR/matches"
+	# Only consume address fields. Bash read collapses empty tab fields, and
+	# tmux can briefly report an empty cwd while a newly started shell execs.
+	IFS=$'\t' read -r label session window index < <(cut -f1,7-9 "$TEST_DIR/matches")
 	assert_eq 'saved address resolves to the original pane' "$tracked" \
 		"$(resolve_tmux_pane_id "$session" "$window" "$index")"
 }
 
 echo "Grouped session contract: $(tmux -V)"
-tracked=$(tmux new-session -d -s main -P -F '#{pane_id}' -c "$TEST_DIR")
+tracked=$(tmux new-session -d -s main -P -F '#{pane_id}' -c "$TEST_DIR" '/bin/bash --noprofile --norc')
+tmux set-option -g default-shell /bin/bash
+tmux set-option -g default-command '/bin/bash --noprofile --norc'
 base_id=$(tmux display-message -p -t "$tracked" '#{session_id}')
 tmux new-session -d -s main-0 -t "$base_id"
 tmux new-session -d -s main-1 -t "$base_id"
@@ -83,16 +87,20 @@ assert_eq 'later ungrouped membership cannot erase a group' main:5.0 "$label"
 
 # The first group's name still exists, but no longer contains this pane.
 tmux unlink-window -t "$stranger_session:5"
-bravo=$(tmux new-session -d -s bravo -P -F '#{session_id}')
-tmux link-window -s "$tracked" -t "$bravo:5"
-tmux new-session -d -s bravo-0 -t "$bravo"
+zulu=$(tmux new-session -d -s zulu -P -F '#{session_id}')
+tmux link-window -s "$tracked" -t "$zulu:5"
+tmux new-session -d -s zulu-0 -t "$zulu"
 snapshot
-assert_eq 'second group qualifies when first group name was renamed away' bravo:5.0 "$label"
+# list-panes orders sessions by name. The still-valid group must sort after
+# the renamed group's members, or this would never exercise skipping it.
+assert_eq 'first observed group has no matching membership' main \
+	"$(awk -F '|' -v key="$tracked" '$1 == "G" && $2 == key && $3 != "" { print $3; exit }' "$TEST_DIR/panes")"
+assert_eq 'second group qualifies when first group name was renamed away' zulu:5.0 "$label"
 
 tmux rename-session -t "$stranger_session" stranger
 tmux rename-session -t "$base_id" main
 snapshot
-assert_eq 'earliest listed qualifying group wins' bravo:5.0 "$label"
+assert_eq 'earliest listed qualifying group wins' main:0.0 "$label"
 
 # Pipe is portable even on tmux < 3.7; it must survive the G record too.
 pipe_session=$(tmux new-session -d -s 'pipe|group' -P -F '#{session_id}')
