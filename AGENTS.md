@@ -367,6 +367,16 @@ keep each record's free-form field last. Swapping the key back to
 `#{pane_pid}` looks harmless and these consumer-only fixtures would not
 notice it -- see the pipe delimiter rule at the top of this file.
 
+Grouped membership has a real-tmux contract in
+`test/grouped-session-contract-test.sh` (including renamed group-name reuse,
+linked-window indices, multiple groups, and pipe names). The separate
+`test/grouped-session-lifecycle-test.sh /path/to/tmux-resurrect` runs upstream
+save/restart/restore with a recording CLI fixture. It proves stock grouped
+restore works, then explicitly reaps the clone before the assistant hook to
+reproduce the missing-clone condition; it does not establish the ordering of
+any user's attach script or test an authenticated conversation. Both own their
+sockets. CI pins the upstream checkout for the lifecycle test.
+
 **Run the authenticated test after touching Copilot session discovery**
 (`GH_TOKEN=$(gh auth token) just test-copilot-e2e`). It is the only layer that
 can tell a resumable session from an unresumable one: unauthenticated Copilot

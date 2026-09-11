@@ -605,6 +605,14 @@ test-targets:
 test-tmux-contract:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/tmux-target-contract-test.sh"
 
+# Real grouped membership, own socket; no assistant binary needed.
+test-grouped-contract:
+    @"${TEST_BASH:-bash}" "{{repo_dir}}/test/grouped-session-contract-test.sh"
+
+# Real upstream save/restart/restore with a recording CLI fixture.
+test-grouped-lifecycle resurrect_plugin:
+    @"${TEST_BASH:-bash}" "{{repo_dir}}/test/grouped-session-lifecycle-test.sh" "{{resurrect_plugin}}"
+
 # Run hermetic state-directory tests (no Docker / no assistant binaries needed).
 # Covers the hook/save-hook rendezvous that issue #65 broke; worth running on
 # macOS, where $TMPDIR really does differ between the two sides.
