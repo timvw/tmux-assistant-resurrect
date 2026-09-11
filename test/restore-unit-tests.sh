@@ -122,6 +122,9 @@ list-panes)
 	printf '%s\n' "${MOCK_PANES:-}"
 	;;
 list-clients)
+	if [ -n "${MOCK_REMOVE_CWD_ON_WAIT:-}" ] && [ -d "$MOCK_REMOVE_CWD_ON_WAIT" ]; then
+		rmdir "$MOCK_REMOVE_CWD_ON_WAIT"
+	fi
 	# Attribute calls by target (server-wide "" vs -t <target>) so tests can
 	# assert which pane/session actually polled, and how many times, without
 	# actually waiting out the 5s cap (sleep is mocked to a no-op).
@@ -363,6 +366,62 @@ assert_eq "only the eligible pane polled list-clients" "1" "$(sort -u "$client_w
 assert_contains "the eligible pane is still replayed" "$(cat "$TMUX_LOG")" "send-keys|%31|command claude --resume 'sid-eligible'"
 export MOCK_SHELLS=''
 unset MOCK_NO_CLIENT
+
+echo "== other eligibility failures also leave the session wait to the next pane =="
+for rejection in assistant missing-cwd unvouched; do
+	: >"$client_wait_log"
+	export MOCK_NO_CLIENT=1
+	export MOCK_PANE_PID_PANE='%30' MOCK_PANE_PID='42000'
+	export MOCK_PS_SNAPSHOT=''
+	first_cwd=''
+	if [ "$rejection" = assistant ]; then
+		export MOCK_PS_SNAPSHOT='42001 42000 claude --resume existing
+42000 1 bash'
+	elif [ "$rejection" = missing-cwd ]; then
+		first_cwd="$SANDBOX/does-not-exist"
+	fi
+	export MOCK_VOUCHER="$SANDBOX/budget-voucher"
+	printf '%s\n' 'claude agents' >"$MOCK_VOUCHER"
+	expected_replay="command claude --resume 'sid-eligible'"
+	if [ "$rejection" = unvouched ]; then
+		expected_replay="command claude 'agents'"
+	fi
+	jq -n --arg cwd "$first_cwd" --arg rejection "$rejection" '{sessions:[
+      {pane:"budget-sess:0.1",tool:"claude",session_id:"sid-eligible",cwd:""}
+    ], relaunch:[]} |
+    if $rejection == "unvouched" then
+      .sessions = [] | .relaunch = [
+        {pane:"budget-sess:0.0",tool:"claude",cmd:"claude agents --name unvouched",cwd:""},
+        {pane:"budget-sess:0.1",tool:"claude",cmd:"claude agents",cwd:""}
+      ]
+    else
+      .sessions = [{pane:"budget-sess:0.0",tool:"claude",session_id:"sid-skip",cwd:$cwd}] + .sessions
+    end' >"$RESURRECT_DIR/assistant-sessions.json"
+	run_restore
+	assert_eq "$rejection: restore succeeds" "0" "$RESTORE_STATUS"
+	assert_not_contains "$rejection: rejected pane never polls" "$(cat "$client_wait_log")" '%30'
+	assert_contains "$rejection: eligible pane still polls" "$(cat "$client_wait_log")" '%31'
+	assert_not_contains "$rejection: rejected pane stays untouched" "$(cat "$TMUX_LOG")" 'send-keys|%30|'
+	assert_contains "$rejection: eligible pane replays" "$(cat "$TMUX_LOG")" "$expected_replay"
+done
+unset MOCK_NO_CLIENT MOCK_PANE_PID_PANE MOCK_PANE_PID MOCK_PS_SNAPSHOT MOCK_VOUCHER
+
+echo "== a saved directory removed during the wait leaves the pane untouched =="
+export MOCK_REMOVE_CWD_ON_WAIT="$SANDBOX/removed-during-wait"
+mkdir -p "$MOCK_REMOVE_CWD_ON_WAIT"
+export MOCK_PANES='%30|0|0|budget-sess
+%31|0|1|budget-sess'
+: >"$client_wait_log"
+jq -n --arg cwd "$MOCK_REMOVE_CWD_ON_WAIT" '{sessions:[
+  {pane:"budget-sess:0.0",tool:"claude",session_id:"sid-removed",cwd:$cwd},
+  {pane:"budget-sess:0.1",tool:"claude",session_id:"sid-eligible",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_eq "cwd disappears: restore succeeds" "0" "$RESTORE_STATUS"
+assert_not_contains "cwd disappears: no clear or resume reaches the pane" "$(cat "$TMUX_LOG")" 'send-keys|%30|'
+assert_contains "cwd disappears: next pane still replays" "$(cat "$TMUX_LOG")" "send-keys|%31|command claude --resume 'sid-eligible'"
+assert_not_contains "cwd disappears: consumed wait is not retried for the next pane" "$(cat "$client_wait_log")" '%31'
+unset MOCK_REMOVE_CWD_ON_WAIT
 
 echo "== an unresolvable session id disables the cache instead of falling back to a name =="
 : >"$client_wait_log"

@@ -609,6 +609,13 @@ while read -r entry; do
 	# After any invoked wait, re-check shell identity and assistant presence:
 	# the command was built for the shell observed before waiting.
 	if [ "$wait_invoked" -eq 1 ]; then
+		# The wait also separates cwd validation from clearing the pane. Keep
+		# a pane untouched if its saved project disappeared during that wait;
+		# the command's cd guard still covers a later execution-time race.
+		if [ -n "$cwd" ] && [ "$cwd" != "null" ] && [ ! -d "$cwd" ]; then
+			log "saved cwd for $tool in $pane no longer exists, skipping"
+			continue
+		fi
 		recheck_cmd=$(pane_shell_name "$pane_id")
 		if [ -z "$recheck_cmd" ] || [ "$recheck_cmd" != "$pane_cmd" ]; then
 			log "pane $pane changed while waiting for a client, skipping"
