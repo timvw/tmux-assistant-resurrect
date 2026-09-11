@@ -136,6 +136,20 @@ jobs:
       - name: tmux target contract (real tmux)
         run: bash test/tmux-target-contract-test.sh
 
+      - name: Grouped session membership contract (real tmux)
+        run: bash test/grouped-session-contract-test.sh
+
+      - name: Check out tmux-resurrect for the grouped lifecycle test
+        uses: actions/checkout@v7
+        with:
+          repository: tmux-plugins/tmux-resurrect
+          ref: cff343cf9e81983d3da0c8562b01616f12e8d548
+          path: .test-deps/tmux-resurrect
+          persist-credentials: false
+
+      - name: Grouped save/restart/restore lifecycle
+        run: bash test/grouped-session-lifecycle-test.sh .test-deps/tmux-resurrect
+
       # Real binary, no authentication: Copilot writes the session directory and
       # its lock before the auth check, which is what this pins.
       - name: Copilot upstream contract (real binary)
