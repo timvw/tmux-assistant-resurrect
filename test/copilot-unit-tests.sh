@@ -404,6 +404,20 @@ assert_eq "variadic list detected from real --help spelling" \
 	"--allow-tool --allow-url --available-tools --deny-tool --deny-url --excluded-tools --secret-env-vars" \
 	"$(_copilot_variadic_flags)"
 
+# Copilot 1.0.91 uses `<tools>...` instead of `[=tools...]`. No regex
+# match must reach the static fallback rather than abort main's warmup under
+# errexit+pipefail. Use a fresh shell so the assertion cannot mask errexit.
+assert_eq "new help metavar spelling does not abort save discovery warmup" \
+	"warmed" \
+	"$("${BASH:-bash}" -c '
+		set -euo pipefail
+		source "$1/scripts/save-assistant-sessions.sh"
+		_tool_help() { printf "      --allow-tool <tools>...\n      --deny-tool <tools>...\n"; }
+		_warm_session_discovery "$(printf "pane\tcopilot\t1\targs\n")"
+		[ "$(_copilot_variadic_flags)" = "$SESSION_VARIADIC_FALLBACK_copilot" ]
+		printf warmed
+	' _ "$REPO_DIR")"
+
 # `--deny-tool='shell(git push)'` reaches ps as `--deny-tool=shell(git push)`.
 # Being variadic does not make that reconstructable: the `=` already delimited
 # the value, and Copilot reads the fragment as a positional.

@@ -127,8 +127,17 @@ een bestaande Copilot-aanname: een lege sessie in 1.0.91 maakt nog geen globale
 beschrijft die als gedeelde index en vermeldt dat bestanden op aanvraag ontstaan.
 De contracttest controleert nu expliciet dat de bestaande productie-resolver
 zonder die index werkt; de PID-lock en per-sessie `session.db` blijven vereist.
-De echte Copilot-contracttest slaagt lokaal met **18 checks**. Copilot-productiecode
-is hierbij niet gewijzigd.
+De echte Copilot-contracttest slaagt lokaal met **18 checks**.
+
+De Linux-runs onthulden daarnaast twee fouten bij Copilot 1.0.91: de contracttest
+koos soms de interne `.session-operation-locks`-map in plaats van de map met de
+native PID-lock, en de help-warmup stopte onder `set -e` als de oude variadic-regex
+niets vond. De test selecteert nu de map via de echte PID-lock. De gedeelde
+replayhelper bereikt weer de bestaande statische fallback wanneer de nieuwe
+`<tools>...`-notatie geen match oplevert. Een regressie in een nieuwe shell met
+`errexit` en `pipefail` controleert warmup en fallback. De sessie-ID-lookup is
+ongewijzigd. De integratietest gebruikt voor tekstasserties een here-string,
+zodat een succesvolle `grep -q` geen SIGPIPE-fout van de producent veroorzaakt.
 
 ## Grenzen en vervolg
 

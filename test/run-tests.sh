@@ -103,7 +103,7 @@ assert_eq() {
 
 assert_contains() {
 	local desc="$1" haystack="$2" needle="$3"
-	if echo "$haystack" | grep -qF -- "$needle"; then
+	if grep -qF -- "$needle" <<< "$haystack"; then
 		pass "$desc"
 	else
 		fail "$desc (expected to contain '$needle')"
@@ -112,7 +112,7 @@ assert_contains() {
 
 assert_not_contains() {
 	local desc="$1" haystack="$2" needle="$3"
-	if echo "$haystack" | grep -qF -- "$needle"; then
+	if grep -qF -- "$needle" <<< "$haystack"; then
 		fail "$desc (did not expect '$needle')"
 	else
 		pass "$desc"

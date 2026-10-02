@@ -135,7 +135,13 @@ echo "== session-state layout =="
 session_dir=""
 deadline=$((SECONDS + 60))
 while [ "$SECONDS" -lt "$deadline" ]; do
-	session_dir=$(find "$COPILOT_HOME/session-state" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
+	# The state root can also contain internal directories such as
+	# .session-operation-locks. Select the session owned by this real PID.
+	for candidate_lock in "$COPILOT_HOME"/session-state/*/inuse."$native_pid".lock; do
+		[ -f "$candidate_lock" ] || continue
+		session_dir="${candidate_lock%/*}"
+		break
+	done
 	[ -n "$session_dir" ] && break
 	sleep 0.5
 done

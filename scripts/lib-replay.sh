@@ -278,7 +278,7 @@ _copilot_variadic_flags() {
 	if [ -n "$help_out" ]; then
 		result=$(echo "$help_out" |
 			grep -E '^[[:space:]]+(-[a-zA-Z],[[:space:]]+)?--[a-z][-a-z]*\[=[^]]*\.\.\.\]' |
-			grep -oE -- '--[a-z][-a-z]*' | sort -u | tr '\n' ' ')
+			grep -oE -- '--[a-z][-a-z]*' | sort -u | tr '\n' ' ') || true
 		result="${result% }"
 	fi
 	[ -n "$result" ] || result="$SESSION_VARIADIC_FALLBACK_copilot"
