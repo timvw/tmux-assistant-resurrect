@@ -146,6 +146,16 @@ assert_eq "Cursor SessionEnd installation is idempotent" 1 \
 
 # Both JSON hook installers use opt-out, preserving the user's dotfile links,
 # modes, unrelated hooks/settings, and the other assistants' default install.
+QUOTED_OPTOUT_HOME="$TEST_ROOT/quoted-optout-home"
+HOME="$QUOTED_OPTOUT_HOME" PATH="$FAKE_BIN:$PATH" \
+    "$UNDER_TEST" "$QUOTED_PLUGIN/tmux-assistant-resurrect.tmux"
+FAKE_CLAUDE_OPTION=off FAKE_CURSOR_OPTION=off HOME="$QUOTED_OPTOUT_HOME" PATH="$FAKE_BIN:$PATH" \
+    "$UNDER_TEST" "$QUOTED_PLUGIN/tmux-assistant-resurrect.tmux"
+assert_eq "Claude off removes current hooks from a quoted checkout path" 0 \
+    "$(jq '[.. | objects | .command? // empty] | length' "$QUOTED_OPTOUT_HOME/.claude/settings.json")"
+assert_eq "Cursor off removes current hooks from a quoted checkout path" 0 \
+    "$(jq '[.. | objects | .command? // empty] | length' "$QUOTED_OPTOUT_HOME/.cursor/hooks.json")"
+
 json_optout_run() {
     local tool="$1" test_home="$2" option="$3"
     if [ "$tool" = claude ]; then

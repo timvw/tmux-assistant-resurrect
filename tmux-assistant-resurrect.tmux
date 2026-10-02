@@ -72,13 +72,15 @@ fi
 # symlinks, target modes, and unrelated settings/hooks; publish beside the
 # resolved target atomically, just like Cursor's install/update path below.
 remove_assistant_json_hooks() {
-    local tool="$1" settings="$2" target="$2" link depth=0 target_mode tmp count
+    local tool="$1" settings="$2" target="$2" link depth=0 target_mode tmp count track cleanup
     [ -f "$settings" ] || return 0
     command -v jq >/dev/null 2>&1 || return 0
-    count=$(jq --arg tool "$tool" '
-        def owned: (.command // "") | if type == "string" then
+    track=$(hook_command "${CURRENT_DIR}/hooks/${tool}-session-track.sh")
+    cleanup=$(hook_command "${CURRENT_DIR}/hooks/${tool}-session-cleanup.sh")
+    count=$(jq --arg tool "$tool" --arg track "$track" --arg cleanup "$cleanup" '
+        def owned: (.command // "") | (. == $track or . == $cleanup or (if type == "string" then
             test("^bash (\"\\$HOME\")?(\u0027/[^\u0027]*/" + $tool + "-session-(track|cleanup)\\.sh\u0027|\"/[^\"\\n]*/" + $tool + "-session-(track|cleanup)\\.sh\")$")
-        else false end;
+        else false end));
         [.hooks | if $tool == "claude" then
             .SessionStart[]?.hooks[]?, .SessionEnd[]?.hooks[]?
         else .sessionStart[]?, .sessionEnd[]? end | select(owned)] | length
@@ -124,10 +126,10 @@ remove_assistant_json_hooks() {
             ;;
     esac
     tmp=$(mktemp "${target}.tmp.XXXXXX") || return
-    if jq --arg tool "$tool" '
-        def owned: (.command // "") | if type == "string" then
+    if jq --arg tool "$tool" --arg track "$track" --arg cleanup "$cleanup" '
+        def owned: (.command // "") | (. == $track or . == $cleanup or (if type == "string" then
             test("^bash (\"\\$HOME\")?(\u0027/[^\u0027]*/" + $tool + "-session-(track|cleanup)\\.sh\u0027|\"/[^\"\\n]*/" + $tool + "-session-(track|cleanup)\\.sh\")$")
-        else false end;
+        else false end));
         (if $tool == "claude" then ["SessionStart", "SessionEnd"] else ["sessionStart", "sessionEnd"] end) as $events |
         reduce $events[] as $event (. ;
             if .hooks[$event] then

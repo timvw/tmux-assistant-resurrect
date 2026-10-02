@@ -95,7 +95,7 @@ Docker. De binarycontracttest gebruikt `serve` met een eigen lokale poort en
 procesgroep, zonder login, prompts of modelverzoeken. Er wordt geen gedeelde
 OpenCode-service gestart of gestopt.
 
-- De uitgebreide installer/hardening-suite: **121 geslaagd**, geen fouten of
+- De uitgebreide installer/hardening-suite: **123 geslaagd**, geen fouten of
   skips op macOS en onder Bash 3.2 in Linux/Docker. De nieuwe regressies falen
   aantoonbaar tegen de oorspronkelijke installer uit `HEAD`.
 - De nieuwe `test/opencode-plugin-contract-test.py`: echte v1.18.34 laadt de
@@ -110,7 +110,7 @@ OpenCode-service gestart of gestopt.
   1 fout**. Die fout was de Python-compilatiecheck: mijn read-only bind-mount
   verhindert dat `py_compile` een `__pycache__` naast de broncode schrijft.
   Dezelfde helpers compileren allemaal succesvol vanuit een tijdelijke
-  schrijfbare kopie in hetzelfde image. De volledige suite is niet opnieuw
+  schrijfbare kopie in hetzelfde image. Op dat moment is de volledige suite niet opnieuw
   gedraaid; de gerichte herhaling bevestigt de oorzaak in de testopstelling.
   De echte install/save/restore-scenario's slaagden. Het image bevat tmux 3.4;
   de contractcases die tmux >= 3.7 vereisen worden daar bewust overgeslagen.
