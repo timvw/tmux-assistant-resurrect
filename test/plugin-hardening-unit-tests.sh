@@ -74,6 +74,11 @@ mkdir -p "$FAKE_BIN"
 cat >"$FAKE_BIN/tmux" <<'TMUX'
 #!/usr/bin/env bash
 if [ "${1:-}" = "show-option" ]; then
+    case "$*" in
+        *'@assistant-resurrect-opencode') printf '%s' "${FAKE_OPENCODE_OPTION:-}"; exit 0 ;;
+        *'@assistant-resurrect-claude') printf '%s' "${FAKE_CLAUDE_OPTION:-}"; exit 0 ;;
+        *'@assistant-resurrect-cursor') printf '%s' "${FAKE_CURSOR_OPTION:-}"; exit 0 ;;
+    esac
     printf '%s' "${FAKE_TMUX_OPTION:-}"
     exit 0
 fi
@@ -82,6 +87,17 @@ if [ "${1:-}" = "set-option" ]; then
 fi
 TMUX
 chmod +x "$FAKE_BIN/tmux"
+
+# Never inspect an installed CLI or the developer's OpenCode configuration.
+# Version probes are independent from the API exercised by the Node tests below.
+cat >"$FAKE_BIN/opencode" <<'OPENCODE'
+#!/usr/bin/env bash
+if [ "$*" != '--version' ]; then exit 1; fi
+if [ -n "${OPENCODE_PROBES:-}" ]; then printf 'probe\n' >>"$OPENCODE_PROBES"; fi
+printf '%s\n' "${FAKE_OPENCODE_VERSION-1.18.34}"
+exit "${FAKE_OPENCODE_STATUS:-0}"
+OPENCODE
+chmod +x "$FAKE_BIN/opencode"
 
 # The entrypoint must generate executable hook commands even when its checkout
 # path contains a single quote, and new config files should be private.
@@ -127,6 +143,92 @@ assert_eq "Cursor SessionStart installation is idempotent" 1 \
     "$(jq '[.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))] | length' "$INSTALL_HOME/.cursor/hooks.json")"
 assert_eq "Cursor SessionEnd installation is idempotent" 1 \
     "$(jq '[.hooks.sessionEnd[]? | select((.command // "") | contains("cursor-session-cleanup"))] | length' "$INSTALL_HOME/.cursor/hooks.json")"
+
+# Both JSON hook installers use opt-out, preserving the user's dotfile links,
+# modes, unrelated hooks/settings, and the other assistants' default install.
+json_optout_run() {
+    local tool="$1" test_home="$2" option="$3"
+    if [ "$tool" = claude ]; then
+        FAKE_CLAUDE_OPTION="$option" HOME="$test_home" PATH="$FAKE_BIN:$PATH" \
+            "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux"
+    else
+        FAKE_CURSOR_OPTION="$option" HOME="$test_home" PATH="$FAKE_BIN:$PATH" \
+            "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux"
+    fi
+}
+for json_tool in claude cursor; do
+    json_home="$TEST_ROOT/optout-$json_tool"
+    if [ "$json_tool" = claude ]; then
+        json_settings="$json_home/.claude/settings.json"
+    else
+        json_settings="$json_home/.cursor/hooks.json"
+    fi
+    json_optout_run "$json_tool" "$json_home" off
+    if [ ! -e "$json_settings" ]; then
+        pass "$json_tool off does not create hook configuration"
+    else
+        fail "$json_tool off does not create hook configuration"
+    fi
+    json_optout_run "$json_tool" "$json_home" on
+    json_target="$TEST_ROOT/$json_tool-target.json"
+    jq --arg tool "$json_tool" '
+        .user_setting = "retained" |
+        if $tool == "claude" then
+            .hooks.SessionStart += [
+                {matcher:"user", hooks:[{command:"user-start"}, {command:"bash /old/hooks/claude-session-track.sh"}, {type:"url", url:"https://example.test/hook"}]},
+                {matcher:"missing"}, {matcher:"null", hooks:null}
+            ] |
+            .hooks.SessionEnd += [{hooks:[{command:"user-end"}, {command:"bash /old/hooks/claude-session-cleanup.sh"}]}]
+        else
+            .hooks.sessionStart += [{command:"user-start"}, {command:"bash /old/hooks/cursor-session-track.sh"}, {type:"url", url:"https://example.test/hook"}] |
+            .hooks.sessionEnd += [{command:"user-end"}, {command:"bash /old/hooks/cursor-session-cleanup.sh"}]
+        end
+    ' "$json_settings" > "$json_target"
+    chmod 2640 "$json_target"
+    rm "$json_settings"
+    json_middle="$TEST_ROOT/$json_tool-middle.json"
+    ln -s "$json_tool-target.json" "$json_middle"
+    ln -s "$json_middle" "$json_settings"
+    json_optout_run "$json_tool" "$json_home" off
+    if [ -L "$json_settings" ] && [ -L "$json_middle" ]; then
+        pass "$json_tool off preserves dotfile symlink chains"
+    else
+        fail "$json_tool off preserves dotfile symlink chains"
+    fi
+    assert_file_mode "$json_tool off preserves the target mode" 2640 "$json_target"
+    assert_eq "$json_tool off removes current and stale managed hooks" 0 \
+        "$(jq --arg tool "$json_tool" '[.. | objects | .command? // empty | select(contains($tool + "-session-"))] | length' "$json_target")"
+    assert_eq "$json_tool off preserves unrelated hooks" 2 \
+        "$(jq '[.. | objects | .command? // empty | select(startswith("user-"))] | length' "$json_target")"
+    assert_eq "$json_tool off preserves URL hooks without command" 1 \
+        "$(jq '[.. | objects | select(.type? == "url")] | length' "$json_target")"
+    assert_eq "$json_tool off preserves unrelated settings" retained "$(jq -r .user_setting "$json_target")"
+    if [ "$json_tool" = claude ]; then
+        assert_eq "Claude off preserves missing/null hook groups" 2 \
+            "$(jq '[.hooks.SessionStart[] | select(.matcher == "missing" or .matcher == "null")] | length' "$json_target")"
+        assert_eq "Claude off leaves Cursor enabled" 1 \
+            "$(jq '[.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))] | length' "$json_home/.cursor/hooks.json")"
+    else
+        assert_eq "Cursor off leaves Claude enabled" 1 \
+            "$(jq '[.hooks.SessionStart[]?.hooks[]? | select((.command // "") | contains("claude-session-track"))] | length' "$json_home/.claude/settings.json")"
+    fi
+    json_before=$(cat "$json_target")
+    json_optout_run "$json_tool" "$json_home" off
+    assert_eq "$json_tool off stays disabled and idempotent" "$json_before" "$(cat "$json_target")"
+    json_optout_run "$json_tool" "$json_home" on
+    assert_eq "$json_tool on reinstalls exactly the two native hooks" 2 \
+        "$(jq --arg tool "$json_tool" '[.. | objects | .command? // empty | select(contains($tool + "-session-"))] | length' "$json_settings")"
+
+    printf '{invalid\n' > "$json_target"
+    # Claude's enabled installer replaces a symlink in existing behavior;
+    # re-establish it for this refusal test without changing that install path.
+    rm "$json_settings"
+    ln -s "$json_middle" "$json_settings"
+    json_optout_run "$json_tool" "$json_home" off 2>/dev/null
+    assert_eq "$json_tool off leaves malformed JSON unchanged" '{invalid' "$(cat "$json_target")"
+    assert_eq "$json_tool opt-out leaves no temporary file" '' \
+        "$(find "$TEST_ROOT" -name "$json_tool-target.json.tmp.*" -print -quit)"
+done
 
 # Dotfile managers commonly symlink hooks.json. Updating Cursor hooks must
 # preserve that file identity instead of replacing the link with a regular file.
@@ -297,7 +399,7 @@ fi
 # creating an empty settings file that this invocation cannot safely update.
 NO_JQ_BIN="$TEST_ROOT/no-jq-bin"
 mkdir -p "$NO_JQ_BIN"
-for utility in bash dirname ln mkdir readlink sed; do
+for utility in bash dirname grep ln mkdir readlink rm sed; do
     ln -s "$(command -v "$utility")" "$NO_JQ_BIN/$utility"
 done
 ln -s "$FAKE_BIN/tmux" "$NO_JQ_BIN/tmux"
@@ -338,6 +440,103 @@ if [ -L "$SYMLINK_HOME/.config/opencode/plugins/session-tracker.js" ] && \
 else
     fail "OpenCode installer does not follow a destination directory symlink"
 fi
+
+# OpenCode's opt-out must undo our existing link, not only prevent a new one.
+# Otherwise V2 continues loading the incompatible plugin after an upgrade.
+OPEN_INSTALL_HOME="$TEST_ROOT/open-install-home"
+OPEN_INSTALL_FILE="$OPEN_INSTALL_HOME/.config/opencode/plugins/session-tracker.js"
+OPEN_SOURCE="$ROOT_DIR/hooks/opencode-session-track.js"
+open_install() {
+    HOME="$OPEN_INSTALL_HOME" PATH="$FAKE_BIN:$PATH" \
+        "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux" 2>"$TEST_ROOT/open-install.stderr"
+}
+assert_open_absent() {
+    if [ ! -e "$OPEN_INSTALL_FILE" ] && [ ! -L "$OPEN_INSTALL_FILE" ]; then
+        pass "$1"
+    else
+        fail "$1"
+    fi
+}
+
+for open_version in '1.0.142' '1.18.34' 'v1.18.34' 'opencode v1.18.34' '1.18.34-beta.1+test'; do
+    FAKE_OPENCODE_VERSION="$open_version" open_install
+    assert_eq "OpenCode $open_version installs the native V1 tracker" "$OPEN_SOURCE" "$(readlink "$OPEN_INSTALL_FILE")"
+done
+open_install
+assert_eq "OpenCode V1 install is idempotent" "$OPEN_SOURCE" "$(readlink "$OPEN_INSTALL_FILE")"
+
+OPEN_PROBES="$TEST_ROOT/open-probes"
+FAKE_OPENCODE_OPTION=off OPENCODE_PROBES="$OPEN_PROBES" open_install
+assert_open_absent "OpenCode off removes our current link"
+FAKE_OPENCODE_OPTION=off OPENCODE_PROBES="$OPEN_PROBES" open_install
+assert_open_absent "OpenCode off stays disabled on the next tmux start"
+assert_eq "OpenCode off skips executing the binary" false "$([ -e "$OPEN_PROBES" ] && echo true || echo false)"
+assert_eq "OpenCode off keeps Claude SessionStart tracking installed" 1 \
+    "$(jq '[.hooks.SessionStart[]?.hooks[]? | select((.command // "") | contains("claude-session-track"))] | length' "$OPEN_INSTALL_HOME/.claude/settings.json")"
+assert_eq "OpenCode off keeps Cursor tracking installed" 1 \
+    "$(jq '[.hooks.sessionStart[]? | select((.command // "") | contains("cursor-session-track"))] | length' "$OPEN_INSTALL_HOME/.cursor/hooks.json")"
+FAKE_OPENCODE_OPTION=on open_install
+assert_eq "OpenCode on re-enables V1 installation" "$OPEN_SOURCE" "$(readlink "$OPEN_INSTALL_FILE")"
+
+for open_version in '2.0.22' 'opencode v2.0.22' 'v2.0.0-beta.1' '3.0.0' '0.0.0-dev-20443' 'local' '' '1.18.34 extra' $'diagnostic\n1.18.34'; do
+    open_install
+    FAKE_OPENCODE_VERSION="$open_version" open_install
+    assert_open_absent "OpenCode [$open_version] removes an already-linked V1 tracker"
+    FAKE_OPENCODE_VERSION="$open_version" open_install
+    assert_open_absent "OpenCode [$open_version] never reinstalls an incompatible tracker"
+done
+open_install
+FAKE_OPENCODE_STATUS=1 open_install
+assert_open_absent "failed OpenCode version probe removes the incompatible tracker"
+
+open_install
+cat >"$FAKE_BIN/opencode2" <<'OPENCODE2'
+#!/usr/bin/env bash
+printf 'opencode v2.0.22\n'
+OPENCODE2
+chmod +x "$FAKE_BIN/opencode2"
+open_install
+assert_open_absent "V1 opencode with V2 opencode2 removes the shared incompatible tracker"
+open_install
+assert_open_absent "mixed V1/V2 installation stays disabled on the next tmux start"
+rm "$FAKE_BIN/opencode2"
+
+# Stale paths may be dangling after a TPM/Nix/worktree change. Remove the link
+# itself without following it. Unrelated links and regular files are user data.
+for open_option in off on; do
+    ln -s '/removed/checkout/hooks/opencode-session-track.js' "$OPEN_INSTALL_FILE"
+    FAKE_OPENCODE_OPTION="$open_option" FAKE_OPENCODE_VERSION='opencode v2.0.22' open_install
+    assert_open_absent "OpenCode $open_option removes a dangling tracker from a stale checkout"
+
+    printf 'user plugin\n' >"$OPEN_INSTALL_FILE"
+    FAKE_OPENCODE_OPTION="$open_option" FAKE_OPENCODE_VERSION='opencode v2.0.22' open_install
+    assert_eq "OpenCode $open_option preserves a regular file on V2" 'user plugin' "$(cat "$OPEN_INSTALL_FILE")"
+    rm "$OPEN_INSTALL_FILE"
+
+    ln -s "$SYMLINK_TARGET" "$OPEN_INSTALL_FILE"
+    FAKE_OPENCODE_OPTION="$open_option" FAKE_OPENCODE_VERSION='opencode v2.0.22' open_install
+    assert_eq "OpenCode $open_option preserves an unrelated symlink on V2" "$SYMLINK_TARGET" "$(readlink "$OPEN_INSTALL_FILE")"
+    rm "$OPEN_INSTALL_FILE"
+done
+
+OPEN_INSTALL_HOME="$TEST_ROOT/open-disabled-home"
+OPEN_INSTALL_FILE="$OPEN_INSTALL_HOME/.config/opencode/plugins/session-tracker.js"
+FAKE_OPENCODE_OPTION=off open_install
+assert_eq "OpenCode off does not create a plugin directory" false \
+    "$([ -e "$OPEN_INSTALL_HOME/.config/opencode" ] && echo true || echo false)"
+FAKE_OPENCODE_VERSION='opencode v2.0.22' open_install
+assert_eq "OpenCode V2 does not create a plugin directory" false \
+    "$([ -e "$OPEN_INSTALL_HOME/.config/opencode" ] && echo true || echo false)"
+
+# NO_JQ_BIN contains only the entrypoint's shell utilities, no OpenCode binary.
+HOME="$OPEN_INSTALL_HOME" PATH="$NO_JQ_BIN" \
+    "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux"
+assert_open_absent "missing OpenCode binary does not install an unverified tracker"
+mkdir -p "$(dirname "$OPEN_INSTALL_FILE")"
+ln -s "$OPEN_SOURCE" "$OPEN_INSTALL_FILE"
+HOME="$OPEN_INSTALL_HOME" PATH="$NO_JQ_BIN" \
+    "$UNDER_TEST" "$ROOT_DIR/tmux-assistant-resurrect.tmux"
+assert_open_absent "missing OpenCode binary removes our existing tracker"
 
 # Claude state writes ignore malformed capture-env names, are valid JSON, and
 # remain private even when the configured state directory itself is shared.

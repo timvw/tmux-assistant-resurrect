@@ -117,10 +117,42 @@ and automatically set up:
 - Claude Code hooks in `~/.claude/settings.json`
 - Cursor Agent CLI hooks in `~/.cursor/hooks.json`
 - Copilot support via its per-session `inuse.<pid>.lock` file (no hook/plugin required)
-- OpenCode session-tracker plugin in `~/.config/opencode/plugins/`
+- OpenCode **v1** session-tracker plugin in `~/.config/opencode/plugins/`
 - Pi support via session-file lookup in `~/.pi/agent/sessions` (no hook/plugin required)
 - Oh My Pi support via terminal/session-file lookup in `$XDG_STATE_HOME/omp`, `$XDG_DATA_HOME/omp`, or `~/.omp` (no hook/plugin required)
 - Grok support via the `~/.grok/active_sessions.json` registry (no hook/plugin required)
+
+Native hook/plugin installers are enabled by default. To disable an individual
+installer, put its option before TPM's `run` line in `~/.tmux.conf`:
+
+```tmux
+set -g @assistant-resurrect-claude 'off'
+set -g @assistant-resurrect-cursor 'off'
+set -g @assistant-resurrect-opencode 'off'
+```
+
+Set only the options for assistants you want to disable. Reload your tmux
+configuration to apply them. Claude/Cursor opt-outs remove our current and
+stale hook commands while preserving unrelated hooks, settings, dotfile
+symlinks and target modes. The OpenCode installer removes its own
+`session-tracker.js` symlink (including stale checkout paths) and leaves regular
+files and unrelated symlinks alone. `on`, or leaving the option unset, enables
+installation when compatible OpenCode v1 commands are found on tmux's `PATH`.
+These options control native hook/plugin installation; they do not disable the
+save/restore hooks or native-state/process-argument/database fallbacks. Hookless
+assistants have no installer to opt out of.
+
+OpenCode v2 uses a different plugin API and a separate server process. The
+installer checks `opencode --version` (and `opencode2`, when present) **before**
+linking and removes our old v1 link for v2, future majors, unknown/dev versions,
+failed probes, or a missing binary. It creates no OpenCode configuration
+directory in those cases. Mixed v1/v2 installations sharing the global plugin
+directory also skip the v1 hook when the v2 command is visible on tmux's `PATH`.
+Native v2 session tracking is not yet supported; the existing save/restore fallbacks
+are best effort, not a guarantee that the selected v2 TUI session is recovered.
+After installing v1 or correcting tmux's `PATH`, reload the configuration to
+install its tracker. Restart OpenCode after removing a previously loaded plugin
+to clear its diagnostics.
 
 ## Uninstallation
 
@@ -200,7 +232,18 @@ just test-cursor
 just test-plugin-hardening
 ```
 
-This builds a Docker image with tmux, jq, just, and the real
+The macOS CI job also runs a real OpenCode plugin contract against pinned v1 and
+v2 binaries installed in separate temporary npm prefixes. To repeat it locally:
+
+```bash
+python3 test/opencode-plugin-contract-test.py /path/to/v1/opencode /path/to/v2/opencode
+```
+
+It creates private homes and servers, verifies v1 session events, reproduces the
+v2 plugin rejection, and checks that the installer removes it (including mixed
+`opencode` v1 / `opencode2` v2 installations). No login or model request is needed.
+
+`just test` builds a Docker image with tmux, jq, just, and the real
 `@anthropic-ai/claude-code`, `opencode-ai`, `@openai/codex`, and
 `@earendil-works/pi-coding-agent` npm packages, then runs the full test suite
 covering install, save, restore, uninstall, hooks, cleanup, TPM plugin
@@ -759,7 +802,7 @@ observed (`agent` or `cursor-agent`) and passes `--resume <session-id>`.
 
 ### OpenCode plugin (`hooks/opencode-session-track.js`)
 
-An OpenCode plugin that listens for `session.created`, `session.updated`, and
+An OpenCode v1 plugin that listens for `session.created`, `session.updated`, and
 `session.idle` events. On each event, it captures the full session object
 (including model, title, and other metadata) along with init-time context
 (`process.argv`, client API surface) and writes it to

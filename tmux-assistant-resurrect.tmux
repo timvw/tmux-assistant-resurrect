@@ -68,10 +68,93 @@ fi
 
 # --- Claude Code hooks ---
 
+# Installer opt-outs also remove previously installed hooks. Keep dotfile
+# symlinks, target modes, and unrelated settings/hooks; publish beside the
+# resolved target atomically, just like Cursor's install/update path below.
+remove_assistant_json_hooks() {
+    local tool="$1" settings="$2" target="$2" link depth=0 target_mode tmp count
+    [ -f "$settings" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    count=$(jq --arg tool "$tool" '
+        def owned: (.command // "") | (contains($tool + "-session-track") or contains($tool + "-session-cleanup"));
+        [.hooks | if $tool == "claude" then
+            .SessionStart[]?.hooks[]?, .SessionEnd[]?.hooks[]?
+        else .sessionStart[]?, .sessionEnd[]? end | select(owned)] | length
+    ' "$settings" 2>/dev/null) || {
+        echo "tmux-assistant-resurrect: cannot inspect $settings; left unchanged" >&2
+        return
+    }
+    [ "$count" != 0 ] || return 0
+    while [ -L "$target" ] && [ "$depth" -lt 16 ]; do
+        link=$(readlink "$target") || return
+        case "$link" in
+            /*) target="$link" ;;
+            *) target="$(dirname "$target")/$link" ;;
+        esac
+        depth=$((depth + 1))
+    done
+    if [ -L "$target" ]; then
+        echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
+        return
+    fi
+    target_mode=$(stat -f 'mode:%p' "$target" 2>/dev/null || true)
+    case "$target_mode" in
+        mode:*) target_mode=${target_mode#mode:} ;;
+        *) target_mode='' ;;
+    esac
+    case "$target_mode" in
+        '' | *[!0-7]*) target_mode='' ;;
+        *)
+            if [ "${#target_mode}" -ge 4 ]; then
+                target_mode=${target_mode#"${target_mode%????}"}
+            else
+                target_mode=''
+            fi
+            ;;
+    esac
+    case "$target_mode" in
+        '') target_mode=$(stat -c '%a' "$target" 2>/dev/null || true) ;;
+    esac
+    case "$target_mode" in
+        '' | *[!0-7]*)
+            echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
+            return
+            ;;
+    esac
+    tmp=$(mktemp "${target}.tmp.XXXXXX") || return
+    if jq --arg tool "$tool" '
+        def owned: (.command // "") | (contains($tool + "-session-track") or contains($tool + "-session-cleanup"));
+        (if $tool == "claude" then ["SessionStart", "SessionEnd"] else ["sessionStart", "sessionEnd"] end) as $events |
+        reduce $events[] as $event (. ;
+            if .hooks[$event] then
+                .hooks[$event] |= map(
+                    if $tool == "claude" then
+                        # Leave malformed/unrelated groups alone. Only a group
+                        # containing one of our hooks needs to be rewritten.
+                        if any(.hooks[]?; owned) then
+                            .hooks |= map(select(owned | not)) |
+                            select(.hooks | length > 0)
+                        else . end
+                    else select(owned | not) end
+                )
+            else . end
+        )
+    ' "$target" > "$tmp" && chmod "$target_mode" "$tmp" && mv -f "$tmp" "$target"; then
+        return
+    fi
+    rm -f "$tmp"
+    echo "tmux-assistant-resurrect: cannot remove hooks from $settings; left unchanged" >&2
+}
+
 install_claude_hooks() {
     local settings="$HOME/.claude/settings.json"
     local hooks_dir="${CURRENT_DIR}/hooks"
     local track_cmd cleanup_cmd
+
+    if [ "$(tmux show-option -gqv @assistant-resurrect-claude)" = 'off' ]; then
+        remove_assistant_json_hooks claude "$settings"
+        return
+    fi
 
     # Do not create or modify Claude's configuration when the dependency needed
     # to perform a safe JSON update is unavailable.
@@ -170,6 +253,11 @@ install_cursor_hooks() {
     local settings="$HOME/.cursor/hooks.json"
     local hooks_dir track_cmd cleanup_cmd
     hooks_dir="${CURRENT_DIR}/hooks"
+
+    if [ "$(tmux show-option -gqv @assistant-resurrect-cursor)" = 'off' ]; then
+        remove_assistant_json_hooks cursor "$settings"
+        return
+    fi
 
     command -v jq >/dev/null 2>&1 || return
     track_cmd=$(hook_command "${hooks_dir}/cursor-session-track.sh")
@@ -274,10 +362,59 @@ install_cursor_hooks() {
 
 # --- OpenCode plugin ---
 
+# Remove only a link to our tracker, including a stale checkout/TPM path. A
+# regular file or a link to another plugin belongs to the user. Never follow
+# the link (it may be dangling or point at a directory).
+remove_opencode_plugin_link() {
+    local plugin_file="$1" target
+    [ -L "$plugin_file" ] || return 0
+    target=$(readlink "$plugin_file") || return 0
+    case "$target" in
+        */hooks/opencode-session-track.js) rm -f "$plugin_file" ;;
+    esac
+}
+
+opencode_plugin_api_supported() {
+    local binary version found=false
+    # The official V2 package also installs opencode2. Both commands discover
+    # the same global plugins, so a V1 opencode next to a V2 opencode2 is unsafe.
+    for binary in opencode opencode2; do
+        command -v "$binary" >/dev/null 2>&1 || continue
+        found=true
+        version=$("$binary" --version 2>/dev/null) || return 1
+        # Validate the whole response, not one line in a diagnostic dump.
+        case "$version" in *$'\n'*) return 1 ;; esac
+        printf '%s\n' "$version" | grep -Eq '^(opencode )?v?1\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' || return 1
+    done
+    [ "$found" = true ]
+}
+
 install_opencode_plugin() {
     local plugin_dir="$HOME/.config/opencode/plugins"
     local plugin_file="$plugin_dir/session-tracker.js"
     local source_file="${CURRENT_DIR}/hooks/opencode-session-track.js"
+
+    # This switch controls automatic plugin installation only; other assistants
+    # and OpenCode's argv/database save/restore fallbacks remain independent.
+    if [ "$(tmux show-option -gqv @assistant-resurrect-opencode)" = 'off' ]; then
+        remove_opencode_plugin_link "$plugin_file"
+        return
+    fi
+
+    # V2 requires a default { id, setup/effect } definition. More importantly,
+    # its server plugin runs in a shared background server, so porting just the
+    # export would no longer identify the TUI PID in a tmux pane. Keep the native
+    # V1 tracker until a TUI-to-session mapping is verified for V2. Unknown/dev
+    # versions are not evidence of a compatible API either. --version does not
+    # load plugins or start a server. Probe before the already-linked guard so
+    # upgrading to V2 also removes a previously installed incompatible tracker.
+    if ! opencode_plugin_api_supported; then
+        remove_opencode_plugin_link "$plugin_file"
+        if command -v opencode >/dev/null 2>&1 || command -v opencode2 >/dev/null 2>&1; then
+            echo 'tmux-assistant-resurrect: OpenCode tracker requires recognized v1 versions for all available OpenCode commands; skipping plugin installation (disable with @assistant-resurrect-opencode off)' >&2
+        fi
+        return
+    fi
 
     mkdir -p "$plugin_dir"
 

@@ -129,6 +129,16 @@ jobs:
           bash test/restore-unit-tests.sh
           bash test/plugin-hardening-unit-tests.sh
 
+      # Separate prefixes avoid the V1/V2 opencode bin-name collision. All
+      # config/state and servers are private to the contract test, no login.
+      - name: OpenCode V1/V2 plugin contract (real binaries)
+        run: |
+          npm install --prefix "$RUNNER_TEMP/opencode-contract-v1" --no-audit --no-fund opencode-ai@1.18.34
+          npm install --prefix "$RUNNER_TEMP/opencode-contract-v2" --no-audit --no-fund @opencode/cli@2.0.22
+          python3 test/opencode-plugin-contract-test.py \
+            "$RUNNER_TEMP/opencode-contract-v1/node_modules/.bin/opencode" \
+            "$RUNNER_TEMP/opencode-contract-v2/node_modules/.bin/opencode"
+
       # The only tmux >= 3.7 in CI. Below 3.7 tmux rewrites ':' and '.' in
       # session names to '_', so the Docker suites (tmux 3.4) cannot reach the
       # target-grammar cases from issue #66 at all — they skip with a notice.
