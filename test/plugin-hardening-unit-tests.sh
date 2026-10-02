@@ -169,19 +169,39 @@ for json_tool in claude cursor; do
     else
         fail "$json_tool off does not create hook configuration"
     fi
+    mkdir -p "$(dirname "$json_settings")"
+    jq -n --arg tool "$json_tool" '
+        [{command:("echo " + $tool + "-session-track.sh")},
+         {command:("bash \"/other/" + $tool + "-session-track.sh.backup\"")},
+         {command:("bash \"/other/" + $tool + "-session-cleanup.sh\" && user-command")},
+         {command:("user-hook --label " + $tool + "-session-track")}] as $user |
+        {hooks: (if $tool == "claude" then {SessionStart:[{hooks:$user}]} else {sessionStart:$user} end)}
+    ' > "$json_settings"
+    json_lookalikes=$(cat "$json_settings")
+    json_optout_run "$json_tool" "$json_home" off
+    assert_eq "$json_tool off preserves user commands mentioning tracker names" "$json_lookalikes" "$(cat "$json_settings")"
+    jq --arg tool "$json_tool" '
+        {command:("bash \"/old/hooks/" + $tool + "-session-track.sh\"")} as $owned |
+        if $tool == "claude" then .hooks.SessionStart[0].hooks += [$owned]
+        else .hooks.sessionStart += [$owned] end
+    ' "$json_settings" > "$json_settings.fixture"
+    mv "$json_settings.fixture" "$json_settings"
+    json_optout_run "$json_tool" "$json_home" off
+    assert_eq "$json_tool off removes owned hooks without removing lookalike user hooks" "$json_lookalikes" "$(cat "$json_settings")"
+    rm "$json_settings"
     json_optout_run "$json_tool" "$json_home" on
     json_target="$TEST_ROOT/$json_tool-target.json"
     jq --arg tool "$json_tool" '
         .user_setting = "retained" |
         if $tool == "claude" then
             .hooks.SessionStart += [
-                {matcher:"user", hooks:[{command:"user-start"}, {command:"bash /old/hooks/claude-session-track.sh"}, {type:"url", url:"https://example.test/hook"}]},
+                {matcher:"user", hooks:[{command:"user-start"}, {command:"bash \"/old/hooks/claude-session-track.sh\""}, {type:"url", url:"https://example.test/hook"}]},
                 {matcher:"missing"}, {matcher:"null", hooks:null}
             ] |
-            .hooks.SessionEnd += [{hooks:[{command:"user-end"}, {command:"bash /old/hooks/claude-session-cleanup.sh"}]}]
+            .hooks.SessionEnd += [{hooks:[{command:"user-end"}, {command:"bash \"/old/hooks/claude-session-cleanup.sh\""}]}]
         else
-            .hooks.sessionStart += [{command:"user-start"}, {command:"bash /old/hooks/cursor-session-track.sh"}, {type:"url", url:"https://example.test/hook"}] |
-            .hooks.sessionEnd += [{command:"user-end"}, {command:"bash /old/hooks/cursor-session-cleanup.sh"}]
+            .hooks.sessionStart += [{command:"user-start"}, {command:"bash \"/old/hooks/cursor-session-track.sh\""}, {type:"url", url:"https://example.test/hook"}] |
+            .hooks.sessionEnd += [{command:"user-end"}, {command:"bash \"/old/hooks/cursor-session-cleanup.sh\""}]
         end
     ' "$json_settings" > "$json_target"
     chmod 2640 "$json_target"

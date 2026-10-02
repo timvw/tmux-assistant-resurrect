@@ -76,7 +76,9 @@ remove_assistant_json_hooks() {
     [ -f "$settings" ] || return 0
     command -v jq >/dev/null 2>&1 || return 0
     count=$(jq --arg tool "$tool" '
-        def owned: (.command // "") | (contains($tool + "-session-track") or contains($tool + "-session-cleanup"));
+        def owned: (.command // "") | if type == "string" then
+            test("^bash (\"\\$HOME\")?(\u0027/[^\u0027]*/" + $tool + "-session-(track|cleanup)\\.sh\u0027|\"/[^\"\\n]*/" + $tool + "-session-(track|cleanup)\\.sh\")$")
+        else false end;
         [.hooks | if $tool == "claude" then
             .SessionStart[]?.hooks[]?, .SessionEnd[]?.hooks[]?
         else .sessionStart[]?, .sessionEnd[]? end | select(owned)] | length
@@ -123,7 +125,9 @@ remove_assistant_json_hooks() {
     esac
     tmp=$(mktemp "${target}.tmp.XXXXXX") || return
     if jq --arg tool "$tool" '
-        def owned: (.command // "") | (contains($tool + "-session-track") or contains($tool + "-session-cleanup"));
+        def owned: (.command // "") | if type == "string" then
+            test("^bash (\"\\$HOME\")?(\u0027/[^\u0027]*/" + $tool + "-session-(track|cleanup)\\.sh\u0027|\"/[^\"\\n]*/" + $tool + "-session-(track|cleanup)\\.sh\")$")
+        else false end;
         (if $tool == "claude" then ["SessionStart", "SessionEnd"] else ["sessionStart", "sessionEnd"] end) as $events |
         reduce $events[] as $event (. ;
             if .hooks[$event] then
