@@ -95,7 +95,7 @@ Docker. De binarycontracttest gebruikt `serve` met een eigen lokale poort en
 procesgroep, zonder login, prompts of modelverzoeken. Er wordt geen gedeelde
 OpenCode-service gestart of gestopt.
 
-- De uitgebreide installer/hardening-suite: **117 geslaagd**, geen fouten of
+- De uitgebreide installer/hardening-suite: **121 geslaagd**, geen fouten of
   skips op macOS en onder Bash 3.2 in Linux/Docker. De nieuwe regressies falen
   aantoonbaar tegen de oorspronkelijke installer uit `HEAD`.
 - De nieuwe `test/opencode-plugin-contract-test.py`: echte v1.18.34 laadt de
@@ -120,6 +120,15 @@ OpenCode-service gestart of gestopt.
 De echte v1/v2-contracttest is toegevoegd aan de macOS-CI-job met afzonderlijke,
 gepinde npm-prefixes. De installerregressies draaien mee in de bestaande
 hermetische suites; er is geen GitHub-workflow herstart.
+
+De eerste macOS-CI-run bevestigde het echte OpenCode-contract, maar faalde op
+een bestaande Copilot-aanname: een lege sessie in 1.0.91 maakt nog geen globale
+`session-store.db` aan. De [officiële configuratiereferentie](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)
+beschrijft die als gedeelde index en vermeldt dat bestanden op aanvraag ontstaan.
+De contracttest controleert nu expliciet dat de bestaande productie-resolver
+zonder die index werkt; de PID-lock en per-sessie `session.db` blijven vereist.
+De echte Copilot-contracttest slaagt lokaal met **18 checks**. Copilot-productiecode
+is hierbij niet gewijzigd.
 
 ## Grenzen en vervolg
 

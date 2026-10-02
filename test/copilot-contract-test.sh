@@ -171,9 +171,8 @@ else
 		"present: $(ls -A "$session_dir" 2>/dev/null | tr '\n' ' ')"
 fi
 
-# The lock exists before any prompt is submitted, so a blank TUI IS saveable.
-# If this ever regresses, the "first save after install" limitation needs an
-# updated note in README.md.
+# The PID mapping exists before any prompt is submitted. Resumability still
+# requires the per-session database, checked below.
 if [ -e "$lock" ]; then
 	pass "mapping is available on a blank TUI (no prompt submitted)"
 fi
@@ -204,14 +203,18 @@ assert_eq "production resolver declines a session that cannot be resumed" \
 : >"$session_dir/session.db"
 assert_eq "production resolver maps the native PID to the live session UUID" \
 	"$session_id" "$(get_copilot_session_from_lock "$native_pid")"
-rm -f "$session_dir/session.db"
-
-if [ -z "$(find "$COPILOT_HOME" -maxdepth 1 -name 'session-store.db' 2>/dev/null)" ]; then
-	fail "expected the shared session-store.db at the COPILOT_HOME root" \
-		"present: $(ls -A "$COPILOT_HOME" 2>/dev/null | tr '\n' ' ')"
-else
-	pass "shared session-store.db sits at the root, not inside the session dir"
+# The cross-session index is created on demand in current Copilot versions.
+# It cannot identify this process's session and is not part of our contract.
+# Prove the resolver works without it, even on versions that create it eagerly.
+if [ -e "$COPILOT_HOME/session-store.db" ]; then
+	mv "$COPILOT_HOME/session-store.db" "$SANDBOX/session-store.db"
 fi
+assert_eq "production resolver does not require the shared session index" \
+	"$session_id" "$(get_copilot_session_from_lock "$native_pid")"
+if [ -e "$SANDBOX/session-store.db" ]; then
+	mv "$SANDBOX/session-store.db" "$COPILOT_HOME/session-store.db"
+fi
+rm -f "$session_dir/session.db"
 
 # --- Contract 4: the lock is released on graceful shutdown -------------------
 
