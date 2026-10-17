@@ -48,7 +48,7 @@ detect_tool() {
 	*/claude/versions/[0-9]*) first="claude" ;;
 	esac
 	case "$first" in
-	claude | copilot | opencode | codex | pi | omp | grok)
+	claude | copilot | opencode | codex | pi | omp | grok | agy)
 		tool="$first"
 		shift
 		;;
@@ -67,7 +67,7 @@ detect_tool() {
 	node | nodejs | bun | deno | bash | sh | dash | ksh | zsh)
 		[ "$#" -gt 1 ] || return 0
 		case "${2##*/}" in
-		claude | copilot | opencode | codex | pi | omp | grok) tool="${2##*/}" ;;
+		claude | copilot | opencode | codex | pi | omp | grok | agy) tool="${2##*/}" ;;
 		cursor-agent) tool="cursor" ;;
 		agent)
 			[ "${3:-}" = "--use-system-ca" ] || return 0

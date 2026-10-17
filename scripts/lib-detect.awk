@@ -19,7 +19,7 @@ function detect_tool(line) {
 	if (word[1] ~ /\/claude\/versions\/[0-9]/) first = "claude"
 	tool_at = 1
 	if (first == "claude" || first == "copilot" || first == "opencode" ||
-	    first == "codex" || first == "pi" || first == "omp" || first == "grok") {
+	    first == "codex" || first == "pi" || first == "omp" || first == "grok" || first == "agy") {
 		tool = first
 	} else if (first == "cursor-agent") {
 		tool = "cursor"
@@ -36,7 +36,7 @@ function detect_tool(line) {
 		} else if (tool == "agent" && word[3] == "--use-system-ca" && word[4] ~ /\/index\.js$/) {
 			tool = "cursor"
 		} else if (!(tool == "claude" || tool == "copilot" || tool == "opencode" ||
-		             tool == "codex" || tool == "pi" || tool == "omp" || tool == "grok")) return ""
+		             tool == "codex" || tool == "pi" || tool == "omp" || tool == "grok" || tool == "agy")) return ""
 		tool_at = 2
 	} else {
 		return ""

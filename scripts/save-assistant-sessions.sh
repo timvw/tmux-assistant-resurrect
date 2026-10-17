@@ -1109,6 +1109,12 @@ get_grok_session() {
 	fi
 }
 
+# agy keeps the selected conversation in its own process log, including
+# in-TUI switches. Never select the newest conversation by working directory.
+get_agy_session() {
+	python3 "$PY_DIR/agy_session.py" "$1" "$2"
+}
+
 register_codex_session_id() {
 	local sid="$1"
 	[ -z "$sid" ] && return
@@ -2015,6 +2021,7 @@ SESSION_FLAG_PATTERN_copilot='^--(connect|continue|interactive|name|prompt|resum
 SESSION_FLAG_PATTERN_opencode='^--session$'
 SESSION_FLAG_PATTERN_pi='^--(session|resume|continue|fork)$'
 SESSION_FLAG_PATTERN_omp='^--(session|resume|continue|fork)$'
+SESSION_FLAG_PATTERN_agy='^--(conversation|continue|new-project)$'
 SESSION_FLAG_PATTERN_grok='^--(resume|continue|session-id|fork-session)$'
 SESSION_FLAG_PATTERN_cursor='^--(resume|continue|new-session-id)$'
 # codex uses subcommands (resume, fork), not --flags — handled separately.
@@ -2049,6 +2056,9 @@ SESSION_FLAGS_FALLBACK_omp="--continue -c
 --fork
 --resume -r
 --session"
+SESSION_FLAGS_FALLBACK_agy="--conversation
+--continue -c
+--new-project"
 SESSION_FLAGS_FALLBACK_grok="--continue -c
 --fork-session
 --resume -r
@@ -2079,6 +2089,7 @@ SESSION_EXTRA_WARM_opencode=_warm_cli_arg_helpers
 SESSION_EXTRA_WARM_codex=_warm_cli_arg_helpers
 SESSION_EXTRA_WARM_pi=_warm_cli_arg_helpers
 SESSION_EXTRA_WARM_omp=_warm_cli_arg_helpers
+SESSION_EXTRA_WARM_agy=_warm_cli_arg_helpers
 SESSION_EXTRA_WARM_grok=_warm_cli_arg_helpers
 SESSION_EXTRA_WARM_cursor=_warm_cli_arg_helpers
 
@@ -2244,6 +2255,13 @@ extract_cli_args() {
 		fi
 	fi
 
+	# agy's Go-style help omits value placeholders. Drop prompt/print modes
+	# before replay, and let each restored process choose a new log file.
+	if [ "$tool" = "agy" ]; then
+		args=$(echo "$args" | sed -E 's/(^| )(--prompt-interactive|--prompt|--print|-i|-p)([= ].*)?$//')
+		args=$(_strip_long_opt '--log-file' "$args")
+	fi
+
 	# Strip tool-specific session/resume flags.
 	local pattern_var="SESSION_FLAG_PATTERN_${tool}"
 	local pattern="${!pattern_var:-}"
@@ -2383,6 +2401,7 @@ resolve_pane_candidates() {
 			codex) session_id=$(get_codex_session "$cand_pid" "$cand_args" "$pane_cwd" || true) ;;
 			pi) session_id=$(get_pi_session "$cand_pid" "$cand_args" "$pane_cwd" || true) ;;
 			omp) session_id=$(get_omp_session "$cand_pid" "$cand_args" "$pane_cwd" "$pane_tty" || true) ;;
+			agy) session_id=$(get_agy_session "$cand_pid" "$cand_args" || true) ;;
 			grok) session_id=$(get_grok_session "$cand_pid" "$cand_args" || true) ;;
 			esac
 
@@ -2899,6 +2918,7 @@ emit_session() {
 	codex) session_id=$(get_codex_session "$cpid" "$cargs" "$cwd" || true) ;;
 	pi) session_id=$(get_pi_session "$cpid" "$cargs" "$cwd" || true) ;;
 	omp) session_id=$(get_omp_session "$cpid" "$cargs" "$cwd" "" || true) ;;
+	agy) session_id=$(get_agy_session "$cpid" "$cargs" || true) ;;
 	grok) session_id=$(get_grok_session "$cpid" "$cargs" || true) ;;
 	esac
 

@@ -6,7 +6,7 @@
 # tests and callers may deliberately change DROP_FLAGS/DROP_ENV between calls.
 replay_load_tool_policy() {
 	local tool="$1" loaded="_REPLAY_POLICY_LOADED_$1" flags env_names
-	case "$tool" in claude | cursor | copilot | opencode | codex | pi | omp | grok) ;; *) return 0 ;; esac
+	case "$tool" in claude | cursor | copilot | opencode | codex | pi | omp | grok | agy) ;; *) return 0 ;; esac
 	[ -z "${!loaded:-}" ] || return 0
 	flags=$(tmux show-option -gqv "@assistant-resurrect-${tool}-drop-flags" 2>/dev/null || true)
 	env_names=$(tmux show-option -gqv "@assistant-resurrect-${tool}-drop-env" 2>/dev/null || true)
@@ -349,6 +349,7 @@ OPTION_VALUE_FLAGS_FALLBACK_opencode="--log-level --port --hostname --mdns-domai
 OPTION_VALUE_FLAGS_FALLBACK_codex="-c --config --enable --disable --remote --remote-auth-token-env -i --image -m --model --local-provider -p --profile -s --sandbox -C --cd --add-dir -a --ask-for-approval"
 OPTION_VALUE_FLAGS_FALLBACK_pi="--provider --model --api-key --system-prompt --append-system-prompt --mode -n --name --models -t --tools -xt --exclude-tools --thinking -e --extension --skill --prompt-template --theme --use-theme --export --list-models --tui-mode"
 OPTION_VALUE_FLAGS_FALLBACK_omp="--model --smol --slow --plan --prewalk-into --plan-yolo-into --provider --api-key --system-prompt --append-system-prompt --profile --alias --cwd --mode --config --session-dir --models --tools --thinking --hook -e --extension --skills --export --max-time --approval-mode --plugin-dir"
+OPTION_VALUE_FLAGS_FALLBACK_agy="--add-dir --agent --conversation --effort --input-format --json-schema --log-file --mode --model --output-format --print-timeout --project"
 OPTION_VALUE_FLAGS_FALLBACK_grok="--model --effort --cwd"
 OPTION_VALUE_FLAGS_FALLBACK_cursor="--header -e --endpoint --output-format --mode --model --sandbox --workspace --add-dir --plugin-dir -w --worktree --worktree-base"
 

@@ -3,7 +3,7 @@
 ## Project overview
 
 tmux-assistant-resurrect persists AI coding assistant sessions (Claude Code,
-Cursor Agent CLI, GitHub Copilot CLI, OpenCode, Codex CLI, Pi, Oh My Pi, Grok)
+Cursor Agent CLI, GitHub Copilot CLI, OpenCode, Codex CLI, Pi, Oh My Pi, Grok, Antigravity CLI)
 across tmux restarts. It hooks into tmux-resurrect to save session IDs and
 restore them automatically.
 
@@ -447,6 +447,21 @@ cat ~/.local/share/tmux/resurrect/assistant-restore.log
   platforms by driving the functions against a fabricated pane table.
 - npm packages are pinned to major versions: `claude-code@^2`,
   `@github/copilot@^1`, `codex@^0`, `opencode-ai@^1`, `pi-coding-agent@^0`.
+
+## Antigravity CLI (`agy`)
+
+`get_agy_session()` uses `scripts/py/agy_session.py` to read only log files
+opened by the candidate PID. `Streaming conversation`, stream-start and redraw
+events identify the selected UUID; empty redraws clear a prior selection. This
+is an observed logging contract. Do not replace it with newest-by-cwd lookup:
+several agy instances can share the same workspace. `--conversation` in argv
+is the fallback, except when the log explicitly cleared the selection. Initial
+prompts, continue/new-project selectors and the old `--log-file` are not replayed.
+
+`test/agy-unit-tests.sh` covers both shell/AWK detection and isolated log fixtures.
+`test/agy-live-lifecycle.py` is opt-in and uses a real local account/session on
+its own tmux socket without sending a prompt. Do not call it authenticated
+coverage in CI: only a local run with an existing conversation establishes that.
 
 ## Adding a new assistant
 

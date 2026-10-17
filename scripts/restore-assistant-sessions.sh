@@ -210,7 +210,7 @@ while read -r entry; do
 	pane=$(printf '%s\n' "$entry" | jq -r '.pane')
 	tool=$(printf '%s\n' "$entry" | jq -r '.tool')
 	case "$tool" in
-	claude | cursor | copilot | opencode | codex | pi | omp | grok) ;;
+	claude | cursor | copilot | opencode | codex | pi | omp | grok | agy) ;;
 	*) log "unknown tool $tool in $pane, skipping"; continue ;;
 	esac
 	replay_load_tool_policy "$tool"
@@ -477,6 +477,9 @@ while read -r entry; do
 		else
 			resume_cmd="command omp --resume ${safe_sid}"
 		fi
+		;;
+	agy)
+		resume_cmd="command agy${safe_cli_args} --conversation ${safe_sid}"
 		;;
 	grok)
 		# Deliberately ignore cli_args for grok. Resuming reloads the

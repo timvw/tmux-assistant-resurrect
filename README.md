@@ -20,7 +20,7 @@ When your computer shuts down, tmux sessions are lost -- including any running
 [OpenCode](https://github.com/opencode-ai/opencode),
 [Codex CLI](https://github.com/openai/codex),
 [Pi](https://github.com/mariozechner/pi),
-[Oh My Pi](https://github.com/can1357/oh-my-pi), or
+[Oh My Pi](https://github.com/can1357/oh-my-pi), Antigravity CLI (`agy`), or
 [Grok Build](https://x.ai/cli) (xAI's `grok` CLI / TUI, not the community
 `grok-cli`) instances. This project hooks into
 [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) to
@@ -33,7 +33,7 @@ then re-launch them with the exact same configuration after a restore.
 SAVE (every 5 min + manual prefix+Ctrl-s)
   tmux-resurrect saves pane layouts
     -> post-save hook inspects child processes of each pane
-    -> detects assistants by binary name (claude, agent/cursor-agent, copilot, opencode, codex, pi, omp, grok)
+    -> detects assistants by binary name (claude, agent/cursor-agent, copilot, opencode, codex, pi, omp, grok, agy)
     -> extracts session IDs via native hooks/plugins/process args
     -> writes assistant-sessions.json in tmux-resurrect's save dir
 
@@ -50,6 +50,7 @@ RESTORE (on tmux start or manual prefix+Ctrl-r)
          pi --model sonnet --session <session-id>
          omp --profile work --resume <session-id>
          grok --resume <session-id>
+         agy --conversation <session-id>
 ```
 
 ## Design
@@ -57,7 +58,7 @@ RESTORE (on tmux start or manual prefix+Ctrl-r)
 Detection is done via direct process inspection: the save script takes a
 single `ps` snapshot of all processes, finds children of each tmux pane shell,
 and matches known assistant binary names (`claude`, `agent`/`cursor-agent`,
-`copilot`, `opencode`, `codex`, `pi`, `omp`, `grok`).
+`copilot`, `opencode`, `codex`, `pi`, `omp`, `grok`, `agy`).
 
 Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 
@@ -70,12 +71,32 @@ Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 | **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | SQLite `~/.codex/state_*.sqlite` `threads` table (Codex >= 0.118); rollout JSONL `~/.codex/sessions/` (Codex ~0.100-0.117) | Codex runs via Node.js, so args are always visible in `ps` |
 | **Pi** | Session header lookup in `~/.pi/agent/sessions/--<cwd>--/*.jsonl` | `--session` in process args | - | Session-file lookup is cwd-scoped and uses process-time scoring + dedup |
 | **Oh My Pi** | Terminal breadcrumb + session JSONL lookup (`$XDG_STATE_HOME/omp`, `$XDG_DATA_HOME/omp`) | `--resume` / `-r` in process args | `--session-dir` / `--profile` scoped lookup | Distinct `omp` tool; no hook/plugin required |
+| **Antigravity CLI (`agy`)** | PID-owned CLI log | `--conversation <UUID>` in process args | - | No cwd/newest-session guessing; log format is an observed contract |
 | **Grok** | PID lookup in `~/.grok/active_sessions.json` | `-r` / `--resume <uuid>` in process args | - | Registry records every live session (including a bare `grok` with no args) keyed by PID, so sessions sharing a cwd never collide; no hook/plugin required |
 
 Each tool has a primary and fallback extraction method. Fallbacks address the
 chicken-and-egg problem: after a restore, session IDs are in process args even
 before hooks/plugins have fired. The OpenCode SQLite database fallback provides
 version-resilient session ID extraction even when the plugin hasn't fired.
+
+### Antigravity CLI (`agy`)
+
+Antigravity CLI is resumed with `agy --conversation <UUID>`. Save reads the
+log file opened by the owning PID (`/proc/<pid>/fd` on Linux, `lsof` on macOS),
+including an explicit `--log-file`, and tracks conversation-selection events.
+An in-TUI switch overrides the original `--conversation` argument; opening a
+new empty conversation clears the old selection. If no selection event exists,
+only an explicit UUID in launch arguments is used. There is no cwd/newest-session
+fallback, so unresolved or empty conversations are skipped.
+
+This depends on the observed CLI log messages (`Streaming conversation`,
+`Starting conversation update stream`, and full-redraw events), not a public
+hook API. Changes in agy's logging may require an update. Model, effort and
+permission options are retained; initial prompts and the old process log path
+are not replayed. No launch wrapper or new hook is installed.
+
+Run `bash test/agy-unit-tests.sh` for hermetic detection/selection tests. On a
+machine with agy installed, run `python3 test/agy-live-lifecycle.py /path/to/tmux-resurrect <UUID>` to verify a saved conversation in an isolated tmux server. It uses your current account and conversation store but sends no prompt. The unit fixtures alone do not establish authenticated recovery.
 
 ## Prerequisites
 

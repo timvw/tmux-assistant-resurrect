@@ -1150,5 +1150,23 @@ else
 	echo "$replay_policy_output"
 	fail "shared replay policy suite"
 fi
+# Antigravity restores with its own selector and preserves ordinary flags.
+export MOCK_EXEC_SHELL='' MOCK_DROP_ENV='' MOCK_DROP_FLAGS=''
+export MOCK_SHELLS='' MOCK_PANES='%90|0|0|agy-test'
+cat >"$RESURRECT_DIR/assistant-sessions.json" <<JSON
+{"sessions":[{"pane":"agy-test:0.0","tool":"agy","session_id":"e8d5d5bb-d278-44cc-9ba3-79b6896dce97","cwd":"$SANDBOX","cli_args":"--model test --effort high"}]}
+JSON
+run_restore
+assert_eq 'agy restore succeeds' 0 "$RESTORE_STATUS"
+assert_contains 'agy uses exact conversation selector' "$(cat "$TMUX_LOG")" "command agy '--model' 'test' '--effort' 'high' --conversation 'e8d5d5bb-d278-44cc-9ba3-79b6896dce97'"
+
+# Use this existing cross-platform CI entry point for agy's hermetic suite.
+if agy_unit_output=$("${TEST_BASH:-bash}" "$REPO_DIR/test/agy-unit-tests.sh" 2>&1); then
+	echo "$agy_unit_output"
+	pass "Antigravity CLI session suite"
+else
+	echo "$agy_unit_output"
+	fail "Antigravity CLI session suite"
+fi
 echo "restore unit tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

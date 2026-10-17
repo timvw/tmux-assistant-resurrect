@@ -588,6 +588,10 @@ test:
     docker build -t tmux-assistant-resurrect-test -f test/Dockerfile .
     docker run --rm tmux-assistant-resurrect-test
 
+# Run Antigravity CLI session tests (no binary or login required)
+test-agy:
+    @"${TEST_BASH:-bash}" "{{repo_dir}}/test/agy-unit-tests.sh"
+
 # Run hermetic Grok unit tests (no Docker / no grok binary needed)
 test-grok:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/grok-unit-tests.sh"
