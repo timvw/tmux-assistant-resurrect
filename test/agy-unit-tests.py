@@ -146,6 +146,21 @@ class Sessions(unittest.TestCase):
             result.stdout = b"p123\0\nf4\0n" + native.encode() + b"\0\n"
             self.assertEqual(agy.log_paths(123, "agy"), [native])
 
+    def test_lsof_skips_network_name_lookups(self):
+        # Host and port lookups for a process's sockets can stall on slow
+        # reverse DNS past the timeout; log discovery needs file paths only.
+        result = type("Result", (), {"stdout": b""})()
+        with (
+            patch.object(agy.Path, "is_dir", return_value=False),
+            patch.object(agy.subprocess, "run", return_value=result) as run,
+            patch.object(agy, "exact_argv", return_value=None),
+        ):
+            agy.log_paths(123, "agy")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0], "lsof")
+        self.assertIn("-n", argv)
+        self.assertIn("-P", argv)
+
     def test_invalid_pid(self):
         for pid in [0, 1, -2, "not-a-pid"]:
             self.assertEqual(agy.log_paths(pid, "agy"), [])

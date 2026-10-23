@@ -140,8 +140,11 @@ def log_paths(pid, args, cwd=""):
                 pass
     else:
         try:
+            # -n/-P: only file paths are needed. Without them lsof resolves
+            # every socket's host and port name first, which can outlast the
+            # timeout when reverse DNS is slow and lose a live session.
             result = subprocess.run(
-                ["lsof", "-a", "-p", str(pid), "-F0fn"],
+                ["lsof", "-n", "-P", "-a", "-p", str(pid), "-F0fn"],
                 capture_output=True,
                 timeout=5,
                 check=False,
