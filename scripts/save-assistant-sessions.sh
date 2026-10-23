@@ -652,6 +652,39 @@ get_copilot_session() {
 	return 0
 }
 
+# Major version of the OpenCode binary a pane is running, or nothing when it
+# cannot be determined. The running executable is checked rather than PATH:
+# a package upgrade replaces PATH's binary while the pane keeps the old one,
+# and Homebrew deletes the old Cellar directory, so its path is read first.
+opencode_pane_major_version() {
+	local pid="$1" exe="" version=""
+	[ -n "$pid" ] || return 0
+	if [ -e "/proc/${pid}/exe" ]; then
+		exe=$(readlink "/proc/${pid}/exe" 2>/dev/null || true)
+	elif command -v lsof >/dev/null 2>&1; then
+		exe=$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+	fi
+	[ -n "$exe" ] || return 0
+	case "$exe" in
+	*/opencode/[0-9]*/bin/*)
+		version=${exe##*/opencode/}
+		version=${version%%/*}
+		;;
+	*)
+		[ -x "$exe" ] || return 0
+		version=$("$exe" --version 2>/dev/null) || return 0
+		;;
+	esac
+	case "$version" in *$'\n'*) return 0 ;; esac
+	version=${version#opencode }
+	version=${version#v}
+	version=${version%%.*}
+	case "$version" in
+	'' | *[!0-9]*) return 0 ;;
+	esac
+	printf '%s\n' "$version"
+}
+
 get_opencode_session() {
 	local child_pid="$1"
 	local args="$2"
@@ -695,7 +728,13 @@ get_opencode_session() {
 	# wrong. To avoid this, launch with explicit session IDs: opencode -s <id>.
 	local db_file="${HOME}/.local/share/opencode/opencode.db"
 	if [ "$allow_db_fallback" = "1" ] && [ -n "$cwd" ] && [ -f "$db_file" ] && command -v python3 >/dev/null 2>&1; then
-		sid=$(python3 "$PY_DIR/opencode_db.py" "$db_file" "$cwd" 2>/dev/null || true)
+		local db_rc=0
+		sid=$(python3 "$PY_DIR/opencode_db.py" "$db_file" "$cwd" 2>/dev/null) || db_rc=$?
+		if [ "$db_rc" -eq 3 ]; then
+			local pane_major
+			pane_major=$(opencode_pane_major_version "$child_pid")
+			sid=$(python3 "$PY_DIR/opencode_db.py" "$db_file" "$cwd" "${pane_major:-unknown}" 2>/dev/null || true)
+		fi
 		if [ -n "$sid" ]; then
 			echo "$sid"
 			return
