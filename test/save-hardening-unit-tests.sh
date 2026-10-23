@@ -456,6 +456,17 @@ assert_eq "a prompt positional still discards the rest" \
 	"--append-system-prompt-file /tmp/sp.md" \
 	"$(extract_cli_args claude "claude --append-system-prompt-file /tmp/sp.md hi --model m")"
 
+# --advisor takes a model but is hidden from `claude --help`, so it is pinned
+# in the static fallback too. Read as a boolean, "opus" became the first
+# positional and the filter dropped it plus the tail, leaving a bare --advisor
+# that swallowed the --resume restore appended after it.
+assert_eq "--advisor keeps its value" \
+	"--model sonnet --advisor opus" \
+	"$(extract_cli_args claude "claude --model sonnet --advisor opus")"
+assert_eq "a flag after --advisor's value is not swallowed" \
+	"--advisor opus --effort high" \
+	"$(extract_cli_args claude "claude --advisor opus --effort high")"
+
 # A path with a space in it survives ps as several bare tokens, so the flattened
 # form above keeps only the fragment before the space. Claude then exits with
 # "Append system prompt file not found: <fragment>" and the pane never resumes.
