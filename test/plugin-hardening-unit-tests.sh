@@ -935,6 +935,176 @@ else
     skip "status resolver test (just is unavailable)"
 fi
 
+# --- scripts/lib-fs.sh, the shared resolver, exercised directly ---------------
+# The inline copies this replaced could only be reached through a full install,
+# so the failure modes below had no direct coverage. resolve_symlink_target
+# distinguishes "cannot read a link" (1) from "too deep or cyclic" (2); every
+# caller prints a different message for each.
+# shellcheck source=../scripts/lib-fs.sh
+source "$ROOT_DIR/scripts/lib-fs.sh"
+FS_ROOT="$TEST_ROOT/libfs"
+mkdir -p "$FS_ROOT/sub"
+printf 'x\n' >"$FS_ROOT/real.json"
+ln -s real.json "$FS_ROOT/one"
+ln -s one "$FS_ROOT/two"
+ln -s ../real.json "$FS_ROOT/sub/rel"
+
+assert_eq "lib-fs: a plain file resolves to itself" "$FS_ROOT/real.json" \
+    "$(resolve_symlink_target "$FS_ROOT/real.json")"
+assert_eq "lib-fs: a one-hop link resolves" "$FS_ROOT/real.json" \
+    "$(resolve_symlink_target "$FS_ROOT/one")"
+assert_eq "lib-fs: a two-hop link resolves" "$FS_ROOT/real.json" \
+    "$(resolve_symlink_target "$FS_ROOT/two")"
+assert_eq "lib-fs: a relative link resolves against its own directory" "$FS_ROOT/sub/../real.json" \
+    "$(resolve_symlink_target "$FS_ROOT/sub/rel")"
+
+# 16 readlinks is the supported boundary; the 17th must be refused with 2.
+# fs_chain N builds "0" as a real file and 1..N as links, so resolving link N
+# costs exactly N readlinks.
+fs_chain() {
+    local dir="$1" hops="$2" i
+    mkdir -p "$dir"
+    printf 'x\n' >"$dir/0"
+    i=1
+    while [ "$i" -le "$hops" ]; do
+        ln -s "$((i - 1))" "$dir/$i"
+        i=$((i + 1))
+    done
+}
+fs_chain "$FS_ROOT/ok" 16
+assert_eq "lib-fs: 16 hops resolve" "$FS_ROOT/ok/0" "$(resolve_symlink_target "$FS_ROOT/ok/16")"
+fs_chain "$FS_ROOT/deep" 17
+fs_deep_rc=0
+resolve_symlink_target "$FS_ROOT/deep/17" >/dev/null || fs_deep_rc=$?
+assert_eq "lib-fs: the 17th hop is refused with 2" "2" "$fs_deep_rc"
+ln -s cycle-b "$FS_ROOT/cycle-a"
+ln -s cycle-a "$FS_ROOT/cycle-b"
+fs_cycle_rc=0
+resolve_symlink_target "$FS_ROOT/cycle-a" >/dev/null || fs_cycle_rc=$?
+assert_eq "lib-fs: a cycle returns 2 rather than spinning" "2" "$fs_cycle_rc"
+
+# Status 1, the unreadable-link branch, is otherwise unreachable here: a path
+# that passes `[ -L ]` normally reads back fine. Stub readlink to force it, so
+# the status each caller branches on is actually covered.
+FS_FAKE_READLINK="$TEST_ROOT/fake-readlink"
+mkdir -p "$FS_FAKE_READLINK"
+printf '#!/bin/sh\nexit 1\n' >"$FS_FAKE_READLINK/readlink"
+chmod +x "$FS_FAKE_READLINK/readlink"
+fs_unreadable_rc=0
+PATH="$FS_FAKE_READLINK:$PATH" resolve_symlink_target "$FS_ROOT/one" >/dev/null || fs_unreadable_rc=$?
+assert_eq "lib-fs: a readlink failure returns 1" "1" "$fs_unreadable_rc"
+
+assert_eq "lib-fs: file_mode_of reads a mode" "2640" \
+    "$(chmod 2640 "$FS_ROOT/real.json" && file_mode_of "$FS_ROOT/real.json")"
+fs_mode_rc=0
+file_mode_of "$FS_ROOT/does-not-exist" >/dev/null || fs_mode_rc=$?
+assert_eq "lib-fs: file_mode_of fails on a missing file" "1" "$fs_mode_rc"
+
+# --- a symlinked ~/.tmux.conf survives configure-tmux and unconfigure-tmux ---
+# This is the case the shared helper was extracted for: both recipes wrote the
+# config with a bare `mktemp` + `mv`, which replaced the link with a regular
+# file and reset its mode. Nothing covered ~/.tmux.conf before -- the existing
+# tmux.conf tests use a plain file.
+TMUX_CONF_STORE="$TEST_ROOT/tmuxconf-store"
+TMUX_CONF_HOME="$TEST_ROOT/tmuxconf-home"
+mkdir -p "$TMUX_CONF_STORE" "$TMUX_CONF_HOME"
+TMUX_CONF_TARGET="$TMUX_CONF_STORE/tmux.conf"
+# Seed the realistic first-install state: a TPM user already has the run
+# line, so even the first configure-tmux takes a sed-and-replace path
+# rather than only appending -- which is where the link used to be lost.
+printf 'set -g mouse on\nrun %s~/.tmux/plugins/tpm/tpm%s\n' "'" "'" >"$TMUX_CONF_TARGET"
+chmod 640 "$TMUX_CONF_TARGET"
+ln -s "$TMUX_CONF_TARGET" "$TMUX_CONF_HOME/.tmux.conf"
+
+if ! command -v just >/dev/null 2>&1; then
+    skip "symlinked ~/.tmux.conf configure/unconfigure test (just unavailable)"
+else
+    # Capture the status rather than letting set -e abort the suite: a recipe
+    # that fails should show up as failed assertions, not a truncated run.
+    tmux_conf_rc=0
+    HOME="$TMUX_CONF_HOME" just --justfile "$ROOT_DIR/justfile" configure-tmux >/dev/null 2>&1 || tmux_conf_rc=$?
+    assert_eq "configure-tmux succeeds on a symlinked config" "0" "$tmux_conf_rc"
+    assert_eq "configure-tmux leaves ~/.tmux.conf a symlink" "yes" \
+        "$([ -L "$TMUX_CONF_HOME/.tmux.conf" ] && echo yes || echo no)"
+    assert_file_mode "configure-tmux preserves the target mode" 640 "$TMUX_CONF_TARGET"
+    assert_eq "configure-tmux writes one managed block through the link" "1" \
+        "$(grep -cF -- '--- begin tmux-assistant-resurrect ---' "$TMUX_CONF_TARGET")"
+    assert_eq "configure-tmux keeps the user's own settings" "1" \
+        "$(grep -cF -- 'set -g mouse on' "$TMUX_CONF_TARGET")"
+    assert_eq "configure-tmux leaves no temp file beside the target" "" \
+        "$(find "$TMUX_CONF_STORE" -name 'tmux.conf.tmp.*' 2>/dev/null)"
+
+    # Run it again: the ordinary `just install` twice. The first run already
+    # took a replacement path, because the fixture carries a TPM line; this
+    # covers the managed-block removal as well, and the state a user actually
+    # re-installs over.
+    tmux_reconf_rc=0
+    HOME="$TMUX_CONF_HOME" just --justfile "$ROOT_DIR/justfile" configure-tmux >/dev/null 2>&1 || tmux_reconf_rc=$?
+    assert_eq "a second configure-tmux succeeds" "0" "$tmux_reconf_rc"
+    assert_eq "a second configure-tmux leaves ~/.tmux.conf a symlink" "yes" \
+        "$([ -L "$TMUX_CONF_HOME/.tmux.conf" ] && echo yes || echo no)"
+    assert_file_mode "a second configure-tmux preserves the target mode" 640 "$TMUX_CONF_TARGET"
+    assert_eq "a second configure-tmux still leaves exactly one managed block" "1" \
+        "$(grep -cF -- '--- begin tmux-assistant-resurrect ---' "$TMUX_CONF_TARGET")"
+    assert_eq "a second configure-tmux keeps the user's own settings" "1" \
+        "$(grep -cF -- 'set -g mouse on' "$TMUX_CONF_TARGET")"
+    assert_eq "a second configure-tmux leaves no temp file beside the target" "" \
+        "$(find "$TMUX_CONF_STORE" -name 'tmux.conf.tmp.*' 2>/dev/null)"
+
+    tmux_unconf_rc=0
+    HOME="$TMUX_CONF_HOME" just --justfile "$ROOT_DIR/justfile" unconfigure-tmux >/dev/null 2>&1 || tmux_unconf_rc=$?
+    assert_eq "unconfigure-tmux succeeds on a symlinked config" "0" "$tmux_unconf_rc"
+    assert_eq "unconfigure-tmux leaves ~/.tmux.conf a symlink" "yes" \
+        "$([ -L "$TMUX_CONF_HOME/.tmux.conf" ] && echo yes || echo no)"
+    assert_file_mode "unconfigure-tmux preserves the target mode" 640 "$TMUX_CONF_TARGET"
+    assert_eq "unconfigure-tmux removes the managed block" "0" \
+        "$(grep -cF -- '--- begin tmux-assistant-resurrect ---' "$TMUX_CONF_TARGET")"
+    assert_eq "unconfigure-tmux keeps the user's own settings" "1" \
+        "$(grep -cF -- 'set -g mouse on' "$TMUX_CONF_TARGET")"
+    assert_eq "unconfigure-tmux leaves no temp file beside the target" "" \
+        "$(find "$TMUX_CONF_STORE" -name 'tmux.conf.tmp.*' 2>/dev/null)"
+
+    # A plain (non-symlinked) config keeps its own mode too, and the legacy
+    # pre-marker lines go in the same pass. configure-tmux now assembles the
+    # whole update in one temp file and publishes it once, so there is no
+    # window in which the config carries mktemp's 0600; this pins the mode,
+    # the legacy strip, the TPM line ending up last, and no leftover temp.
+    PLAIN_CONF_HOME="$TEST_ROOT/tmuxconf-plain-home"
+    mkdir -p "$PLAIN_CONF_HOME"
+    printf 'set -g mouse on\n# tmux-assistant-resurrect\nsource-file ~/.tmux/resurrect-assistants.conf\nrun %s~/.tmux/plugins/tpm/tpm%s\n' "'" "'" \
+        >"$PLAIN_CONF_HOME/.tmux.conf"
+    chmod 644 "$PLAIN_CONF_HOME/.tmux.conf"
+    plain_conf_rc=0
+    HOME="$PLAIN_CONF_HOME" just --justfile "$ROOT_DIR/justfile" configure-tmux >/dev/null 2>&1 || plain_conf_rc=$?
+    assert_eq "configure-tmux succeeds on a plain legacy config" "0" "$plain_conf_rc"
+    assert_file_mode "configure-tmux keeps a plain config's mode" 644 "$PLAIN_CONF_HOME/.tmux.conf"
+    assert_eq "configure-tmux drops the legacy source-file line and its comment" "0" \
+        "$(grep -cE -- 'resurrect-assistants\.conf|^# tmux-assistant-resurrect$' "$PLAIN_CONF_HOME/.tmux.conf")"
+    assert_eq "configure-tmux writes one managed block into a plain config" "1" \
+        "$(grep -cF -- '--- begin tmux-assistant-resurrect ---' "$PLAIN_CONF_HOME/.tmux.conf")"
+    assert_eq "configure-tmux keeps the user's TPM line as the last line" "run '~/.tmux/plugins/tpm/tpm'" \
+        "$(tail -n 1 "$PLAIN_CONF_HOME/.tmux.conf")"
+    assert_eq "configure-tmux leaves no temp file beside a plain config" "" \
+        "$(find "$PLAIN_CONF_HOME" -name '.tmux.conf.tmp.*' 2>/dev/null)"
+
+    # A read-only config is left alone rather than edited against the user's
+    # wishes. Nothing would be lost without the refusal -- it would simply be
+    # rewritten -- so the assertion is that the file is untouched.
+    RO_CONF_HOME="$TEST_ROOT/tmuxconf-readonly-home"
+    mkdir -p "$RO_CONF_HOME"
+    printf 'set -g mouse on\n# --- begin tmux-assistant-resurrect ---\nset -g @plugin x\n# --- end tmux-assistant-resurrect ---\n' \
+        >"$RO_CONF_HOME/.tmux.conf"
+    chmod 444 "$RO_CONF_HOME/.tmux.conf"
+    ro_conf_rc=0
+    HOME="$RO_CONF_HOME" just --justfile "$ROOT_DIR/justfile" configure-tmux >/dev/null 2>&1 || ro_conf_rc=$?
+    assert_eq "a read-only ~/.tmux.conf is refused without an error exit" "0" "$ro_conf_rc"
+    assert_eq "a read-only ~/.tmux.conf is left intact" "4" \
+        "$(wc -l <"$RO_CONF_HOME/.tmux.conf" | tr -d ' ')"
+    assert_eq "a read-only ~/.tmux.conf keeps its managed block" "1" \
+        "$(grep -cF -- '--- begin tmux-assistant-resurrect ---' "$RO_CONF_HOME/.tmux.conf")"
+    chmod 644 "$RO_CONF_HOME/.tmux.conf"
+fi
+
 # Dotfile managers commonly symlink settings.json. Updating Claude hooks must
 # preserve that file identity instead of replacing the link with a regular file,
 # the same way the Cursor update above already does.

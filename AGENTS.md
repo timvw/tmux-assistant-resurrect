@@ -12,6 +12,7 @@ restore them automatically.
 - `tmux-assistant-resurrect.tmux` -- TPM plugin entry point (sets tmux options, installs hooks)
 - `hooks/` -- Native hooks/plugins for each assistant tool (write session IDs to state files)
 - `scripts/lib-detect.sh` -- Shared library: `detect_tool()`, `pane_has_assistant()`, `posix_quote()`
+- `scripts/lib-fs.sh` -- Shared library for updating a user-owned config file in place: `resolve_symlink_target()`, `file_mode_of()`
 - `scripts/lib-log.sh` -- Shared log handling: `open_assistant_log()` (rotation, owner-only, retained fd 9) and `log()`, used by both hooks
 - `scripts/save-assistant-sessions.sh` -- Resurrect post-save hook (process detection + session IDs + enriched fields via `extract_cli_args()`)
 - `scripts/restore-assistant-sessions.sh` -- Resurrect post-restore hook (resumes assistants with CLI flags + env vars)

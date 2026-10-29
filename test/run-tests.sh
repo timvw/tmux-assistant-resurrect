@@ -3249,6 +3249,9 @@ rm -rf "$meta_root" "$pwn_marker"
 mkdir -p "$meta_plugin" "$meta_home/.claude"
 cp "$REPO_DIR/tmux-assistant-resurrect.tmux" "$meta_plugin/"
 cp -R "$REPO_DIR/hooks" "$meta_plugin/hooks"
+# The entry point sources scripts/lib-fs.sh; without it the install
+# aborts before writing any hook and this fixture tests nothing.
+cp -R "$REPO_DIR/scripts" "$meta_plugin/scripts"
 echo '{}' >"$meta_home/.claude/settings.json"
 
 run_isolated_install "$meta_home" "$meta_plugin/tmux-assistant-resurrect.tmux"
@@ -3289,6 +3292,9 @@ rm -rf "$outside_root"
 mkdir -p "$outside_home/.claude" "$outside_plugin"
 cp "$REPO_DIR/tmux-assistant-resurrect.tmux" "$outside_plugin/"
 cp -R "$REPO_DIR/hooks" "$outside_plugin/hooks"
+# The entry point sources scripts/lib-fs.sh; without it the install
+# aborts before writing any hook and this fixture tests nothing.
+cp -R "$REPO_DIR/scripts" "$outside_plugin/scripts"
 echo '{}' >"$outside_home/.claude/settings.json"
 
 # Guard the fixture itself: if TMPDIR ever lands under the test HOME this test

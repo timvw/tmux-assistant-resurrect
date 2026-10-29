@@ -14,6 +14,18 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# shellcheck source=scripts/lib-fs.sh
+# Fail rather than degrade: without these helpers every config writer below
+# reports "cannot read mode" and installs nothing, which reads like a
+# successful run. TPM discards this script's output and ignores its status, so
+# the message itself lands only on a manual run or `just install-claude-hook`;
+# exiting also stops the tmux set-option block below, whose hook paths would
+# point into the same missing scripts/ anyway.
+source "$CURRENT_DIR/scripts/lib-fs.sh" || {
+    echo "tmux-assistant-resurrect: missing $CURRENT_DIR/scripts/lib-fs.sh; not installing" >&2
+    exit 1
+}
+
 # Quote one shell word without allowing the path to expand when the hook runs.
 # shellcheck disable=SC1003
 shell_quote() {
@@ -72,7 +84,7 @@ fi
 # symlinks, target modes, and unrelated settings/hooks; publish beside the
 # resolved target atomically, just like Cursor's install/update path below.
 remove_assistant_json_hooks() {
-    local tool="$1" settings="$2" target="$2" link depth=0 target_mode tmp count track cleanup
+    local tool="$1" settings="$2" target target_mode tmp count track cleanup resolve_rc
     [ -f "$settings" ] || return 0
     command -v jq >/dev/null 2>&1 || return 0
     track=$(hook_command "${CURRENT_DIR}/hooks/${tool}-session-track.sh")
@@ -89,42 +101,25 @@ remove_assistant_json_hooks() {
         return
     }
     [ "$count" != 0 ] || return 0
-    while [ -L "$target" ] && [ "$depth" -lt 16 ]; do
-        link=$(readlink "$target") || return
-        case "$link" in
-            /*) target="$link" ;;
-            *) target="$(dirname "$target")/$link" ;;
-        esac
-        depth=$((depth + 1))
-    done
-    if [ -L "$target" ]; then
-        echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
-        return
-    fi
-    target_mode=$(stat -f 'mode:%p' "$target" 2>/dev/null || true)
-    case "$target_mode" in
-        mode:*) target_mode=${target_mode#mode:} ;;
-        *) target_mode='' ;;
-    esac
-    case "$target_mode" in
-        '' | *[!0-7]*) target_mode='' ;;
-        *)
-            if [ "${#target_mode}" -ge 4 ]; then
-                target_mode=${target_mode#"${target_mode%????}"}
+    resolve_rc=0
+    target=$(resolve_symlink_target "$settings") || resolve_rc=$?
+    case "$resolve_rc" in
+        1 | 2)
+            if [ "$resolve_rc" = 1 ]; then
+                echo "tmux-assistant-resurrect: cannot read symlink chain at $settings; left unchanged" >&2
             else
-                target_mode=''
+                echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
             fi
+            # Keep the resolver's status rather than the echo's: the inline
+            # copy this replaced propagated readlink's failure here, and a
+            # bare `return` after the message would silently make it 0.
+            return "$resolve_rc"
             ;;
     esac
-    case "$target_mode" in
-        '') target_mode=$(stat -c '%a' "$target" 2>/dev/null || true) ;;
-    esac
-    case "$target_mode" in
-        '' | *[!0-7]*)
-            echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
-            return
-            ;;
-    esac
+    target_mode=$(file_mode_of "$target") || {
+        echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
+        return
+    }
     tmp=$(mktemp "${target}.tmp.XXXXXX") || return
     if jq --arg tool "$tool" --arg track "$track" --arg cleanup "$cleanup" '
         def owned: (.command // "") | (. == $track or . == $cleanup or (if type == "string" then
@@ -192,53 +187,23 @@ install_claude_hooks() {
     # replace the link with a regular file, detaching it from the repo tracking
     # it. Resolve first and publish beside the resolved target, keeping this
     # sequence aligned with remove_assistant_json_hooks and the Cursor installer.
-    local target="$settings" link target_mode="" link_depth=0
-    while [ -L "$target" ] && [ "$link_depth" -lt 16 ]; do
-        # Known limitation: a target name ending in a newline reads back
-        # identically to one without it -- BSD readlink and stat -f '%Y' emit
-        # the same bytes for either -- so such a link resolves to the shorter
-        # name. Shared with the other two resolution sites in this file.
-        link=$(readlink "$target") || {
-            echo "tmux-assistant-resurrect: cannot read symlink $target; left unchanged" >&2
+    local target="" target_mode="" resolve_rc
+    resolve_rc=0
+    target=$(resolve_symlink_target "$settings") || resolve_rc=$?
+    case "$resolve_rc" in
+        1)
+            echo "tmux-assistant-resurrect: cannot read symlink chain at $settings; left unchanged" >&2
             return
-        }
-        case "$link" in
-            /*) target="$link" ;;
-            *) target="$(dirname "$target")/$link" ;;
-        esac
-        link_depth=$((link_depth + 1))
-    done
-    if [ -L "$target" ]; then
-        echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
+            ;;
+        2)
+            echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
+            return
+            ;;
+    esac
+    target_mode=$(file_mode_of "$target") || {
+        echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
         return
-    fi
-    # BSD stat's %p includes the file type plus all permission bits; keep its
-    # final four octal digits. The literal prefix makes GNU stat -f output
-    # fail the octal guard before -c retries. GNU's own -c '%a' may return three.
-    target_mode=$(stat -f 'mode:%p' "$target" 2>/dev/null || true)
-    case "$target_mode" in
-        mode:*) target_mode=${target_mode#mode:} ;;
-        *) target_mode="" ;;
-    esac
-    case "$target_mode" in
-        '' | *[!0-7]*) target_mode="" ;;
-        *)
-            if [ "${#target_mode}" -ge 4 ]; then
-                target_mode=${target_mode#"${target_mode%????}"}
-            else
-                target_mode=""
-            fi
-            ;;
-    esac
-    case "$target_mode" in
-        '' | *[!0-7]*) target_mode=$(stat -c '%a' "$target" 2>/dev/null || true) ;;
-    esac
-    case "$target_mode" in
-        '' | *[!0-7]*)
-            echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
-            return
-            ;;
-    esac
+    }
 
     # Install SessionStart hook, refreshing stale paths if any exist.
     # Skip only when the current command is present AND no stale copies remain.
@@ -345,49 +310,23 @@ install_cursor_hooks() {
        [ "$has_current_cleanup" = "0" ] || [ "$has_stale_cleanup" != "0" ]; then
         # Keep this resolution/update sequence aligned with uninstall-cursor-hook
         # in justfile; both operations must preserve the same user-owned file.
-        local target="$settings" link target_mode="" tmp link_depth=0
-        while [ -L "$target" ] && [ "$link_depth" -lt 16 ]; do
-            link=$(readlink "$target") || {
-                echo "tmux-assistant-resurrect: cannot read symlink $target; left unchanged" >&2
+        local target="" target_mode="" tmp resolve_rc
+        resolve_rc=0
+        target=$(resolve_symlink_target "$settings") || resolve_rc=$?
+        case "$resolve_rc" in
+            1)
+                echo "tmux-assistant-resurrect: cannot read symlink chain at $settings; left unchanged" >&2
                 return
-            }
-            case "$link" in
-                /*) target="$link" ;;
-                *) target="$(dirname "$target")/$link" ;;
-            esac
-            link_depth=$((link_depth + 1))
-        done
-        if [ -L "$target" ]; then
-            echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
+                ;;
+            2)
+                echo "tmux-assistant-resurrect: refusing deep or cyclic symlink chain at $settings" >&2
+                return
+                ;;
+        esac
+        target_mode=$(file_mode_of "$target") || {
+            echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
             return
-        fi
-        # BSD stat's %p includes the file type plus all permission bits; keep its
-        # final four octal digits. The literal prefix makes GNU stat -f output
-        # fail the octal guard before -c retries.
-        target_mode=$(stat -f 'mode:%p' "$target" 2>/dev/null || true)
-        case "$target_mode" in
-            mode:*) target_mode=${target_mode#mode:} ;;
-            *) target_mode="" ;;
-        esac
-        case "$target_mode" in
-            '' | *[!0-7]*) target_mode="" ;;
-            *)
-                if [ "${#target_mode}" -ge 4 ]; then
-                    target_mode=${target_mode#"${target_mode%????}"}
-                else
-                    target_mode=""
-                fi
-                ;;
-        esac
-        case "$target_mode" in
-            '' | *[!0-7]*) target_mode=$(stat -c '%a' "$target" 2>/dev/null || true) ;;
-        esac
-        case "$target_mode" in
-            '' | *[!0-7]*)
-                echo "tmux-assistant-resurrect: cannot read mode for $settings; left unchanged" >&2
-                return
-                ;;
-        esac
+        }
         tmp=$(mktemp "${target}.tmp.XXXXXX") || {
             echo "tmux-assistant-resurrect: cannot prepare update for $settings; left unchanged" >&2
             return
