@@ -720,6 +720,64 @@ assert_eq "short opt: a whitespace-only flag returns the args untouched" " " \
 assert_eq "bool opt: a whitespace-only flag returns the args untouched" " " \
 	"$(strip_bounded _strip_bool_opt ' ' ' ')"
 
+# --- bench-save-hook.sh must stay isolated from the developer's own server ----
+# Static guards, like the -F record guards in target-resolution-unit-tests.sh:
+# the script cannot be executed here to prove this, so pin the two properties
+# that make it safe to run outside Docker. tmux ignores TMUX_TMPDIR both when
+# the directory does not exist yet and whenever $TMUX is set, so the ordering
+# and the unset are each load-bearing, and -S is the backstop for both.
+BENCH_SH="$REPO_DIR/test/bench-save-hook.sh"
+# Executable lines only. Every guard below reads this, not the file: a guard
+# that a commented-out command satisfies is a guard that cannot fail, and the
+# isolation it claims to pin would be gone with all of them still green.
+bench_code() { grep -vE '^[[:space:]]*#' "$BENCH_SH"; }
+bench_line() { bench_code | grep -n "$1" | head -1 | cut -d: -f1; }
+
+assert_eq "bench: TMUX is unset before anything runs" "yes" \
+	"$(bench_code | grep -x 'unset TMUX' >/dev/null && echo yes || echo no)"
+
+bench_mkdir=$(bench_line '^mkdir -p "\$HOME')
+bench_trap=$(bench_line '^trap cleanup EXIT$')
+bench_unset=$(bench_line '^unset TMUX$')
+assert_eq "bench: the isolation dir exists before the EXIT trap is armed" "yes" \
+	"$([ -n "$bench_mkdir" ] && [ -n "$bench_trap" ] && [ "$bench_mkdir" -lt "$bench_trap" ] && echo yes || echo no)"
+assert_eq "bench: TMUX is unset before the EXIT trap is armed" "yes" \
+	"$([ -n "$bench_unset" ] && [ -n "$bench_trap" ] && [ "$bench_unset" -lt "$bench_trap" ] && echo yes || echo no)"
+
+# Every tmux invocation must carry an explicit -S. Nothing else is filtered
+# out: an earlier TMUX_TMPDIR/TMUX_ASSISTANT exemption here matched no line on
+# this file and would have waved through exactly the shape it was meant to
+# catch -- `TMUX_TMPDIR="$x" tmux kill-server`.
+bench_bare=$(bench_code | grep -n 'tmux ' | grep -v 'tmux -S ' || true)
+assert_eq "bench: no tmux call without an explicit -S" "" "$bench_bare"
+
+# A private socket is not a private server: tmux still reads the system file
+# and $XDG_CONFIG_HOME/tmux/tmux.conf, neither of which the sandboxed $HOME
+# covers. Pinning every call rather than the one that currently starts the
+# server is the only form of this that a call added above the loop -- a bare
+# `tmux -S "$BENCH_SOCKET" start-server`, say -- cannot walk past.
+bench_unpinned=$(bench_code | grep -n 'tmux -S ' | grep -v -- '-f /dev/null' || true)
+assert_eq "bench: every tmux call pins -f /dev/null" "" "$bench_unpinned"
+
+# The explicit -S skips make_label(), so nothing else creates the socket's
+# parent. Without this the first new-session fails with ENOENT and the whole
+# benchmark aborts under set -e -- which the guards above cannot see.
+assert_eq "bench: the socket's parent directory is created, at 0700" "yes" \
+	"$(bench_code | grep 'mkdir -m 700 "\$TMUX_TMPDIR/tmux-\$(id -u)"' >/dev/null && echo yes || echo no)"
+bench_sockdir=$(bench_line 'mkdir -m 700 "\$TMUX_TMPDIR')
+assert_eq "bench: that directory exists before the EXIT trap is armed" "yes" \
+	"$([ -n "$bench_sockdir" ] && [ -n "$bench_trap" ] && [ "$bench_sockdir" -lt "$bench_trap" ] && echo yes || echo no)"
+
+assert_eq "bench: the cleanup kill is socket-scoped" "yes" \
+	"$(bench_code | grep 'tmux -S "\$BENCH_SOCKET" .*kill-server' >/dev/null && echo yes || echo no)"
+# Every 2>, &> and >& on the kill, not just the >/dev/null 2>&1 that was there:
+# hiding the kill's diagnostics is what made a misroute invisible in the first
+# place, and bash's combined forms hide it just as well. A redirection moved
+# onto a continuation line would slip past, which is why the kill is kept on
+# one line.
+assert_eq "bench: the cleanup kill keeps its stderr" "" \
+	"$(bench_code | grep 'kill-server' | grep -E '2>|&>|>&' || true)"
+
 echo
 echo "save hardening unit tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

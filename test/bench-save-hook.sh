@@ -26,6 +26,30 @@ if [ "$ASSISTANTS" -gt "$PANES" ]; then
 fi
 
 BENCH_ROOT=$(mktemp -d)
+
+# Isolation has to be in force before the EXIT trap below can fire, and before
+# any tmux call. Two separate things defeat TMUX_TMPDIR, both silently and both
+# exit 0:
+#   - a directory that does not exist yet -- on every released tmux through
+#     3.8 the unresolvable entry is dropped from the socket search list and
+#     /tmp/tmux-$(id -u)/default is used instead, so a cleanup firing between
+#     the trap and the mkdir killed the real server (master now errors here);
+#   - an inherited $TMUX -- it is consulted before the search list, so running
+#     this from inside tmux addresses the live server whatever TMUX_TMPDIR says.
+# Every tmux call below also carries an explicit -S, so isolation never rests on
+# environment reasoning alone.
+unset TMUX
+export HOME="$BENCH_ROOT/home"
+export TMUX_TMPDIR="$BENCH_ROOT/tmux"
+export TMUX_ASSISTANT_RESURRECT_DIR="$BENCH_ROOT/state"
+mkdir -p "$HOME/.tmux/resurrect" "$TMUX_TMPDIR" "$TMUX_ASSISTANT_RESURRECT_DIR" "$BENCH_ROOT/bin"
+# An explicit -S skips make_label(), which is what would normally create this
+# directory, so create it here -- and at 0700, because make_label rejects a
+# socket directory with looser permissions. The save hook under test uses bare
+# tmux calls, which resolve to this same path through TMUX_TMPDIR.
+mkdir -m 700 "$TMUX_TMPDIR/tmux-$(id -u)"
+BENCH_SOCKET="$TMUX_TMPDIR/tmux-$(id -u)/default"
+
 cleanup() {
 	# `tmux kill-server` only signals the server: it and all $PANES pane shells are
 	# still alive when the command returns, and each interactive shell flushes
@@ -42,7 +66,11 @@ cleanup() {
 	# once the last shell is reaped nothing recreates anything, so retry rather than
 	# guess at how long teardown takes. Rare on a fast machine, routine on a 2-vCPU
 	# CI runner with 116 shells exiting at once.
-	tmux kill-server >/dev/null 2>&1 || true
+	# Explicit -S: a bare kill-server here is what makes this script unsafe
+	# outside Docker. stderr is kept so a misroute is visible, not silent.
+	if [ -S "$BENCH_SOCKET" ]; then
+		tmux -S "$BENCH_SOCKET" -f /dev/null kill-server || true
+	fi
 	local i
 	for i in $(seq 1 50); do
 		rm -rf "$BENCH_ROOT" 2>/dev/null && return 0
@@ -54,11 +82,6 @@ cleanup() {
 	rm -rf "$BENCH_ROOT" 2>/dev/null || true
 }
 trap cleanup EXIT
-
-export HOME="$BENCH_ROOT/home"
-export TMUX_TMPDIR="$BENCH_ROOT/tmux"
-export TMUX_ASSISTANT_RESURRECT_DIR="$BENCH_ROOT/state"
-mkdir -p "$HOME/.tmux/resurrect" "$TMUX_TMPDIR" "$TMUX_ASSISTANT_RESURRECT_DIR" "$BENCH_ROOT/bin"
 
 # Mock claude binary so we can create many assistant processes without network/API keys.
 # Must answer `--help` immediately: the save hook probes `claude --help` to
@@ -80,11 +103,18 @@ chmod +x "$BENCH_ROOT/bin/claude"
 export PATH="$BENCH_ROOT/bin:$PATH"
 
 # Build pane/process load.
+# -f /dev/null on every call, not just the one that happens to start the
+# server: a private socket does not make the server private. tmux still loads
+# the system file and, because $XDG_CONFIG_HOME is inherited rather than
+# sandboxed along with $HOME, $XDG_CONFIG_HOME/tmux/tmux.conf -- whose
+# run-shell and plugin lines would then execute inside the benchmark. Whichever
+# call finds no server starts one, so pinning all of them is the only form of
+# the rule that cannot be defeated by adding a call above this loop.
 for i in $(seq 1 "$PANES"); do
-	tmux new-session -d -s "bench$i" -c /tmp
+	tmux -S "$BENCH_SOCKET" -f /dev/null new-session -d -s "bench$i" -c /tmp
 done
 for i in $(seq 1 "$ASSISTANTS"); do
-	tmux send-keys -t "bench$i:0.0" "claude --resume ses_$i" Enter
+	tmux -S "$BENCH_SOCKET" -f /dev/null send-keys -t "bench$i:0.0" "claude --resume ses_$i" Enter
 done
 sleep 1
 
