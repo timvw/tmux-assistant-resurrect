@@ -6,7 +6,7 @@
 # tests and callers may deliberately change DROP_FLAGS/DROP_ENV between calls.
 replay_load_tool_policy() {
 	local tool="$1" loaded="_REPLAY_POLICY_LOADED_$1" flags env_names
-	case "$tool" in claude | cursor | copilot | opencode | codex | pi | omp | grok | agy) ;; *) return 0 ;; esac
+	case "$tool" in claude | cursor | copilot | opencode | codex | pi | omp | grok | agy | kiro) ;; *) return 0 ;; esac
 	[ -z "${!loaded:-}" ] || return 0
 	flags=$(tmux show-option -gqv "@assistant-resurrect-${tool}-drop-flags" 2>/dev/null || true)
 	env_names=$(tmux show-option -gqv "@assistant-resurrect-${tool}-drop-env" 2>/dev/null || true)
@@ -318,6 +318,9 @@ _tool_help() {
 			help_binary=""
 		fi
 	fi
+	# There is no `kiro` CLI binary (a `kiro` on PATH is usually the Kiro IDE
+	# launcher), and Kiro restores ignore saved flags, so never probe it.
+	[ "$tool" = "kiro" ] && help_binary=""
 	if [ -n "$probe_env" ]; then
 		# shellcheck disable=SC2086  # deliberate split into env KEY=VAL args
 		[ -z "$help_binary" ] || out=$(env $probe_env "$help_binary" --help 2>/dev/null) || out=""

@@ -20,6 +20,11 @@
 # Cursor's current executable is named `agent`; the legacy `cursor-agent`
 # symlink remains part of Cursor's installer. Both map to the canonical tool
 # name `cursor` in the sidecar.
+# Kiro CLI's launcher is `kiro-cli`; it maps to the canonical tool name `kiro`
+# (a dash is not valid in the per-tool shell variable names). Only the chat
+# entry points count: bare `kiro-cli`, `kiro-cli chat ...`, or `kiro-cli -<flag>`.
+# Other subcommands (login, settings, mcp, ...) and the internal
+# `kiro-cli-chat` children are not interactive sessions.
 # Excludes: opencode run ... (LSP subprocesses), omp __omp_worker_* subprocesses
 detect_tool() {
 	local args="$1"
@@ -54,6 +59,14 @@ detect_tool() {
 		;;
 	cursor-agent)
 		tool="cursor"
+		shift
+		;;
+	kiro-cli)
+		case "${2:-}" in
+		'' | chat | -*) ;;
+		*) return 0 ;;
+		esac
+		tool="kiro"
 		shift
 		;;
 	agent)

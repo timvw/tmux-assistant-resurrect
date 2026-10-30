@@ -132,6 +132,7 @@ jobs:
           bash test/copilot-unit-tests.sh
           bash test/cursor-unit-tests.sh
           bash test/grok-unit-tests.sh
+          bash test/kiro-unit-tests.sh
           bash test/relaunch-unit-tests.sh
           bash test/target-resolution-unit-tests.sh
           bash test/state-dir-unit-tests.sh
@@ -198,6 +199,7 @@ jobs:
           bash test/copilot-unit-tests.sh
           bash test/cursor-unit-tests.sh
           bash test/grok-unit-tests.sh
+          bash test/kiro-unit-tests.sh
           bash test/relaunch-unit-tests.sh
           bash test/target-resolution-unit-tests.sh
           bash test/state-dir-unit-tests.sh

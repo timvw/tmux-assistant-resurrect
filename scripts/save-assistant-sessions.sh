@@ -1213,6 +1213,111 @@ get_grok_session() {
 	fi
 }
 
+# --- Kiro CLI ---
+#
+# `kiro-cli` is a launcher; the process that owns the session is a descendant:
+#   kiro-cli -> kiro-cli-chat chat -> bun tui.js chat -> kiro-cli-chat acp
+# The `acp` process holds a lock next to the session files:
+#   $KIRO_HOME/sessions/cli/<uuid>.lock   {"pid":<acp pid>,"started_at":"..."}
+#   $KIRO_HOME/sessions/cli/<uuid>.json   session metadata (written at startup)
+# `kiro-cli chat --resume-id <uuid>` reuses the same lock file with the new acp
+# PID. KIRO_HOME replaces the whole ~/.kiro path; the candidate process's own
+# value wins where /proc exposes it, then the hook's environment, then the
+# default (same order as GROK_HOME).
+kiro_sessions_dir() {
+	local pid="${1:-}" home=""
+	home=$(_process_env_var "$pid" KIRO_HOME)
+	[ -n "$home" ] || home="${KIRO_HOME:-$HOME/.kiro}"
+	printf '%s/sessions/cli\n' "$home"
+}
+
+# The candidate PID plus all of its descendants, space-delimited with a leading
+# and trailing space so callers can test membership with a glob. KIRO_PS_TABLE
+# (a `pid ppid` table) is a test seam; production reads one ps snapshot.
+_kiro_process_tree() {
+	local root="$1" table="${KIRO_PS_TABLE:-}"
+	[ -n "$table" ] || table=$(ps -eo pid= -o ppid= 2>/dev/null)
+	printf '%s\n' "$table" | awk -v root="$root" '
+		{ pid[NR] = $1; parent[$1] = $2 }
+		END {
+			seen[root] = 1
+			changed = 1
+			while (changed) {
+				changed = 0
+				for (i = 1; i <= NR; i++) {
+					p = pid[i]
+					if (!(p in seen) && (parent[p] in seen)) { seen[p] = 1; changed = 1 }
+				}
+			}
+			out = " "
+			for (p in seen) out = out p " "
+			print out
+		}'
+}
+
+get_kiro_session_from_lock() {
+	local child_pid="$1" sessions_dir="${2:-}"
+	[ -n "$sessions_dir" ] || sessions_dir=$(kiro_sessions_dir "$child_pid")
+	[ -d "$sessions_dir" ] || return 0
+
+	local tree lock content sid lock_pid started
+	local best_sid="" best_started=""
+	local pid_re='"pid"[[:space:]]*:[[:space:]]*([0-9]+)'
+	local started_re='"started_at"[[:space:]]*:[[:space:]]*"([^"]*)"'
+	tree=$(_kiro_process_tree "$child_pid")
+	for lock in "$sessions_dir"/*.lock; do
+		[ -f "$lock" ] || continue
+		sid="${lock##*/}"
+		sid="${sid%.lock}"
+		_copilot_is_uuid "$sid" || continue
+		content=""
+		IFS= read -r content <"$lock" 2>/dev/null || [ -n "$content" ] || continue
+		[[ "$content" =~ $pid_re ]] || continue
+		lock_pid="${BASH_REMATCH[1]}"
+		# Only locks owned by this pane's process tree. Kiro leaves locks of
+		# killed sessions behind, so ownership by a live descendant is the gate.
+		case "$tree" in *" $lock_pid "*) ;; *) continue ;; esac
+		# Resumability gate: restore needs the session metadata file.
+		[ -f "$sessions_dir/$sid.json" ] || continue
+		# A recycled PID would otherwise adopt a dead session's stale lock.
+		_file_predates_process "$lock" "$lock_pid" && continue
+		started=""
+		[[ "$content" =~ $started_re ]] && started="${BASH_REMATCH[1]}"
+		# Several owned locks (an in-TUI session switch) -> newest start wins.
+		# started_at is RFC 3339 UTC, so string order is time order.
+		if [ -z "$best_sid" ] || [[ "$started" > "$best_started" ]]; then
+			best_sid="$sid"
+			best_started="$started"
+		fi
+	done
+	[ -n "$best_sid" ] && echo "$best_sid"
+	return 0
+}
+
+get_kiro_session() {
+	local child_pid="$1"
+	local args="$2"
+	local sessions_dir sid=""
+	sessions_dir=$(kiro_sessions_dir "$child_pid")
+
+	# Primary: lock owned by the pane's acp process. Keyed by PID, so two
+	# sessions in one cwd never collide and a bare `kiro-cli` is covered.
+	sid=$(get_kiro_session_from_lock "$child_pid" "$sessions_dir")
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return 0
+	fi
+
+	# Fallback: --resume-id <uuid> in argv, for the window right after a
+	# restore before the acp child has taken its lock.
+	local uuid='\([0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}\)'
+	sid=$(echo "$args" | sed -n "s/.*--resume-id[= ] *$uuid.*/\\1/p")
+	if [ -n "$sid" ] && [ -f "$sessions_dir/$sid.json" ]; then
+		echo "$sid"
+	fi
+	return 0
+}
+
 # agy keeps the selected conversation in its own process log, including
 # in-TUI switches. Never select the newest conversation by working directory.
 get_agy_session() {
@@ -2289,6 +2394,12 @@ extract_cli_args() {
 	local tool="$1" raw_args="$2" pid="${3:-}"
 	local _COPILOT_DROPPED_PERMISSION=0
 	replay_load_tool_policy "$tool"
+	# Kiro restores ignore saved flags (see restore-assistant-sessions.sh), so
+	# there is nothing to extract -- and no `kiro --help` to discover them from.
+	if [ "$tool" = "kiro" ]; then
+		echo ""
+		return
+	fi
 
 	# Strip binary name/path: remove first token (which is the binary or /path/to/binary).
 	local args="${raw_args#* }"
@@ -2542,6 +2653,7 @@ resolve_pane_candidates() {
 			omp) session_id=$(get_omp_session "$cand_pid" "$cand_args" "$pane_cwd" "$pane_tty" || true) ;;
 			agy) session_id=$(get_agy_session "$cand_pid" "$cand_args" "$pane_cwd" || true) ;;
 			grok) session_id=$(get_grok_session "$cand_pid" "$cand_args" || true) ;;
+			kiro) session_id=$(get_kiro_session "$cand_pid" "$cand_args" || true) ;;
 			esac
 
 			if [ -n "$session_id" ]; then
@@ -3086,6 +3198,7 @@ emit_session() {
 	omp) session_id=$(get_omp_session "$cpid" "$cargs" "$cwd" "" || true) ;;
 	agy) session_id=$(get_agy_session "$cpid" "$cargs" "$cwd" || true) ;;
 	grok) session_id=$(get_grok_session "$cpid" "$cargs" || true) ;;
+	kiro) session_id=$(get_kiro_session "$cpid" "$cargs" || true) ;;
 	esac
 
 	if [ -n "$session_id" ]; then

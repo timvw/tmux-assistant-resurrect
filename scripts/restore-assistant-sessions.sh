@@ -166,7 +166,7 @@ while read -r entry; do
 	pane=$(printf '%s\n' "$entry" | jq -r '.pane')
 	tool=$(printf '%s\n' "$entry" | jq -r '.tool')
 	case "$tool" in
-	claude | cursor | copilot | opencode | codex | pi | omp | grok | agy) ;;
+	claude | cursor | copilot | opencode | codex | pi | omp | grok | agy | kiro) ;;
 	*) log "unknown tool $tool in $pane, skipping"; continue ;;
 	esac
 	replay_load_tool_policy "$tool"
@@ -445,6 +445,13 @@ while read -r entry; do
 		# is the correct restore. The generic cwd `cd` below still runs first,
 		# which also lets grok locate the (cwd-scoped) session directory.
 		resume_cmd="command grok --resume ${safe_sid}"
+		;;
+	kiro)
+		# Like grok, ignore cli_args: the session file carries its own agent
+		# and model, and `kiro-cli chat` takes the prompt as a positional, so
+		# replaying captured argv risks re-submitting a stale prompt. The
+		# generic cwd `cd` below still runs first.
+		resume_cmd="command kiro-cli chat --resume-id ${safe_sid}"
 		;;
 	*)
 		log "unknown tool '$tool' for pane $pane, skipping"

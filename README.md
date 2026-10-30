@@ -4,7 +4,7 @@
 > through conversation with AI coding assistants). It has been end-to-end tested
 > in Docker with real CLI binaries (Claude/Copilot/OpenCode/Codex/Pi/Oh My Pi)
 > (400+ automated tests + full save/kill/restore lifecycle smoke test).
-> Cursor and Grok are supported with hermetic unit tests but have no
+> Cursor, Grok and Kiro CLI are supported with hermetic unit tests but have no
 > authenticated Docker integration test.
 > **Limited real-world usage** so far — expect
 > rough edges. Contributions and bug reports welcome.
@@ -22,7 +22,7 @@ When your computer shuts down, tmux sessions are lost -- including any running
 [Pi](https://github.com/mariozechner/pi),
 [Oh My Pi](https://github.com/can1357/oh-my-pi), Antigravity CLI (`agy`), or
 [Grok Build](https://x.ai/cli) (xAI's `grok` CLI / TUI, not the community
-`grok-cli`) instances. This project hooks into
+`grok-cli`), or [Kiro CLI](https://kiro.dev/cli/) (`kiro-cli`) instances. This project hooks into
 [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) to
 automatically save assistant session IDs, CLI flags, and environment variables,
 then re-launch them with the exact same configuration after a restore.
@@ -33,7 +33,7 @@ then re-launch them with the exact same configuration after a restore.
 SAVE (every 5 min + manual prefix+Ctrl-s)
   tmux-resurrect saves pane layouts
     -> post-save hook inspects child processes of each pane
-    -> detects assistants by binary name (claude, agent/cursor-agent, copilot, opencode, codex, pi, omp, grok, agy)
+    -> detects assistants by binary name (claude, agent/cursor-agent, copilot, opencode, codex, pi, omp, grok, agy, kiro-cli)
     -> extracts session IDs via native hooks/plugins/process args
     -> writes assistant-sessions.json in tmux-resurrect's save dir
 
@@ -50,6 +50,7 @@ RESTORE (on tmux start or manual prefix+Ctrl-r)
          pi --model sonnet --session <session-id>
          omp --profile work --resume <session-id>
          grok --resume <session-id>
+         kiro-cli chat --resume-id <session-id>
          agy --conversation <session-id>
 ```
 
@@ -58,7 +59,7 @@ RESTORE (on tmux start or manual prefix+Ctrl-r)
 Detection is done via direct process inspection: the save script takes a
 single `ps` snapshot of all processes, finds children of each tmux pane shell,
 and matches known assistant binary names (`claude`, `agent`/`cursor-agent`,
-`copilot`, `opencode`, `codex`, `pi`, `omp`, `grok`, `agy`).
+`copilot`, `opencode`, `codex`, `pi`, `omp`, `grok`, `agy`, `kiro-cli`).
 
 Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 
@@ -73,6 +74,7 @@ Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 | **Oh My Pi** | Terminal breadcrumb + session JSONL lookup (`$XDG_STATE_HOME/omp`, `$XDG_DATA_HOME/omp`) | `--resume` / `-r` in process args | `--session-dir` / `--profile` scoped lookup | Distinct `omp` tool; no hook/plugin required |
 | **Antigravity CLI (`agy`)** | PID-owned CLI log | `--conversation <UUID>` in process args | - | No cwd/newest-session guessing; log format is an observed contract |
 | **Grok** | PID lookup in `~/.grok/active_sessions.json` | `-r` / `--resume <uuid>` in process args | - | Registry records every live session (including a bare `grok` with no args) keyed by PID, so sessions sharing a cwd never collide; no hook/plugin required |
+| **Kiro CLI** | `$KIRO_HOME/sessions/cli/<uuid>.lock` (default `~/.kiro`) whose `pid` is a live descendant of the pane's `kiro-cli` | `--resume-id <uuid>` in process args | - | The lock is held by the `kiro-cli-chat acp` grandchild, not `kiro-cli` itself, so the match walks the process tree; stale locks from killed sessions are ignored. Restore runs `kiro-cli chat --resume-id <id>` without replaying flags |
 
 Each tool has a primary and fallback extraction method. Fallbacks address the
 chicken-and-egg problem: after a restore, session IDs are in process args even
@@ -122,7 +124,7 @@ Testing has three layers:
 - [TPM](https://github.com/tmux-plugins/tpm) (Tmux Plugin Manager)
 - [jq](https://jqlang.github.io/jq/) (used by save/restore scripts)
 - At least one of: Claude Code, Cursor Agent CLI, GitHub Copilot CLI, OpenCode,
-  Codex CLI, Pi, Oh My Pi, Grok
+  Codex CLI, Pi, Oh My Pi, Grok, Kiro CLI
 
 ## Installation
 
@@ -160,6 +162,7 @@ and automatically set up:
 - Pi support via session-file lookup in `~/.pi/agent/sessions` (no hook/plugin required)
 - Oh My Pi support via terminal/session-file lookup in `$XDG_STATE_HOME/omp`, `$XDG_DATA_HOME/omp`, or `~/.omp` (no hook/plugin required)
 - Grok support via the `~/.grok/active_sessions.json` registry (no hook/plugin required)
+- Kiro CLI support via its `~/.kiro/sessions/cli/<uuid>.lock` files (no hook/plugin required)
 
 Native hook/plugin installers are enabled by default. To disable an individual
 installer, put its option before TPM's `run` line in `~/.tmux.conf`:
@@ -483,7 +486,7 @@ cat "$RESURRECT_DIR/assistant-save.log"
 
 | Symptom | Check |
 |---------|-------|
-| Save finds 0 sessions | Run `ps -eo pid= -o ppid= -o args= \| grep -E 'claude\|copilot\|opencode\|codex\|pi\|omp\|grok'` to verify assistants are running |
+| Save finds 0 sessions | Run `ps -eo pid= -o ppid= -o args= \| grep -E 'claude\|copilot\|opencode\|codex\|pi\|omp\|grok\|kiro-cli'` to verify assistants are running |
 | Session ID missing for Claude | Verify the hook is installed: `jq '.hooks.SessionStart' ~/.claude/settings.json` |
 | Session ID missing, hook *is* installed | Check `assistant-save.log` — a `no session ID available` line names the state file it looked for. If that directory is empty but `ls ~/.local/state/tmux-assistant-resurrect` elsewhere is not, the two sides disagree on the path; see **State directory** below |
 | Session ID missing for Copilot | Check `ls ~/.copilot/session-state/*/inuse.*.lock` — the number in the filename must be the native Copilot PID from `ps`. If you set `COPILOT_HOME`, the save hook must see it too (tmux hooks do not inherit your shell profile; use `tmux set-environment -g COPILOT_HOME ...`) |
@@ -491,6 +494,7 @@ cat "$RESURRECT_DIR/assistant-save.log"
 | Session ID missing for Codex | Verify `session-tags.jsonl` under `CODEX_HOME` (default `~/.codex`) lists your Codex PID. If you set `CODEX_HOME`, the save hook reads it from the process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g CODEX_HOME ...`) |
 | Session ID missing for Pi | Verify session files exist under `~/.pi/agent/sessions/--<cwd>--/*.jsonl` and that pane cwd matches the Pi session cwd |
 | Session ID missing for Grok | Verify `~/.grok/active_sessions.json` exists and contains an entry with your Grok process's PID: `jq '.[] | select(.pid == <PID>)' ~/.grok/active_sessions.json`. If you set `GROK_HOME`, the save hook reads it from the Grok process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g GROK_HOME ...`) |
+| Session ID missing for Kiro CLI | Find the `kiro-cli-chat acp` PID under the pane (`ps -eo pid,ppid,args`) and check it appears in a lock: `grep -l '"pid":<PID>,' ~/.kiro/sessions/cli/*.lock`. The matching `<uuid>.json` must exist too. If you set `KIRO_HOME`, the save hook reads it from the process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g KIRO_HOME ...`) |
 | Session ID missing for Oh My Pi | The primary method is a terminal breadcrumb under `$XDG_STATE_HOME/omp` (or `~/.local/state/omp`); verify the pane tty matches the breadcrumb file. Fallback is `--resume` / `-r` in process args. `--session-dir` or `--profile` scoped JSONL lookup is also used when those flags are present |
 | Codex/OpenCode/Pi session ID missing (python3 methods) | The save hook auto-detects `python3` in common locations. If your setup uses a non-standard path, set it in tmux: `set-environment -g PATH "/your/python3/dir:$PATH"` |
 | Restore launches but assistant says "session not found" | The session ID may have expired. This is normal — start a fresh session and the next save will pick up the new ID |
@@ -572,7 +576,7 @@ to `assistant-sessions.json`. On restore, variables listed in
 VIRTUAL_ENV='/home/user/.venv' claude --resume <session-id>
 ```
 
-**Tools without a session hook** (Copilot, Codex, Pi, Oh My Pi, Grok) have no state file
+**Tools without a session hook** (Copilot, Codex, Pi, Oh My Pi, Grok, Kiro CLI) have no state file
 to capture from at launch. On **Linux and WSL**, the save hook instead reads the
 configured variables straight from each detected assistant's environment via
 `/proc/<pid>/environ`, so values like `CODEX_HOME` survive a restart. Only the
@@ -652,7 +656,7 @@ set -g @assistant-resurrect-drop-env 'OLD_LAUNCH_SETTING'
 Global and assistant-specific lists are combined; duplicates are harmless.
 Assistant-specific lists add exclusions and cannot re-enable a global exclusion.
 Replace `claude` in the option name with `cursor`, `copilot`, `opencode`, `codex`,
-`pi`, `omp`, or `grok` to scope a rule to that assistant. All lists are
+`pi`, `omp`, `grok`, or `kiro` to scope a rule to that assistant. All lists are
 whitespace-separated and empty by default.
 
 **Flag exclusions** remove every occurrence, together with its values. They

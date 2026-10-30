@@ -408,6 +408,17 @@ assert_contains "cwd disappears: next pane still replays" "$(cat "$TMUX_LOG")" "
 assert_not_contains "cwd disappears: consumed wait is not retried for the next pane" "$(cat "$client_wait_log")" '%31'
 unset MOCK_REMOVE_CWD_ON_WAIT
 
+echo "== kiro resumes with kiro-cli chat --resume-id and ignores saved cli_args =="
+export MOCK_PANES='%30|0|0|budget-sess'
+jq -n '{sessions:[
+  {pane:"budget-sess:0.0",tool:"kiro",session_id:"2d295295-e869-4a96-a1a0-c67e0b3b4a07",cwd:"",cli_args:"--agent dev stale-prompt"}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_eq "kiro: restore succeeds" "0" "$RESTORE_STATUS"
+assert_contains "kiro: resume command reaches the pane" "$(cat "$TMUX_LOG")" \
+	"send-keys|%30|command kiro-cli chat --resume-id '2d295295-e869-4a96-a1a0-c67e0b3b4a07'"
+assert_not_contains "kiro: saved cli_args are not replayed" "$(cat "$TMUX_LOG")" 'stale-prompt'
+
 echo "== an unresolvable session id disables the cache instead of falling back to a name =="
 : >"$client_wait_log"
 export MOCK_NO_CLIENT=1
