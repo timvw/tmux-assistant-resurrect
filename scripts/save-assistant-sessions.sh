@@ -486,11 +486,15 @@ codex_home() {
 }
 
 # OpenCode's SQLite database lives under XDG_DATA_HOME; resolved the same way.
-opencode_db_file() {
+opencode_data_home() {
 	local pid="${1:-}" data_home=""
 	data_home=$(_process_env_var "$pid" XDG_DATA_HOME)
 	[ -n "$data_home" ] || data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-	printf '%s/opencode/opencode.db\n' "$data_home"
+	printf '%s\n' "$data_home"
+}
+
+opencode_db_file() {
+	printf '%s/opencode/opencode.db\n' "$(opencode_data_home "${1:-}")"
 }
 
 # 8-4-4-4-12 hex. Glob-only so it costs no fork: the character class rejects
@@ -1171,11 +1175,15 @@ get_omp_session() {
 # and updates it on session open/close. GROK_HOME replaces the whole ~/.grok
 # path; the candidate process's own value wins where /proc exposes it, then
 # the hook's environment, then the default (same order as CODEX_HOME).
-grok_active_sessions_file() {
+grok_home() {
 	local pid="${1:-}" home=""
 	home=$(_process_env_var "$pid" GROK_HOME)
 	[ -n "$home" ] || home="${GROK_HOME:-$HOME/.grok}"
-	printf '%s/active_sessions.json\n' "$home"
+	printf '%s\n' "$home"
+}
+
+grok_active_sessions_file() {
+	printf '%s/active_sessions.json\n' "$(grok_home "${1:-}")"
 }
 
 get_grok_session() {
@@ -2545,16 +2553,14 @@ resolve_pane_candidates() {
 			esac
 
 			if [ -n "$session_id" ]; then
-				local cli_args model="" env_json="null" state_file="" copilot_home="" cursor_binary=""
+				local cli_args model="" env_json="null" state_file="" state_root="" cursor_binary=""
 				cli_args=$(extract_cli_args "$cand_tool" "$cand_args" "$cand_pid")
 				if [ "$cand_tool" = "cursor" ]; then
 					cursor_binary=$(cursor_binary_from_args "$cand_args")
 				fi
 				model="$cached_model"
 				env_json="$cached_env"
-				if [ "$cand_tool" = "copilot" ]; then
-					copilot_home="${copilot_state_dir%/session-state}"
-				fi
+				state_root=$(pinned_state_root "$cand_tool" "$cand_pid" "$copilot_state_dir")
 
 				# If cache wasn't available, fall back to direct state-file enrichment.
 				case "$cand_tool" in
@@ -2579,7 +2585,7 @@ resolve_pane_candidates() {
 
 				# Write TSV for batch JSON conversion (replaces per-entry jq -n).
 				# New columns are appended so the existing indices stay put.
-				tsv_row "$pane_target" "$cand_tool" "$session_id" "$pane_cwd" "$cand_pid" "$model" "$cli_args" "$env_json" "$copilot_home" \
+				tsv_row "$pane_target" "$cand_tool" "$session_id" "$pane_cwd" "$cand_pid" "$model" "$cli_args" "$env_json" "$state_root" \
 					"$pane_session" "$pane_window" "$pane_pane_index" "$cursor_binary" >>"$parts_file"
 
 				case "$cand_tool" in
@@ -3036,6 +3042,26 @@ strip_assistant_pane_contents() {
 # can hold a tab or a newline, and env is JSON), so every column is escaped
 # reversibly with no forks: backslash, tab and newline become \\, \t and \n.
 # TSV_DECODE is the matching jq expression; readers apply it to every column.
+# The state root a session was resolved in, for the tools in state_root_var()
+# (lib-replay.sh), printed only when it differs from that tool's default so an
+# ordinary setup does not grow an env prefix on every restore. Uses the same
+# resolver the session lookup used: the candidate process's own value
+# (/proc, Linux/WSL), then the hook's environment, then the default. Copilot
+# passes the state dir it already resolved (it also honors --config-dir).
+pinned_state_root() {
+	local tool="$1" pid="$2" copilot_state_dir="${3:-}" root=""
+	case "$tool" in
+	copilot) root="${copilot_state_dir%/session-state}" ;;
+	codex) root=$(codex_home "$pid") ;;
+	opencode) root=$(opencode_data_home "$pid") ;;
+	grok) root=$(grok_home "$pid") ;;
+	*) return 0 ;;
+	esac
+	[ -n "$root" ] || return 0
+	[ "$root" = "$(state_root_default "$tool")" ] && return 0
+	printf '%s\n' "$root"
+}
+
 tsv_row() {
 	local tsv_line="" col sep=""
 	for col in "$@"; do
@@ -3058,7 +3084,7 @@ sessions_parts_to_json() {
 	jq -Rs '
 		split("\n") | map(select(length > 0) | split("\t") | '"$TSV_DECODE"' |
 		{pane:.[0], tool:.[1], session_id:.[2], cwd:.[3], pid:.[4], model:.[5], cli_args:.[6],
-		 env:(.[7] // "null" | try fromjson catch null), copilot_home:(.[8] // ""),
+		 env:(.[7] // "null" | try fromjson catch null), state_root:(.[8] // ""),
 		 session_name:(.[9] // ""), window_index:(.[10] // ""), pane_index:(.[11] // ""),
 		 cursor_binary:(.[12] // "")})
 	' "$1"
@@ -3090,14 +3116,12 @@ emit_session() {
 
 	if [ -n "$session_id" ]; then
 		# Extract CLI args (flags without binary name and session/resume args)
-		local cli_args copilot_home="" cursor_binary=""
+		local cli_args state_root="" cursor_binary=""
 		cli_args=$(extract_cli_args "$tool" "$cargs" "$cpid")
 		if [ "$tool" = "cursor" ]; then
 			cursor_binary=$(cursor_binary_from_args "$cargs")
 		fi
-		if [ "$tool" = "copilot" ]; then
-			copilot_home="${copilot_state_dir%/session-state}"
-		fi
+		state_root=$(pinned_state_root "$tool" "$cpid" "$copilot_state_dir")
 
 		# Read enriched fields from state file (if available)
 		local state_file="" model="" env_json="null"
@@ -3126,7 +3150,7 @@ emit_session() {
 		split_pane_target "$target" || true
 
 		# Same TSV row as the batched resolver; sessions_parts_to_json reads both.
-		tsv_row "$target" "$tool" "$session_id" "$cwd" "$cpid" "$model" "$cli_args" "${env_json:-null}" "$copilot_home" \
+		tsv_row "$target" "$tool" "$session_id" "$cwd" "$cpid" "$model" "$cli_args" "${env_json:-null}" "$state_root" \
 			"$PANE_TARGET_SESSION" "$PANE_TARGET_WINDOW" "$PANE_TARGET_INDEX" "$cursor_binary" >>"$PARTS_FILE"
 		case "$tool" in
 		claude) register_claude_session_id "$session_id" ;;

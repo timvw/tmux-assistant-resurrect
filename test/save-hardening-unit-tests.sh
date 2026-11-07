@@ -630,6 +630,39 @@ assert_eq "a hardcoded ~/.codex or opencode.db path no longer exists in the save
 		grep -vE '^[0-9]*:[[:space:]]*#|CODEX_HOME:-|XDG_DATA_HOME:-' || true)"
 
 echo
+echo "== pinned_state_root records a non-default root for every table tool =="
+# Same resolver order as the lookups above; the default root is not recorded so
+# an ordinary setup restores without an env prefix.
+printf 'GROK_HOME=/srv/grok\0' >>"$ROOT_PROC/5151/environ"
+assert_eq "codex root from the process is recorded" "/srv/codex home" \
+	"$(ASSISTANT_PROC_ROOT="$ROOT_PROC" CODEX_HOME='' pinned_state_root codex 5151)"
+assert_eq "opencode root from the process is recorded" "/srv/data" \
+	"$(ASSISTANT_PROC_ROOT="$ROOT_PROC" XDG_DATA_HOME='' pinned_state_root opencode 5151)"
+assert_eq "grok root from the process is recorded" "/srv/grok" \
+	"$(ASSISTANT_PROC_ROOT="$ROOT_PROC" GROK_HOME='' pinned_state_root grok 5151)"
+assert_eq "hook-side root is recorded when the process has none" "/hook/codex" \
+	"$(ASSISTANT_PROC_ROOT="$ROOT_PROC" CODEX_HOME=/hook/codex pinned_state_root codex 5252)"
+assert_eq "copilot records the state dir it already resolved" "/srv/copilot" \
+	"$(pinned_state_root copilot 5252 /srv/copilot/session-state)"
+for t in codex opencode grok; do
+	assert_eq "$t default root is not recorded" "" \
+		"$(ASSISTANT_PROC_ROOT="$ROOT_PROC" CODEX_HOME='' XDG_DATA_HOME='' GROK_HOME='' pinned_state_root "$t" 5252)"
+done
+assert_eq "copilot default root is not recorded" "" \
+	"$(pinned_state_root copilot 5252 "$HOME/.copilot/session-state")"
+# One table: every tool with a state-root variable has a default and a save-side
+# resolver, and no other tool records one. A new assistant whose store moves
+# with an env var must be added to all three or this fails.
+for t in claude cursor copilot opencode codex pi omp grok agy; do
+	has_var=no has_default=no records=no
+	[ -z "$(state_root_var "$t")" ] || has_var=yes
+	[ -z "$(state_root_default "$t")" ] || has_default=yes
+	[ -z "$(ASSISTANT_PROC_ROOT="$ROOT_PROC" CODEX_HOME=/x XDG_DATA_HOME=/x GROK_HOME=/x \
+		pinned_state_root "$t" 5252 /x/session-state)" ] || records=yes
+	assert_eq "$t state-root table is consistent" "$has_var $has_var" "$has_default $records"
+done
+
+echo
 echo "== parts rows survive tabs, newlines and pretty JSON =="
 # A cwd or prompt can carry a tab or a newline, and the state file's env is
 # read as JSON; none of them may split or shift a TSV row.

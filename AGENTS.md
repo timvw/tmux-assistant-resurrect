@@ -125,11 +125,18 @@ process args as a reliable fallback.
   instead.
 - State-root overrides (`COPILOT_HOME`, `CODEX_HOME`, `GROK_HOME`, OpenCode's
   `XDG_DATA_HOME`) are resolved through one helper each (`copilot_session_state_dir()`,
-  `codex_home()`, `opencode_db_file()`), never inlined. Each prefers the candidate
+  `codex_home()`, `opencode_data_home()`, `grok_home()`), never inlined. Each prefers the candidate
   process's own value read via `_process_env_var()` from `/proc/<pid>/environ`
   (Linux/WSL), then the hook's environment, then the documented default: a tmux
   hook does not inherit the shell profile, so the hook-side value alone is not
   enough. `ASSISTANT_PROC_ROOT` is the test seam for the `/proc` root.
+- Those roots are also **pinned on restore**, the same way for every tool.
+  `state_root_var()` / `state_root_default()` in `scripts/lib-replay.sh` are the
+  one table; `pinned_state_root()` records the resolved root as `state_root`
+  when it is not the default, and restore prepends `VAR=<root>` (unmasked: a
+  derived path, not a secret). A `drop-env` naming that variable skips the pane
+  (it would select a different conversation); `@assistant-resurrect[-<tool>]-pin-state-root off`
+  lets the pane's environment decide instead. Legacy `copilot_home` is still read.
 - Copilot exposes a PID-specific active-session signal: the live session writes
   `$COPILOT_HOME/session-state/<uuid>/inuse.<pid>.lock` (content = the same PID).
   Resolve it with a single glob — no `/proc`, no `lsof`, no platform branch, and
@@ -214,8 +221,8 @@ process args as a reliable fallback.
 - The deprecated `--config-dir <path>` relocates the whole state root per
   process (verified on 1.0.78: the lock lands there and nothing under
   `~/.copilot`), so `copilot_session_state_dir()` takes the candidate's argv and
-  prefers it over `COPILOT_HOME`. The resolved root is saved as `copilot_home`
-  and restored through `COPILOT_HOME`, including paths whose quoting `ps`
+  prefers it over `COPILOT_HOME`. The resolved root is saved as `state_root`
+  (when not the default) and restored through `COPILOT_HOME`, including paths whose quoting `ps`
   flattened and process-only values read from `/proc`.
 - Discovery caches live in shell variables and every caller runs inside a `$()`
   subshell, so a cache written there is discarded. `_warm_session_discovery()`
@@ -259,7 +266,8 @@ process args as a reliable fallback.
 - The sidecar JSON (`assistant-sessions.json`) entries include enriched fields:
   `model` (from state file or `--model` in args), `cli_args` (from `ps` args
   with binary name and session/resume args stripped), `env` (from state file),
-  `copilot_home` for Copilot's resolved state root, and `session_name` /
+  `state_root` for the tool's non-default state root (legacy sidecars carry
+  Copilot's as `copilot_home`, still read on restore), and `session_name` /
   `window_index` / `pane_index` (the pane's address as separate values). All are
   optional for backward compatibility.
 - Vouched session-less commands live in the sibling `.relaunch` array, never in
@@ -499,6 +507,10 @@ conversation establishes that.
 
 1. Add a `case` pattern in `detect_tool()` in `scripts/lib-detect.sh`
 2. Add a `get_<tool>_session()` function in `scripts/save-assistant-sessions.sh`
+   - If an env var relocates the tool's session store, add it to
+     `state_root_var()` / `state_root_default()` in `scripts/lib-replay.sh` and
+     its resolver to `pinned_state_root()`, so restore pins the same root
+     (`test/save-hardening-unit-tests.sh` fails if the three disagree)
 3. Add a restore command in `scripts/restore-assistant-sessions.sh`
 4. Optionally add a hook/plugin in `hooks/` if the tool doesn't expose session IDs externally
 5. Update install/uninstall recipes in `justfile` and `tmux-assistant-resurrect.tmux` if a new hook was added

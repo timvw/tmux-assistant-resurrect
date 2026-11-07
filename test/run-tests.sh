@@ -886,8 +886,10 @@ assert_eq "Copilot session ID extracted from the live inuse lock" "$copilot_sid"
 copilot_detected_args=$(jq -r '.sessions[] | select(.tool == "copilot") | .cli_args' "$SAVED")
 assert_eq "Copilot operational flags captured from native process" \
 	"--no-auto-update --allow-all --autopilot" "$copilot_detected_args"
-copilot_detected_home=$(jq -r '.sessions[] | select(.tool == "copilot") | .copilot_home // empty' "$SAVED")
-assert_eq "Copilot state root persisted for restore" "$HOME/.copilot" "$copilot_detected_home"
+# The default root is not recorded (restore needs no prefix for it); a
+# relocated root is, as state_root -- see pinned_state_root.
+copilot_detected_home=$(jq -r '.sessions[] | select(.tool == "copilot") | if has("state_root") then .state_root else "MISSING" end' "$SAVED")
+assert_eq "Copilot default state root is recorded as empty state_root" "" "$copilot_detected_home"
 
 # Verify OpenCode was detected with correct session ID (from plugin state file)
 opencode_sid=$(jq -r '[.sessions[] | select(.tool == "opencode" and .session_id != "")] | first | .session_id' "$SAVED")
