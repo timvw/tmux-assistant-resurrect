@@ -886,8 +886,10 @@ assert_eq "Copilot session ID extracted from the live inuse lock" "$copilot_sid"
 copilot_detected_args=$(jq -r '.sessions[] | select(.tool == "copilot") | .cli_args' "$SAVED")
 assert_eq "Copilot operational flags captured from native process" \
 	"--no-auto-update --allow-all --autopilot" "$copilot_detected_args"
-copilot_detected_home=$(jq -r '.sessions[] | select(.tool == "copilot") | .copilot_home // empty' "$SAVED")
-assert_eq "Copilot state root persisted for restore" "$HOME/.copilot" "$copilot_detected_home"
+# The default root is not recorded (restore needs no prefix for it); a
+# relocated root is, as state_root -- see pinned_state_root.
+copilot_detected_home=$(jq -r '.sessions[] | select(.tool == "copilot") | if has("state_root") then .state_root else "MISSING" end' "$SAVED")
+assert_eq "Copilot default state root is recorded as empty state_root" "" "$copilot_detected_home"
 
 # Verify OpenCode was detected with correct session ID (from plugin state file)
 opencode_sid=$(jq -r '[.sessions[] | select(.tool == "opencode" and .session_id != "")] | first | .session_id' "$SAVED")
@@ -1079,13 +1081,18 @@ assert_contains "Restore sent grok --resume with session ID" "$grok_restore_line
 
 # Verify restore uses 'command' prefix to bypass shell aliases
 assert_contains "Restore uses 'command claude' prefix" "$restore_log_content" "command claude"
-assert_contains "Restore uses env to bypass Copilot aliases" "$restore_log_content" \
-	"env COPILOT_HOME='$HOME/.copilot' copilot"
+# The default ~/.copilot root is not pinned (see pinned_state_root), so Copilot
+# restores through the plain alias-safe `command` form.
+assert_contains "Restore uses 'command copilot' prefix" "$restore_log_content" "command copilot"
+assert_not_contains "Restore does not pin the default Copilot root" "$restore_log_content" "COPILOT_HOME="
 assert_contains "Restore uses 'command opencode' prefix" "$restore_log_content" "command opencode"
 assert_contains "Restore uses 'command codex' prefix" "$restore_log_content" "command codex"
 assert_contains "Restore uses 'command pi' prefix" "$restore_log_content" "command pi"
 assert_contains "Restore uses 'command omp' prefix" "$omp_restore_line" "command omp"
-assert_contains "Restore uses 'command grok' prefix" "$grok_restore_line" "command grok"
+# GROK_HOME is relocated for this test, so the saved root is pinned through the
+# alias-safe `env` launcher instead of `command` (issue #126).
+assert_contains "Restore pins the relocated GROK_HOME" "$grok_restore_line" \
+	"env GROK_HOME='$GROK_HOME' grok --resume"
 
 # --- Test 3b: Restore skips panes with already-running assistants ---
 
