@@ -480,3 +480,43 @@ _drop_positional_args() {
 	[ "${#out[@]}" -gt 0 ] && echo "${out[*]}"
 	return 0
 }
+
+# --- State roots ---
+#
+# Each tool whose session store can be relocated by one environment variable
+# is listed here once; save, restore and the tests all read this table. A
+# session ID only means something inside the state root it was found in, so
+# save records the root it actually used (when it is not the tool's default)
+# and restore re-applies it through this variable. Adding an assistant whose
+# store moves with an env var means adding one line to each function below.
+state_root_var() {
+	case "$1" in
+	copilot) echo COPILOT_HOME ;;
+	codex) echo CODEX_HOME ;;
+	opencode) echo XDG_DATA_HOME ;;
+	grok) echo GROK_HOME ;;
+	esac
+}
+
+state_root_default() {
+	case "$1" in
+	copilot) printf '%s\n' "$HOME/.copilot" ;;
+	codex) printf '%s\n' "$HOME/.codex" ;;
+	opencode) printf '%s\n' "$HOME/.local/share" ;;
+	grok) printf '%s\n' "$HOME/.grok" ;;
+	esac
+}
+
+# Whether restore pins the saved state root (default on). Setting
+# @assistant-resurrect-pin-state-root (global) or
+# @assistant-resurrect-<tool>-pin-state-root (wins) to off lets the restored
+# pane's own environment decide instead.
+state_root_pinned() {
+	local tool="$1" value
+	value=$(tmux show-option -gqv "@assistant-resurrect-${tool}-pin-state-root" 2>/dev/null || true)
+	[ -n "$value" ] || value=$(tmux show-option -gqv @assistant-resurrect-pin-state-root 2>/dev/null || true)
+	case "${value:-on}" in
+	off | no | false | 0) return 1 ;;
+	esac
+	return 0
+}

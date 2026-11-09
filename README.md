@@ -590,6 +590,40 @@ live process, the live process wins.
 > fixed value on macOS, export it in your shell profile (the restored pane
 > inherits it) or set it globally with `tmux set-environment -g VAR value`.
 
+### State roots
+
+Some assistants keep their sessions in a directory that one environment
+variable relocates. A session ID only means something inside the directory it
+was found in, so the plugin pins that directory automatically, with no
+`@assistant-resurrect-capture-env` entry needed:
+
+| Assistant | Variable | Default |
+|---|---|---|
+| GitHub Copilot CLI | `COPILOT_HOME` (or `--config-dir`) | `~/.copilot` |
+| Codex CLI | `CODEX_HOME` | `~/.codex` |
+| OpenCode | `XDG_DATA_HOME` | `~/.local/share` |
+| Grok | `GROK_HOME` | `~/.grok` |
+
+On save, the directory is resolved the same way the session lookup resolves it:
+the assistant process's own value (Linux/WSL, via `/proc`), then the tmux
+server's environment, then the default. Only a non-default directory is
+recorded (`state_root` in the sidecar), and restore prepends it to the resume
+command, for example `CODEX_HOME='/work/codex' codex resume <id>`. It is a path,
+not a secret, so the restore log shows it unmasked. If you also capture the same
+variable, the pinned value wins and is applied once.
+
+To let the restored pane's own environment decide instead (for example when you
+moved the directory between save and restore), turn pinning off globally or per
+assistant; the assistant-specific option wins:
+
+```bash
+set -g @assistant-resurrect-pin-state-root off
+set -g @assistant-resurrect-codex-pin-state-root on
+```
+
+Saves written before `state_root` existed restore as before: Copilot's older
+`copilot_home` field is still honored, and other assistants get no prefix.
+
 Built-in variables (`TMUX_PANE`, `SHELL`) are **not** restored — `TMUX_PANE`
 would be stale after restore, and `SHELL` is already in the environment.
 State files are written atomically with mode 0600. The default state directory
@@ -671,9 +705,10 @@ are supported.
 values are omitted from the sidecar, are not restored from older sidecars, and
 are unset in the new process even if inherited from the pane shell. The parent
 shell and tmux server environment are unchanged. Only valid environment variable
-names are accepted. If an exclusion conflicts with a required saved Copilot
-state root (`COPILOT_HOME`), that pane is skipped with a diagnostic rather than
-opening a different conversation.
+names are accepted. If an exclusion names the variable that holds a pinned
+state root (see [State roots](#state-roots)), that pane is skipped with a
+diagnostic rather than opening a different conversation; turn pinning off for
+that assistant if you want the pane's own environment to decide instead.
 
 Both policies are checked at save and restore time, so new exclusions also
 apply to old saves. Removing an exclusion cannot recover a value already omitted
@@ -954,8 +989,10 @@ matching binary names. Then extracts session IDs using tool-specific methods
   session/resume args stripped (e.g., `--dangerously-skip-permissions --model opus`)
 - **Model** (`model`): from state file (preferred) or `--model` in args (fallback)
 - **Environment** (`env`): from state file (captured by hooks/plugins)
-- **Copilot state root** (`copilot_home`): the resolved `COPILOT_HOME` or
-  `--config-dir` root, replayed automatically so restore finds the same UUID
+- **State root** (`state_root`): the non-default `COPILOT_HOME`/`--config-dir`,
+  `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode) or `GROK_HOME` directory the session
+  was found in, replayed automatically so restore finds the same ID (see
+  [State roots](#state-roots)). Older saves may carry Copilot's as `copilot_home`
 
 Writes everything to `assistant-sessions.json` in tmux-resurrect's save
 directory (see **Save location** above). Vouched session-less modes are written

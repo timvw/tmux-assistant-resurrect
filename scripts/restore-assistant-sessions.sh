@@ -152,6 +152,7 @@ while read -r entry; do
 		and optional_string("cli_args")
 		and optional_string("model")
 		and optional_string("copilot_home")
+		and optional_string("state_root")
 		and optional_string("cursor_binary")
 		and optional_string("session_name")
 		and optional_string("window_index")
@@ -185,11 +186,28 @@ while read -r entry; do
 	env_json=$(printf '%s\n' "$entry" | jq -c '.env // {}')
 	env_json=$(replay_filter_env "$tool" "$env_json")
 	drop_env_names=$(replay_drop_names "$tool" env)
-	copilot_home=$(printf '%s\n' "$entry" | jq -r '.copilot_home // empty')
-	if [ "$tool" = copilot ] && [ -n "$copilot_home" ]; then
+	# The state root the session was found in (see state_root_var in
+	# lib-replay.sh). Sidecars written before `state_root` existed carry
+	# Copilot's as `copilot_home`; an explicit empty `state_root` means the
+	# default root and must not fall back to it.
+	state_root_name=$(state_root_var "$tool")
+	state_root=""
+	if [ -n "$state_root_name" ]; then
+		state_root=$(printf '%s\n' "$entry" | jq -r --arg tool "$tool" '
+			if has("state_root") then (.state_root // "")
+			elif $tool == "copilot" then (.copilot_home // "")
+			else "" end')
+	fi
+	if [ -n "$state_root" ] && ! state_root_pinned "$tool"; then
+		log "not pinning $state_root_name for $tool in $pane (pin-state-root off); the pane's environment decides"
+		state_root=""
+	fi
+	if [ -n "$state_root" ]; then
+		# Dropping the variable unsets it for the resumed command, which points
+		# the tool at its default root and so at a different (or no) session.
 		case " $drop_env_names " in
-		*' COPILOT_HOME '*)
-			log "cannot drop COPILOT_HOME required for the saved session in $pane, skipping"
+		*" $state_root_name "*)
+			log "cannot drop $state_root_name required for the saved session in $pane, skipping"
 			continue
 			;;
 		esac
@@ -284,7 +302,7 @@ while read -r entry; do
 	# one string: the log is read as a record of what was sent, so rendering a
 	# POSIX VAR=*** inside a Nushell `with-env { }` block would misreport it.
 	# Only user-captured values are masked. Plugin-derived values such as
-	# COPILOT_HOME are paths, not secrets, and stay readable — they are the whole
+	# the saved state root are paths, not secrets, and stay readable — they are the whole
 	# reason to consult this log when a restore lands on the wrong state root.
 	env_prefix=""
 	nu_env=""
@@ -301,9 +319,9 @@ while read -r entry; do
 				log "skipping invalid env var name: $var"
 				continue
 			fi
-			# A saved Copilot state root is authoritative and is appended below.
+			# A saved state root is authoritative and is appended below.
 			# Avoid duplicate Nushell record keys when users also capture it.
-			if [ "$tool" = "copilot" ] && [ "$var" = "COPILOT_HOME" ] && [ -n "$copilot_home" ]; then
+			if [ -n "$state_root" ] && [ "$var" = "$state_root_name" ]; then
 				continue
 			fi
 			val=$(printf '%s\n' "$env_json" | jq -r --arg k "$var" '.[$k] // empty')
@@ -392,14 +410,6 @@ while read -r entry; do
 		;;
 	copilot)
 		copilot_cmd="command copilot"
-		if [ -n "$copilot_home" ]; then
-			env_prefix="${env_prefix}COPILOT_HOME=$(shell_quote "$pane_cmd" "$copilot_home") "
-			nu_env="${nu_env}COPILOT_HOME: $(shell_quote "$pane_cmd" "$copilot_home"), "
-			# Not masked: this is a state-root path the plugin derived itself,
-			# not user-supplied credential material.
-			redacted_env_prefix="${redacted_env_prefix}COPILOT_HOME=$(shell_quote "$pane_cmd" "$copilot_home") "
-			redacted_nu_env="${redacted_nu_env}COPILOT_HOME: $(shell_quote "$pane_cmd" "$copilot_home"), "
-		fi
 		if [ -n "$safe_cli_args" ]; then
 			resume_cmd="${copilot_cmd}${safe_cli_args} --resume=${safe_sid}"
 		else
@@ -458,6 +468,17 @@ while read -r entry; do
 		continue
 		;;
 	esac
+	fi
+
+	# Pin the saved state root, for every tool listed in state_root_var. Not
+	# masked: it is a path save derived itself, not user-supplied credential
+	# material, and it is the first thing to check when a restore lands on the
+	# wrong root.
+	if [ "$kind" = "session" ] && [ -n "$state_root" ]; then
+		env_prefix="${env_prefix}${state_root_name}=$(shell_quote "$pane_cmd" "$state_root") "
+		nu_env="${nu_env}${state_root_name}: $(shell_quote "$pane_cmd" "$state_root"), "
+		redacted_env_prefix="${redacted_env_prefix}${state_root_name}=$(shell_quote "$pane_cmd" "$state_root") "
+		redacted_nu_env="${redacted_nu_env}${state_root_name}: $(shell_quote "$pane_cmd" "$state_root"), "
 	fi
 
 	# csh/tcsh have no `command` builtin, so the POSIX form below cannot be used

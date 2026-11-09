@@ -197,6 +197,8 @@ show-option)
 	@assistant-resurrect-launch-stagger) printf '%s\n' "${MOCK_LAUNCH_STAGGER:-}" ;;
 	@assistant-resurrect-claude-drop-flags) printf '%s\n' "${MOCK_CLAUDE_DROP_FLAGS:-}" ;;
 	@assistant-resurrect-claude-drop-env) printf '%s\n' "${MOCK_CLAUDE_DROP_ENV:-}" ;;
+	@assistant-resurrect-pin-state-root) printf '%s\n' "${MOCK_PIN_STATE_ROOT:-}" ;;
+	@assistant-resurrect-codex-pin-state-root) printf '%s\n' "${MOCK_CODEX_PIN_STATE_ROOT:-}" ;;
 	@assistant-resurrect-relaunch) printf '%s\n' "${MOCK_RELAUNCH_ENABLED:-on}" ;;
 	@assistant-resurrect-relaunch-allow-file) printf '%s\n' "${MOCK_VOUCHER:-}" ;;
 	esac
@@ -1135,6 +1137,85 @@ mv "$SANDBOX/copilot.json" "$RESURRECT_DIR/assistant-sessions.json"
 run_restore
 assert_eq 'conflicting required state root sends no command' '' "$(cat "$TMUX_LOG")"
 assert_contains 'conflicting required state root is diagnosed' "$RESTORE_OUTPUT" 'cannot drop COPILOT_HOME'
+
+# --- state roots are pinned the same way for every tool ----------------------
+# state_root_var (lib-replay.sh) is the one table; Copilot used to be the only
+# tool whose saved root reached the resumed command.
+export MOCK_EXEC_SHELL='' MOCK_DROP_ENV='' MOCK_DROP_FLAGS='' MOCK_CAPTURE_ENV=''
+export MOCK_SHELLS='' MOCK_PANES='%91|0|0|root-test'
+state_root_dir="$SANDBOX/alt root"
+mkdir -p "$state_root_dir"
+write_state_root_entry() { # tool session_id [extra jq filter]
+	jq -n --arg cwd "$SANDBOX" --arg tool "$1" --arg sid "$2" --arg root "$state_root_dir" \
+		"{sessions:[{pane:\"root-test:0.0\", tool:\$tool, session_id:\$sid, cwd:\$cwd, state_root:\$root}]} ${3:-}" \
+		>"$RESURRECT_DIR/assistant-sessions.json"
+}
+for case_spec in "codex|CODEX_HOME|codex resume" "grok|GROK_HOME|grok --resume" \
+	"opencode|XDG_DATA_HOME|opencode -s" "copilot|COPILOT_HOME|copilot"; do
+	IFS='|' read -r root_tool root_var root_cmd <<<"$case_spec"
+	write_state_root_entry "$root_tool" "ses_root_${root_tool}"
+	run_restore
+	root_saved=$(jq -r '.sessions[0].state_root' "$RESURRECT_DIR/assistant-sessions.json")
+	assert_contains "$root_tool resume pins $root_var to the saved root" \
+		"$(cat "$TMUX_LOG")" "env ${root_var}='${root_saved}' ${root_cmd}"
+	assert_contains "$root_tool restore log shows the root unmasked" \
+		"$(cat "$RESURRECT_DIR/assistant-restore.log")" "${root_var}='${root_saved}'"
+done
+
+# Capturing the same variable must not add it twice; the saved root wins.
+export MOCK_CAPTURE_ENV='CODEX_HOME'
+write_state_root_entry codex ses_root_dup '| .sessions[0].env = {CODEX_HOME:"/stale/codex"}'
+run_restore
+assert_not_contains 'captured duplicate of the state root is not replayed' "$(cat "$TMUX_LOG")" '/stale/codex'
+export MOCK_CAPTURE_ENV=''
+
+# An empty state_root means "default root": nothing to pin, plain command.
+write_state_root_entry codex ses_root_default '| .sessions[0].state_root = ""'
+run_restore
+assert_contains 'default root restores without an env prefix' "$(cat "$TMUX_LOG")" "command codex resume 'ses_root_default'"
+
+# Dropping the variable would point the tool at its default root: fail closed,
+# exactly as Copilot already did.
+export MOCK_DROP_ENV=GROK_HOME
+write_state_root_entry grok ses_root_drop
+run_restore
+assert_eq 'dropped grok state root sends no command' '' "$(cat "$TMUX_LOG")"
+assert_contains 'dropped grok state root is diagnosed' "$RESTORE_OUTPUT" 'cannot drop GROK_HOME'
+export MOCK_DROP_ENV=''
+
+# pin-state-root off lets the pane's own environment decide.
+export MOCK_PIN_STATE_ROOT=off
+write_state_root_entry codex ses_root_unpinned
+run_restore
+assert_contains 'pin-state-root off sends the plain command' "$(cat "$TMUX_LOG")" "command codex resume 'ses_root_unpinned'"
+assert_contains 'pin-state-root off is logged' "$RESTORE_OUTPUT" 'not pinning CODEX_HOME'
+# ...and with pinning off, dropping the variable is no longer a conflict.
+export MOCK_DROP_ENV=CODEX_HOME
+run_restore
+assert_contains 'unpinned root plus drop-env still restores' "$(cat "$TMUX_LOG")" "codex resume 'ses_root_unpinned'"
+export MOCK_DROP_ENV=''
+# The per-tool option wins over the global one.
+export MOCK_CODEX_PIN_STATE_ROOT=on
+run_restore
+assert_contains 'per-tool pin-state-root overrides the global option' "$(cat "$TMUX_LOG")" "env CODEX_HOME="
+export MOCK_PIN_STATE_ROOT='' MOCK_CODEX_PIN_STATE_ROOT=''
+
+# Tools outside the table never get a prefix, even from a crafted sidecar.
+write_state_root_entry pi ses_root_pi
+run_restore
+assert_not_contains 'state_root is ignored for tools without a state-root variable' "$(cat "$TMUX_LOG")" "$state_root_dir"
+
+# Sidecars from before state_root: Copilot's legacy copilot_home still pins;
+# an explicit state_root (even empty) takes precedence over it.
+jq -n --arg cwd "$SANDBOX" --arg root "$state_root_dir" \
+	'{sessions:[{pane:"root-test:0.0", tool:"copilot", session_id:"ses_legacy", cwd:$cwd, copilot_home:$root}]}' \
+	>"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_contains 'legacy copilot_home still pins COPILOT_HOME' "$(cat "$TMUX_LOG")" "COPILOT_HOME="
+jq '.sessions[0].state_root = ""' "$RESURRECT_DIR/assistant-sessions.json" >"$SANDBOX/legacy.json"
+mv "$SANDBOX/legacy.json" "$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_not_contains 'explicit empty state_root overrides legacy copilot_home' "$(cat "$TMUX_LOG")" "COPILOT_HOME="
 
 echo
 # Antigravity restores with its own selector and preserves ordinary flags.
