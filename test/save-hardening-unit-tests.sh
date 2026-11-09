@@ -653,11 +653,11 @@ assert_eq "copilot default root is not recorded" "" \
 # One table: every tool with a state-root variable has a default and a save-side
 # resolver, and no other tool records one. A new assistant whose store moves
 # with an env var must be added to all three or this fails.
-for t in claude cursor copilot opencode codex pi omp grok agy; do
+for t in claude cursor copilot opencode codex pi omp grok agy kiro; do
 	has_var=no has_default=no records=no
 	[ -z "$(state_root_var "$t")" ] || has_var=yes
 	[ -z "$(state_root_default "$t")" ] || has_default=yes
-	[ -z "$(ASSISTANT_PROC_ROOT="$ROOT_PROC" CODEX_HOME=/x XDG_DATA_HOME=/x GROK_HOME=/x \
+	[ -z "$(ASSISTANT_PROC_ROOT="$ROOT_PROC" CODEX_HOME=/x XDG_DATA_HOME=/x GROK_HOME=/x KIRO_HOME=/x \
 		pinned_state_root "$t" 5252 /x/session-state)" ] || records=yes
 	assert_eq "$t state-root table is consistent" "$has_var $has_var" "$has_default $records"
 done

@@ -421,6 +421,17 @@ assert_contains "kiro: resume command reaches the pane" "$(cat "$TMUX_LOG")" \
 	"send-keys|%30|command kiro-cli chat --resume-id '2d295295-e869-4a96-a1a0-c67e0b3b4a07'"
 assert_not_contains "kiro: saved cli_args are not replayed" "$(cat "$TMUX_LOG")" 'stale-prompt'
 
+echo "== kiro v3 resumes its sess_ id with the same command =="
+# kiro-cli routes a `sess_` ID to the v3 engine itself, so no engine flag.
+export MOCK_PANES='%30|0|0|budget-sess'
+jq -n '{sessions:[
+  {pane:"budget-sess:0.0",tool:"kiro",session_id:"sess_9f8092be-0989-4617-b317-9d44db70e00e",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_eq "kiro v3: restore succeeds" "0" "$RESTORE_STATUS"
+assert_contains "kiro v3: resume command reaches the pane" "$(cat "$TMUX_LOG")" \
+	"send-keys|%30|command kiro-cli chat --resume-id 'sess_9f8092be-0989-4617-b317-9d44db70e00e'"
+
 echo "== an unresolvable session id disables the cache instead of falling back to a name =="
 : >"$client_wait_log"
 export MOCK_NO_CLIENT=1
@@ -1151,7 +1162,8 @@ write_state_root_entry() { # tool session_id [extra jq filter]
 		>"$RESURRECT_DIR/assistant-sessions.json"
 }
 for case_spec in "codex|CODEX_HOME|codex resume" "grok|GROK_HOME|grok --resume" \
-	"opencode|XDG_DATA_HOME|opencode -s" "copilot|COPILOT_HOME|copilot"; do
+	"opencode|XDG_DATA_HOME|opencode -s" "copilot|COPILOT_HOME|copilot" \
+	"kiro|KIRO_HOME|kiro-cli chat --resume-id"; do
 	IFS='|' read -r root_tool root_var root_cmd <<<"$case_spec"
 	write_state_root_entry "$root_tool" "ses_root_${root_tool}"
 	run_restore

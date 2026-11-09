@@ -1223,20 +1223,52 @@ get_grok_session() {
 
 # --- Kiro CLI ---
 #
-# `kiro-cli` is a launcher; the process that owns the session is a descendant:
-#   kiro-cli -> kiro-cli-chat chat -> bun tui.js chat -> kiro-cli-chat acp
-# The `acp` process holds a lock next to the session files:
-#   $KIRO_HOME/sessions/cli/<uuid>.lock   {"pid":<acp pid>,"started_at":"..."}
-#   $KIRO_HOME/sessions/cli/<uuid>.json   session metadata (written at startup)
-# `kiro-cli chat --resume-id <uuid>` reuses the same lock file with the new acp
-# PID. KIRO_HOME replaces the whole ~/.kiro path; the candidate process's own
-# value wins where /proc exposes it, then the hook's environment, then the
-# default (same order as GROK_HOME).
-kiro_sessions_dir() {
+# `kiro-cli` is a launcher. Which descendant owns the session, and where its
+# lock lives, depends on the agent engine (verified with kiro-cli 2.22.0):
+#
+#   v2 (the default UI, also `--tui`):
+#     kiro-cli -> kiro-cli-chat chat -> bun tui.js chat -> kiro-cli-chat acp
+#     $KIRO_HOME/sessions/cli/<uuid>.lock    {"pid":<acp pid>,"started_at":"..."}
+#     $KIRO_HOME/sessions/cli/<uuid>.json    session metadata
+#   v3 (`--v3`):
+#     kiro-cli -> kiro-cli-chat chat -> bun tui.js chat
+#     $KIRO_HOME/sessions/<hash>/sess_<uuid>/.lock          {"pid":<bun pid>,...}
+#     $KIRO_HOME/sessions/<hash>/sess_<uuid>/session.json  session metadata
+#
+# Both engines write the lock and the metadata at startup, and
+# `kiro-cli chat --resume-id <id>` rewrites the same lock with the new owner's
+# PID. The ID is the file stem for v2 and the directory name (with its `sess_`
+# prefix) for v3; kiro-cli routes a `sess_` ID to the v3 engine by itself, so
+# restore needs no engine flag. The legacy UI (`--classic` / `--legacy-ui`)
+# keeps its conversations in SQLite and writes no lock, so it is not supported.
+#
+# KIRO_HOME replaces the whole ~/.kiro path; the candidate process's own value
+# wins where /proc exposes it, then the hook's environment, then the default
+# (same order as GROK_HOME).
+kiro_home() {
 	local pid="${1:-}" home=""
 	home=$(_process_env_var "$pid" KIRO_HOME)
 	[ -n "$home" ] || home="${KIRO_HOME:-$HOME/.kiro}"
-	printf '%s/sessions/cli\n' "$home"
+	printf '%s\n' "$home"
+}
+
+# Whether <id> (as `--resume-id` takes it) is a Kiro session restore can resume:
+# a well-formed ID whose metadata file exists in <home>.
+_kiro_session_resumable() {
+	local home="$1" sid="$2" meta
+	case "$sid" in
+	sess_*)
+		_copilot_is_uuid "${sid#sess_}" || return 1
+		for meta in "$home"/sessions/*/"$sid"/session.json; do
+			[ -f "$meta" ] && return 0
+		done
+		return 1
+		;;
+	*)
+		_copilot_is_uuid "$sid" || return 1
+		[ -f "$home/sessions/cli/$sid.json" ]
+		;;
+	esac
 }
 
 # The candidate PID plus all of its descendants, space-delimited with a leading
@@ -1264,20 +1296,33 @@ _kiro_process_tree() {
 }
 
 get_kiro_session_from_lock() {
-	local child_pid="$1" sessions_dir="${2:-}"
-	[ -n "$sessions_dir" ] || sessions_dir=$(kiro_sessions_dir "$child_pid")
-	[ -d "$sessions_dir" ] || return 0
+	local child_pid="$1" home="${2:-}"
+	[ -n "$home" ] || home=$(kiro_home "$child_pid")
+	[ -d "$home/sessions" ] || return 0
 
-	local tree lock content sid lock_pid started
+	local tree lock content sid meta lock_pid started
 	local best_sid="" best_started=""
 	local pid_re='"pid"[[:space:]]*:[[:space:]]*([0-9]+)'
 	local started_re='"started_at"[[:space:]]*:[[:space:]]*"([^"]*)"'
 	tree=$(_kiro_process_tree "$child_pid")
-	for lock in "$sessions_dir"/*.lock; do
+	# v2 locks, then v3 locks. The v3 glob needs the `sess_` directory, so the
+	# per-workspace `.index/.lock` never matches.
+	for lock in "$home"/sessions/cli/*.lock "$home"/sessions/*/sess_*/.lock; do
 		[ -f "$lock" ] || continue
-		sid="${lock##*/}"
-		sid="${sid%.lock}"
-		_copilot_is_uuid "$sid" || continue
+		case "$lock" in
+		*/.lock)
+			sid="${lock%/.lock}"
+			sid="${sid##*/}"
+			_copilot_is_uuid "${sid#sess_}" || continue
+			meta="${lock%/.lock}/session.json"
+			;;
+		*)
+			sid="${lock##*/}"
+			sid="${sid%.lock}"
+			_copilot_is_uuid "$sid" || continue
+			meta="${lock%.lock}.json"
+			;;
+		esac
 		content=""
 		IFS= read -r content <"$lock" 2>/dev/null || [ -n "$content" ] || continue
 		[[ "$content" =~ $pid_re ]] || continue
@@ -1286,7 +1331,7 @@ get_kiro_session_from_lock() {
 		# killed sessions behind, so ownership by a live descendant is the gate.
 		case "$tree" in *" $lock_pid "*) ;; *) continue ;; esac
 		# Resumability gate: restore needs the session metadata file.
-		[ -f "$sessions_dir/$sid.json" ] || continue
+		[ -f "$meta" ] || continue
 		# A recycled PID would otherwise adopt a dead session's stale lock.
 		_file_predates_process "$lock" "$lock_pid" && continue
 		started=""
@@ -1305,23 +1350,24 @@ get_kiro_session_from_lock() {
 get_kiro_session() {
 	local child_pid="$1"
 	local args="$2"
-	local sessions_dir sid=""
-	sessions_dir=$(kiro_sessions_dir "$child_pid")
+	local home sid=""
+	home=$(kiro_home "$child_pid")
 
-	# Primary: lock owned by the pane's acp process. Keyed by PID, so two
+	# Primary: lock owned by the pane's process tree. Keyed by PID, so two
 	# sessions in one cwd never collide and a bare `kiro-cli` is covered.
-	sid=$(get_kiro_session_from_lock "$child_pid" "$sessions_dir")
+	sid=$(get_kiro_session_from_lock "$child_pid" "$home")
 	if [ -n "$sid" ]; then
 		echo "$sid"
 		return 0
 	fi
 
-	# Fallback: --resume-id <uuid> in argv, for the window right after a
-	# restore before the acp child has taken its lock.
-	local uuid='\([0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}\)'
-	sid=$(echo "$args" | sed -n "s/.*--resume-id[= ] *$uuid.*/\\1/p")
-	if [ -n "$sid" ] && [ -f "$sessions_dir/$sid.json" ]; then
-		echo "$sid"
+	# Fallback: --resume-id <id> in argv, for the window right after a restore
+	# before the session owner has taken its lock.
+	local hex='[0-9a-fA-F]'
+	local id_re="--resume-id[= ]+((sess_)?${hex}{8}-${hex}{4}-${hex}{4}-${hex}{4}-${hex}{12})"
+	if [[ "$args" =~ $id_re ]]; then
+		sid="${BASH_REMATCH[1]}"
+		_kiro_session_resumable "$home" "$sid" && echo "$sid"
 	fi
 	return 0
 }
@@ -3167,6 +3213,7 @@ pinned_state_root() {
 	codex) root=$(codex_home "$pid") ;;
 	opencode) root=$(opencode_data_home "$pid") ;;
 	grok) root=$(grok_home "$pid") ;;
+	kiro) root=$(kiro_home "$pid") ;;
 	*) return 0 ;;
 	esac
 	[ -n "$root" ] || return 0

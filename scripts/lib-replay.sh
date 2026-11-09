@@ -495,6 +495,7 @@ state_root_var() {
 	codex) echo CODEX_HOME ;;
 	opencode) echo XDG_DATA_HOME ;;
 	grok) echo GROK_HOME ;;
+	kiro) echo KIRO_HOME ;;
 	esac
 }
 
@@ -504,6 +505,7 @@ state_root_default() {
 	codex) printf '%s\n' "$HOME/.codex" ;;
 	opencode) printf '%s\n' "$HOME/.local/share" ;;
 	grok) printf '%s\n' "$HOME/.grok" ;;
+	kiro) printf '%s\n' "$HOME/.kiro" ;;
 	esac
 }
 
