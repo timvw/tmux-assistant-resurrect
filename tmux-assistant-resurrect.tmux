@@ -11,6 +11,7 @@
 # 6. GitHub Copilot CLI support via its open session database (no hook required)
 # 7. Pi and Oh My Pi support via local session-file lookup (no hook required)
 # 8. Grok support via the ~/.grok/active_sessions.json registry (no hook required)
+# 9. Kiro CLI support via ~/.kiro/sessions/cli/<uuid>.lock files (no hook required)
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

@@ -3,7 +3,8 @@
 ## Project overview
 
 tmux-assistant-resurrect persists AI coding assistant sessions (Claude Code,
-Cursor Agent CLI, GitHub Copilot CLI, OpenCode, Codex CLI, Pi, Oh My Pi, Grok, Antigravity CLI)
+Cursor Agent CLI, GitHub Copilot CLI, OpenCode, Codex CLI, Pi, Oh My Pi, Grok, Antigravity CLI,
+Kiro CLI)
 across tmux restarts. It hooks into tmux-resurrect to save session IDs and
 restore them automatically.
 
@@ -123,9 +124,10 @@ process args as a reliable fallback.
   cannot read another process's env unprivileged, so hookless tools capture no
   env there — document the shell-profile / `tmux set-environment` workaround
   instead.
-- State-root overrides (`COPILOT_HOME`, `CODEX_HOME`, `GROK_HOME`, OpenCode's
-  `XDG_DATA_HOME`) are resolved through one helper each (`copilot_session_state_dir()`,
-  `codex_home()`, `opencode_data_home()`, `grok_home()`), never inlined. Each prefers the candidate
+- State-root overrides (`COPILOT_HOME`, `CODEX_HOME`, `GROK_HOME`, `KIRO_HOME`,
+  OpenCode's `XDG_DATA_HOME`) are resolved through one helper each
+  (`copilot_session_state_dir()`, `codex_home()`, `opencode_data_home()`,
+  `grok_home()`, `kiro_home()`), never inlined. Each prefers the candidate
   process's own value read via `_process_env_var()` from `/proc/<pid>/environ`
   (Linux/WSL), then the hook's environment, then the documented default: a tmux
   hook does not inherit the shell profile, so the hook-side value alone is not
@@ -331,7 +333,7 @@ changes after an upgrade, check the relevant source to confirm.
 | **Codex writes `$CODEX_HOME/session-tags.jsonl`** (default `~/.codex`; resolved by `codex_home()`, process value first) | Primary session ID source for Codex (PID → session mapping) | Run Codex and check `cat ~/.codex/session-tags.jsonl` |
 | **Pi session files live in `~/.pi/agent/sessions/--<cwd>--/*.jsonl`** | Primary session ID source for Pi when `--session` is absent in args; save script reads header `type=id/cwd/timestamp` and scores candidates by process lifetime + mtime | Run Pi and inspect `~/.pi/agent/sessions`, verify first JSONL line has `{"type":"session","id":"..."}` |
 | **grok writes `~/.grok/active_sessions.json`** | Primary session ID source for Grok: an array of `{session_id, pid, cwd, opened_at}` for every live session, updated on open/close. `get_grok_session()` looks up by PID (works even for a bare `grok` with no args); `-r`/`--resume <uuid>` in process args is the fallback. `GROK_HOME` overrides the `~/.grok` base. | Run `grok`, then `cat ~/.grok/active_sessions.json`; confirm each running `grok` PID appears with its `session_id` |
-| **tmux-resurrect pane content archive** layout: `./pane_contents/pane-{session}:{window}.{pane}` inside `pane_contents.tar.gz` | `strip_assistant_pane_contents()` removes assistant pane files from this archive to prevent stale TUI flash on restore. The filename shape is dictated by upstream, so `.sessions[].pane` has to keep the joined `session:window.pane` form to match it — this is the one place that string is correct to use, and it is a filename, never a tmux target | tmux-resurrect source: `scripts/helpers.sh:pane_contents_file()` |
+| **kiro-cli writes a per-session lock `{"pid":N,"started_at":"<RFC3339>"}`** under `$KIRO_HOME/sessions/` (default `~/.kiro`; resolved by `kiro_home()`, process value first): `cli/<uuid>.lock` + `cli/<uuid>.json` (default TUI, v2 engine; held by the `kiro-cli-chat acp` descendant) or `<workspace-hash>/sess_<uuid>/.lock` + `session.json` (`--v3`; held by the `bun` TUI descendant) | Primary session ID source for Kiro. `get_kiro_session_from_lock()` matches the lock `pid` against the pane's process tree, requires the metadata file, and ignores locks that predate the process. `kiro-cli chat --resume-id sess_<uuid>` selects the v3 engine on its own, so restore uses one command for both layouts. The classic UI (`--classic`/`--legacy-ui`) writes no lock and is unsupported. Undocumented upstream; verified with kiro-cli 2.22.0 | Run `kiro-cli` and `kiro-cli --v3`, then `ps -eo pid,ppid,args` and `cat ~/.kiro/sessions/cli/*.lock ~/.kiro/sessions/*/sess_*/.lock` || **tmux-resurrect pane content archive** layout: `./pane_contents/pane-{session}:{window}.{pane}` inside `pane_contents.tar.gz` | `strip_assistant_pane_contents()` removes assistant pane files from this archive to prevent stale TUI flash on restore. The filename shape is dictated by upstream, so `.sessions[].pane` has to keep the joined `session:window.pane` form to match it — this is the one place that string is correct to use, and it is a filename, never a tmux target | tmux-resurrect source: `scripts/helpers.sh:pane_contents_file()` |
 | **tmux >= 3.7 permits `:`, `.` and `\|` in session names** | 3.4-3.6 silently rewrote `:` and `.` to `_`, so saved pane labels change shape across that boundary; only TAB and NEWLINE are rejected outright. This is why a saved label cannot be parsed or used as a target (issue #66) | `tmux new-session -d -s 'a:b.c\|d'; tmux list-sessions -F '#{session_name}'` |
 
 ## Platform gotchas
@@ -427,6 +429,7 @@ just test
 # Hermetic suites (no Docker, no tmux, no assistant binaries)
 just test-targets                  # saved-pane target resolution
 just test-grok
+just test-kiro
 just test-copilot
 just test-save-hardening           # save/process detection and file safety
 bash test/replay-policy-unit-tests.sh  # argument/environment exclusions

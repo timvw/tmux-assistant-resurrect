@@ -475,6 +475,22 @@ else
 	fail "Grok focused unit suite"
 fi
 
+# --- Focused Kiro CLI session tests ---
+
+suite "kiro_unit"
+echo ""
+echo "=== Focused Kiro CLI session tests ==="
+echo ""
+
+kiro_unit_output=""
+if kiro_unit_output=$("${TEST_BASH:-bash}" "$REPO_DIR/test/kiro-unit-tests.sh" 2>&1); then
+	echo "$kiro_unit_output"
+	pass "Kiro focused unit suite"
+else
+	echo "$kiro_unit_output"
+	fail "Kiro focused unit suite"
+fi
+
 # --- Shared replay policy (drop-flags / drop-env) tests ---
 
 suite "replay_policy_unit"

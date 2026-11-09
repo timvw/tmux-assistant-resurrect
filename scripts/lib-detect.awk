@@ -23,6 +23,10 @@ function detect_tool(line) {
 		tool = first
 	} else if (first == "cursor-agent") {
 		tool = "cursor"
+	} else if (first == "kiro-cli") {
+		# Chat entry points only: see detect_tool in lib-detect.sh.
+		if (!(n < 2 || word[2] == "chat" || word[2] ~ /^-/)) return ""
+		tool = "kiro"
 	} else if (first == "agent" && word[2] == "--use-system-ca" && word[3] ~ /\/index\.js$/) {
 		tool = "cursor"
 	} else if (first == "node" || first == "nodejs" || first == "bun" ||

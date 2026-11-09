@@ -1,6 +1,6 @@
 # tmux-assistant-resurrect — session persistence for AI coding assistants
 # Preserves Claude Code, GitHub Copilot CLI, OpenCode, Codex CLI, Pi, Oh My Pi,
-# and Grok sessions across tmux restarts.
+# Grok, and Kiro CLI sessions across tmux restarts.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -702,6 +702,10 @@ test-agy-authenticated resurrect_dir session_id history_text:
 # Run hermetic Grok unit tests (no Docker / no grok binary needed)
 test-grok:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/grok-unit-tests.sh"
+
+# Run hermetic Kiro CLI unit tests (no Docker / no kiro-cli binary needed)
+test-kiro:
+    @"${TEST_BASH:-bash}" "{{repo_dir}}/test/kiro-unit-tests.sh"
 
 # Run hermetic Cursor Agent CLI tests (no binary or login required)
 test-cursor:
