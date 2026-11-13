@@ -7,7 +7,7 @@
 # 2. Post-save/restore hooks for assistant session tracking
 # 3. Claude Code hooks in ~/.claude/settings.json
 # 4. Cursor Agent CLI hooks in ~/.cursor/hooks.json
-# 5. OpenCode session-tracker plugin in ~/.config/opencode/plugins/
+# 5. OpenCode session-tracker plugin in ~/.config/opencode/plugins/ (V1 or V2)
 # 6. GitHub Copilot CLI support via its open session database (no hook required)
 # 7. Pi and Oh My Pi support via local session-file lookup (no hook required)
 # 8. Grok support via the ~/.grok/active_sessions.json registry (no hook required)
@@ -379,45 +379,105 @@ remove_opencode_plugin_link() {
     esac
 }
 
-opencode_plugin_api_supported() {
-    local binary version found=false
-    # The official V2 package also installs opencode2. Both commands discover
-    # the same global plugins, so a V1 opencode next to a V2 opencode2 is unsafe.
+# Print which OpenCode majors are on tmux's PATH, as "1", "2" or "1 2". Fails
+# when there is no OpenCode, or any found command reports something other than
+# a recognized 1.x or 2.x version: unknown is not evidence of a compatible API.
+# The official V2 package also installs opencode2, and both commands discover
+# the same global plugins, so both are probed.
+opencode_plugin_majors() {
+    local binary version found=false has_v1=false has_v2=false
     for binary in opencode opencode2; do
         command -v "$binary" >/dev/null 2>&1 || continue
         found=true
         version=$("$binary" --version 2>/dev/null) || return 1
         # Validate the whole response, not one line in a diagnostic dump.
         case "$version" in *$'\n'*) return 1 ;; esac
-        printf '%s\n' "$version" | grep -Eq '^(opencode )?v?1\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' || return 1
+        if printf '%s\n' "$version" | grep -Eq '^(opencode )?v?1\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            has_v1=true
+        elif printf '%s\n' "$version" | grep -Eq '^(opencode )?v?2\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            has_v2=true
+        else
+            return 1
+        fi
     done
-    [ "$found" = true ]
+    [ "$found" = true ] || return 1
+    if [ "$has_v1" = true ] && [ "$has_v2" = true ]; then
+        echo '1 2'
+    elif [ "$has_v2" = true ]; then
+        echo 2
+    else
+        echo 1
+    fi
+}
+
+# The V2 tracker is a plugin directory, linked as a whole. Same ownership rule
+# as the V1 file: remove only a link to our tracker, never follow it.
+remove_opencode2_plugin_link() {
+    local plugin_dir="$1" target
+    [ -L "$plugin_dir" ] || return 0
+    target=$(readlink "$plugin_dir") || return 0
+    case "$target" in
+        */hooks/opencode2 | */hooks/opencode2/) rm -f "$plugin_dir" ;;
+    esac
+}
+
+install_opencode2_plugin() {
+    local plugin_link="$1" source_dir="${CURRENT_DIR}/hooks/opencode2"
+    if [ -L "$plugin_link" ] && [ "$(readlink "$plugin_link")" = "$source_dir" ]; then
+        return
+    fi
+    # Refresh our own link from a stale checkout path. Anything else at this
+    # path, including a symlink to somewhere else, belongs to the user.
+    remove_opencode2_plugin_link "$plugin_link"
+    if [ -e "$plugin_link" ] || [ -L "$plugin_link" ]; then
+        echo "tmux-assistant-resurrect: refusing to replace existing $plugin_link" >&2
+        return
+    fi
+    mkdir -p "${plugin_link%/*}"
+    ln -s "$source_dir" "$plugin_link"
 }
 
 install_opencode_plugin() {
     local plugin_dir="$HOME/.config/opencode/plugins"
     local plugin_file="$plugin_dir/session-tracker.js"
+    local plugin2_link="$plugin_dir/assistant-resurrect"
     local source_file="${CURRENT_DIR}/hooks/opencode-session-track.js"
+    local majors
 
     # This switch controls automatic plugin installation only; other assistants
     # and OpenCode's argv/database save/restore fallbacks remain independent.
     if [ "$(tmux show-option -gqv @assistant-resurrect-opencode)" = 'off' ]; then
         remove_opencode_plugin_link "$plugin_file"
+        remove_opencode2_plugin_link "$plugin2_link"
         return
     fi
 
-    # V2 requires a default { id, setup/effect } definition. More importantly,
-    # its server plugin runs in a shared background server, so porting just the
-    # export would no longer identify the TUI PID in a tmux pane. Keep the native
-    # V1 tracker until a TUI-to-session mapping is verified for V2. Unknown/dev
-    # versions are not evidence of a compatible API either. --version does not
-    # load plugins or start a server. Probe before the already-linked guard so
-    # upgrading to V2 also removes a previously installed incompatible tracker.
-    if ! opencode_plugin_api_supported; then
+    # V1 and V2 need different trackers. V2 requires a default { id, setup }
+    # definition and rejects the V1 file; it also runs server plugins in one
+    # background server shared by every TUI, so the V2 tracker is a TUI plugin,
+    # which runs in the opencode process inside the pane. V1 discovers plugin
+    # files only, so it never loads the V2 directory. Unknown/dev versions are
+    # not evidence of either API. --version does not load plugins or start a
+    # server. Probe before the already-linked guards so an upgrade also removes
+    # the tracker for the version that went away.
+    if ! majors=$(opencode_plugin_majors); then
         remove_opencode_plugin_link "$plugin_file"
+        remove_opencode2_plugin_link "$plugin2_link"
         if command -v opencode >/dev/null 2>&1 || command -v opencode2 >/dev/null 2>&1; then
-            echo 'tmux-assistant-resurrect: OpenCode tracker requires recognized v1 versions for all available OpenCode commands; skipping plugin installation (disable with @assistant-resurrect-opencode off)' >&2
+            echo 'tmux-assistant-resurrect: OpenCode tracker requires recognized v1 or v2 versions for all available OpenCode commands; skipping plugin installation (disable with @assistant-resurrect-opencode off)' >&2
         fi
+        return
+    fi
+
+    case "$majors" in
+    *2*) install_opencode2_plugin "$plugin2_link" ;;
+    *) remove_opencode2_plugin_link "$plugin2_link" ;;
+    esac
+
+    # V2 reports the V1 file as a failed plugin, so it is installed only when
+    # every OpenCode command found is V1.
+    if [ "$majors" != 1 ]; then
+        remove_opencode_plugin_link "$plugin_file"
         return
     fi
 

@@ -407,6 +407,18 @@ if command -v node >/dev/null 2>&1; then
 	assert_contains "plugin uses \$HOME/.local/state/tmux-assistant-resurrect" \
 		"$plugin_src" 'process.env.HOME||homedir()}/.local/state/tmux-assistant-resurrect'
 
+	# The OpenCode 2 tracker is a third copy of the same expression and the same
+	# create-only guard. Pin it to the literals the V1 plugin is pinned to.
+	plugin2_src=$(tr -d ' \n\t' <"$REPO_DIR/hooks/opencode2/tui.js")
+	assert_contains "OpenCode 2 plugin honours TMUX_ASSISTANT_RESURRECT_DIR first" \
+		"$plugin2_src" 'process.env.TMUX_ASSISTANT_RESURRECT_DIR||'
+	assert_contains "OpenCode 2 plugin uses \$HOME/.local/state/tmux-assistant-resurrect" \
+		"$plugin2_src" 'process.env.HOME||homedir()}/.local/state/tmux-assistant-resurrect'
+	assert_contains "OpenCode 2 plugin creates the parents without a mode" \
+		"$plugin2_src" 'mkdirSync(parent,{recursive:true})'
+	assert_contains "OpenCode 2 plugin creates the leaf private" \
+		"$plugin2_src" 'mkdirSync(stateDir,{mode:0o700})'
+
 	# The plugin has to match ensure_assistant_state_dir(), not just the path.
 	# Node's mkdirSync applies `mode` to every level `recursive` creates — unlike
 	# mkdir -p -m — so the one-liner that was here clamped ~/.local and

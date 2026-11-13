@@ -362,8 +362,22 @@ uninstall-opencode-plugin:
     #!/usr/bin/env bash
     set -euo pipefail
     plugin_file="$HOME/.config/opencode/plugins/session-tracker.js"
+    plugin2_link="$HOME/.config/opencode/plugins/assistant-resurrect"
+    removed=0
     if [ -L "$plugin_file" ] || [ -f "$plugin_file" ]; then
         rm -f "$plugin_file"
+        removed=1
+    fi
+    # The OpenCode 2 tracker is a linked directory. Only our link is removed.
+    if [ -L "$plugin2_link" ]; then
+        case "$(readlink "$plugin2_link")" in
+        */hooks/opencode2 | */hooks/opencode2/)
+            rm -f "$plugin2_link"
+            removed=1
+            ;;
+        esac
+    fi
+    if [ "$removed" -eq 1 ]; then
         echo "OpenCode session-tracker plugin removed"
     else
         echo "OpenCode plugin not found, nothing to remove"
@@ -484,7 +498,9 @@ status:
 
     # OpenCode plugin
     if [ -L ~/.config/opencode/plugins/session-tracker.js ]; then
-        echo "[ok] OpenCode session-tracker plugin linked"
+        echo "[ok] OpenCode session-tracker plugin linked (OpenCode 1)"
+    elif [ -L ~/.config/opencode/plugins/assistant-resurrect ]; then
+        echo "[ok] OpenCode session-tracker plugin linked (OpenCode 2)"
     else
         echo "[--] OpenCode session-tracker plugin not linked"
     fi
