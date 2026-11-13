@@ -110,10 +110,14 @@ inventory=$(api GET /api/plugin 2>/dev/null || echo '{}')
 assert_eq "OpenCode $version reports no failed plugin" 0 \
 	"$(jq '[.data[]? | select(.state.status == "failed")] | length' <<<"$inventory")"
 
-# On the home screen no session is shown, so there is nothing to record.
-sleep 2
-assert_eq "no state file while the TUI shows the home screen" 0 \
-	"$(find "$STATE_DIR" -name 'opencode-*.json' 2>/dev/null | wc -l | tr -d ' ')"
+# On the home screen no session is shown, so there is nothing to record. The
+# plugin creates the state directory in setup, before its first look at the
+# route, so the directory is the signal that it has started. Without that
+# signal a missing directory would make `find` fail and read as "no file".
+if wait_for "tracker starts in the TUI" 150 test -d "$STATE_DIR"; then
+	state_files=$(find "$STATE_DIR" -name 'opencode-*.json' | wc -l | tr -d ' ')
+	assert_eq "no state file while the TUI shows the home screen" 0 "$state_files"
+fi
 
 first=$(api POST /api/session '{"title":"contract first"}' | jq -r '.data.id // .id')
 second=$(api POST /api/session '{"title":"contract second"}' | jq -r '.data.id // .id')
@@ -154,9 +158,15 @@ resolved=$(
 assert_eq "save hook resolves the pane's session from the state file" "$first" "$resolved"
 
 # Quitting removes the file, so a later save cannot restore a closed session.
-tmux -L "$SOCKET" send-keys -t contract C-c
-sleep 0.5
-tmux -L "$SOCKET" send-keys -t contract C-c 2>/dev/null || true
+# The TUI is the pane's only process, so the pane closes when it exits. One
+# ctrl+c clears a non-empty prompt and the next one quits, so keep pressing
+# until the process is gone instead of spacing two presses with a sleep.
+exited() { ! kill -0 "$pane_pid" 2>/dev/null; }
+quit_tui() {
+	tmux -L "$SOCKET" send-keys -t contract C-c 2>/dev/null || true
+	exited
+}
+wait_for "the TUI exits on ctrl+c" 50 quit_tui || true
 gone() { [ ! -e "$(state_file_for "$pane_pid")" ]; }
 if wait_for "state file is removed when the TUI exits" 50 gone; then
 	pass "state file is removed when the TUI exits"

@@ -496,13 +496,24 @@ status:
         echo "[--] Cursor SessionEnd hook not installed"
     fi
 
-    # OpenCode plugin
+    # OpenCode plugin. The OpenCode 2 path may hold a user's own symlink, which
+    # the installer leaves alone, so only a link to our tracker counts.
+    opencode2_link=~/.config/opencode/plugins/assistant-resurrect
+    opencode2_target=""
+    if [ -L "$opencode2_link" ]; then
+        opencode2_target=$(readlink "$opencode2_link") || opencode2_target=""
+    fi
     if [ -L ~/.config/opencode/plugins/session-tracker.js ]; then
         echo "[ok] OpenCode session-tracker plugin linked (OpenCode 1)"
-    elif [ -L ~/.config/opencode/plugins/assistant-resurrect ]; then
-        echo "[ok] OpenCode session-tracker plugin linked (OpenCode 2)"
     else
-        echo "[--] OpenCode session-tracker plugin not linked"
+        case "$opencode2_target" in
+        */hooks/opencode2 | */hooks/opencode2/)
+            echo "[ok] OpenCode session-tracker plugin linked (OpenCode 2)"
+            ;;
+        *)
+            echo "[--] OpenCode session-tracker plugin not linked"
+            ;;
+        esac
     fi
 
     echo ""
