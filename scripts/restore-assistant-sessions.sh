@@ -438,10 +438,20 @@ while read -r entry; do
 		fi
 		;;
 	omp)
+		# --restore is --resume plus "go on with what the dead process left
+		# unfinished": a turn cut off by a reboot/SIGKILL is replayed instead of
+		# being left aborted, which is the whole point of restoring the pane.
+		# It refuses the launch-only selectors, so fall back to --resume when
+		# the saved argv carries one (a replayed --continue would also re-pick
+		# a different session than the id we saved).
+		omp_resume_flag="--restore"
+		case " ${cli_args} " in
+			*" --continue "* | *" -c "* | *" --goal "* | *" --fork "* | *" --no-session "*) omp_resume_flag="--resume" ;;
+		esac
 		if [ -n "$safe_cli_args" ]; then
-			resume_cmd="command omp${safe_cli_args} --resume ${safe_sid}"
+			resume_cmd="command omp${safe_cli_args} ${omp_resume_flag} ${safe_sid}"
 		else
-			resume_cmd="command omp --resume ${safe_sid}"
+			resume_cmd="command omp ${omp_resume_flag} ${safe_sid}"
 		fi
 		;;
 	agy)
