@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Real OpenCode V1/V2 plugin contract; no login, prompts, or live dotfiles.
 
+V1 is checked through its server plugin. The V2 tracker is a TUI plugin, so the
+V2 half checks installation and loading here; a session shown in a TUI needs a
+terminal, which test/opencode2-tui-contract-test.sh provides through tmux.
+
 Usage: python3 test/opencode-plugin-contract-test.py /path/to/v1/opencode /path/to/v2/opencode
 Install the binaries in separate temporary npm prefixes. Requires POSIX process
 groups (Linux/macOS), bash, jq, and Node/Bun as required by the supplied binaries.
@@ -92,7 +96,7 @@ def install(env):
         env=env,
         check=True,
         capture_output=True,
-        timeout=20,
+        timeout=60,
     )
 
 
@@ -179,14 +183,19 @@ def run(v1, v2, root):
     install(env)
     install(env)
     assert not plugin.is_symlink() and not plugin.exists(), "V2 must not reinstall the V1 tracker"
+    tracker2 = home / ".config/opencode/plugins/assistant-resurrect"
+    assert tracker2.is_symlink(), "V2 tracker was not installed"
+    assert tracker2.resolve() == (REPO / "hooks/opencode2").resolve()
     assert "claude-session-track" in (home / ".claude/settings.json").read_text()
     with server(v2, home, env) as request:
         inventory = wait_for(
             lambda: request("/api/plugin")["data"], lambda items: bool(items), "V2 inventory ready"
         )
+        # The tracker has only a TUI part, so the server has nothing of it to
+        # load or list. What it must not do is report it, or the V1 file, as failed.
         assert not any(item.get("state", {}).get("status") == "failed" for item in inventory)
         assert not any(item.get("source", {}).get("path", "").endswith("session-tracker.js") for item in inventory)
-    print(f"PASS: {version} starts without the incompatible tracker after repeated installs; Claude remains installed")
+    print(f"PASS: {version} starts with the V2 tracker installed and no failed plugin after repeated installs; Claude remains installed")
 
     # V2 also provides opencode2, while V1 can win the opencode name on PATH.
     # Both use the same global config; probing only opencode misses this case.
@@ -195,7 +204,23 @@ def run(v1, v2, root):
     plugin.symlink_to(REPO / "hooks/opencode-session-track.js")
     install(env)
     assert not plugin.is_symlink() and not plugin.exists(), "Mixed V1/V2 must not install a shared V1 tracker"
-    print("PASS: mixed V1 opencode / V2 opencode2 installation removes the incompatible shared tracker")
+    assert tracker2.is_symlink(), "Mixed V1/V2 must keep the V2 tracker"
+    print("PASS: mixed V1 opencode / V2 opencode2 installation removes the V1 tracker and keeps the V2 one")
+
+    # V1 scans the plugin directory for files only. The V2 tracker is a
+    # directory, so a V1 server that finds it in its config must start without
+    # it. A fresh home: V2 has migrated the database in the one above.
+    home = root / "v1-beside-v2"
+    env = environment(home, v1)
+    tracker2 = home / ".config/opencode/plugins/assistant-resurrect"
+    tracker2.parent.mkdir(parents=True)
+    tracker2.symlink_to(REPO / "hooks/opencode2")
+    with server(v1, home, env) as request:
+        wait_for(lambda: request("/session"), lambda value: isinstance(value, list), "V1 ready beside the V2 tracker")
+        info = request("/session", "POST", {"title": "contract mixed"})
+        assert info["id"], "V1 could not create a session beside the V2 tracker"
+    assert not list(Path(env["TMUX_ASSISTANT_RESURRECT_DIR"]).glob("opencode-*.json")), "V1 loaded a tracker it should not see"
+    print("PASS: V1 starts and creates a session with the V2 tracker directory present, and loads no tracker")
 
 
 if __name__ == "__main__":

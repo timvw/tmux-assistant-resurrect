@@ -85,9 +85,9 @@ process args as a reliable fallback.
   `assistant_state_dir()` in `scripts/lib-detect.sh`. Never inline the path or
   add an environment variable to it: the hooks and the save script resolve it in
   different process environments, so anything they can disagree about silently
-  loses session IDs (issue #65). `hooks/opencode-session-track.js` carries the
-  one unavoidable second implementation; `test/state-dir-unit-tests.sh` pins the
-  two together. The pre-#65 locations are enumerated by
+  loses session IDs (issue #65). `hooks/opencode-session-track.js` and
+  `hooks/opencode2/tui.js` carry the unavoidable JavaScript copies;
+  `test/state-dir-unit-tests.sh` pins each of them to the shell one. The pre-#65 locations are enumerated by
   `legacy_assistant_state_dirs()` as a *set*, not re-derived from the old
   expression: that expression is the thing that resolved differently on either
   side, so evaluating it once in the save script would migrate only the users who
@@ -328,6 +328,9 @@ changes after an upgrade, check the relevant source to confirm.
 | **Claude hook spawns intermediate `sh -c`** | `$PPID` in the hook is NOT Claude's PID; hooks walk the process tree via `find_claude_pid()` (max 5 levels) | Run `ps -eo pid= -o ppid= -o args=` while a hook is executing |
 | **Claude hides `--system-prompt-file` and `--append-system-prompt-file` from `--help`** | Both are accepted, but neither appears in the option list -- they are named only in the prose of `--setting-sources`. `_discover_option_value_flags()` therefore cannot see them, and only `OPTION_VALUE_FLAGS_FALLBACK_claude` pins them as value-taking. Read as booleans, the path becomes the first positional and `_drop_positional_args()` discards it along with the whole tail; restore then replays a bare flag and claude consumes the next one as its filename. If a future release documents them, discovery covers it and the fallback entries become redundant rather than wrong | `claude --help \| grep -- '--system-prompt-file'` -- currently no match in the option list; `test/save-hardening-unit-tests.sh` pins the resulting behaviour |
 | **OpenCode plugins run in-process** | `process.pid` in the plugin IS the opencode binary's PID; state file is keyed by this PID | OpenCode source: search for `await import(` in the plugin loader (approx. `packages/opencode/src/plugin/index.ts` -- path may move) |
+| **OpenCode 2 server plugins run in a shared background server** | `process.pid` there is the server's, not a pane's, so the V2 tracker is the TUI part of a plugin (`hooks/opencode2/tui.js`), which runs in the pane's `opencode` process | `bash test/opencode2-tui-contract-test.sh /path/to/v2/opencode` asserts the state file is keyed by the pane's PID |
+| **OpenCode 2 emits no event when the displayed session changes** | Switching tabs or returning to the home screen is invisible to `context.data.listen`, so `hooks/opencode2/tui.js` also polls `context.ui.router.current()` once a second | Subscribe to all events in a TUI plugin and press `alt+up` between two session tabs |
+| **OpenCode 1.19 calls a plugin's `setup` as well as `server`** | A default export with both is called twice by 1.19, with a `setup` context that has no tool or session API. OpenCode 1 loads only plugin *files*, so the V2 tracker directory is never seen by it | `test/opencode-plugin-contract-test.py` starts V1 with the V2 tracker directory present |
 | **OpenCode Go binary overwrites process title** | `-s <id>` is NOT visible in `ps`; plugin state file or SQLite DB are the reliable sources | Run `ps -eo args=` on a running `opencode -s <id>` process |
 | **OpenCode SQLite DB** at `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share`; resolved by `opencode_db_file()`, process value first) | Fallback session ID extraction when plugin state file and args are unavailable; matches by cwd + most recent `time_updated` | Check DB schema: `sqlite3 ~/.local/share/opencode/opencode.db ".schema session"` |
 | **Codex writes `$CODEX_HOME/session-tags.jsonl`** (default `~/.codex`; resolved by `codex_home()`, process value first) | Primary session ID source for Codex (PID → session mapping) | Run Codex and check `cat ~/.codex/session-tags.jsonl` |

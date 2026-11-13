@@ -49,7 +49,7 @@ jobs:
         run: ruff check scripts/py/
 
       - name: node --check (JS plugin)
-        run: node --check hooks/opencode-session-track.js
+        run: node --check hooks/opencode-session-track.js && node --check hooks/opencode2/tui.js
 
   test:
     runs-on: ubuntu-latest
@@ -150,6 +150,8 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/opencode-contract-v2" --no-audit --no-fund @opencode/cli@2.0.22
           python3 test/opencode-plugin-contract-test.py \
             "$RUNNER_TEMP/opencode-contract-v1/node_modules/.bin/opencode" \
+            "$RUNNER_TEMP/opencode-contract-v2/node_modules/.bin/opencode"
+          bash test/opencode2-tui-contract-test.sh \
             "$RUNNER_TEMP/opencode-contract-v2/node_modules/.bin/opencode"
 
       # The only tmux >= 3.7 in CI. Below 3.7 tmux rewrites ':' and '.' in
