@@ -822,6 +822,26 @@ assert_eq "Cursor restore succeeds" "0" "$RESTORE_STATUS"
 assert_contains "Cursor resumes the exact session with saved invocation flags" "$(cat "$TMUX_LOG")" \
 	"command agent '--mode' 'plan' '--model' 'auto' '--sandbox' 'enabled' --resume '750b1c55-f1b2-4ff1-804e-9c38d1b2c7e2'"
 
+echo "== Oh My Pi continues an interrupted turn instead of only reopening =="
+export MOCK_PANES='%15|0|0|omp-test
+%16|0|0|omp-continue'
+export MOCK_SHELLS='%15|bash
+%16|bash'
+export MOCK_CAPTURE_ENV=''
+jq -n '{sessions:[{
+  pane:"omp-test:0.0", session_name:"omp-test", window_index:"0", pane_index:"0",
+  tool:"omp", session_id:"01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e", cwd:"", cli_args:"", env:{}
+},{
+  pane:"omp-continue:0.0", session_name:"omp-continue", window_index:"0", pane_index:"0",
+  tool:"omp", session_id:"01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0f", cwd:"", cli_args:"--profile work --continue", env:{}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_eq "OMP restore succeeds" "0" "$RESTORE_STATUS"
+assert_contains "OMP reopens with --restore so a killed turn is replayed" "$(cat "$TMUX_LOG")" \
+	"command omp --restore '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e'"
+assert_contains "OMP falls back to --resume when the launch-only --continue is replayed" "$(cat "$TMUX_LOG")" \
+	"command omp '--profile' 'work' '--continue' --resume '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0f'"
+
 echo "== malformed entries are isolated =="
 export MOCK_PANES='%1|0|0|bad-env
 %2|0|0|bad-id
