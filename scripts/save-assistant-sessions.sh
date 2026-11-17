@@ -1124,7 +1124,9 @@ get_omp_session() {
 	local pane_tty="${4:-}"
 
 	local sid
-	sid=$(_arg_value "$args" --resume -r --session)
+	# --restore names the session the same way --resume does, and is what a
+	# restored pane runs under on an omp that supports it.
+	sid=$(_arg_value "$args" --resume -r --session --restore)
 	if [ -n "$sid" ]; then
 		echo "$sid"
 		return
@@ -2319,7 +2321,11 @@ SESSION_FLAG_PATTERN_claude='^--(resume|continue|session-id|fork-session|from-pr
 SESSION_FLAG_PATTERN_copilot='^--(connect|continue|interactive|name|prompt|resume|session-id)$'
 SESSION_FLAG_PATTERN_opencode='^--session$'
 SESSION_FLAG_PATTERN_pi='^--(session|resume|continue|fork)$'
-SESSION_FLAG_PATTERN_omp='^--(session|resume|continue|fork)$'
+# omp: --restore is --resume plus "go on with the interrupted turn", and is what
+# a restored pane runs under -- left in, it would be replayed beside the fresh
+# one on the next restore. --goal and the --from-* imports are launch-only: omp
+# rejects --goal next to --resume/--restore, and an import must not run twice.
+SESSION_FLAG_PATTERN_omp='^--(session|resume|restore|continue|fork|goal|from-claude|from-codex)$'
 SESSION_FLAG_PATTERN_agy='^--(conversation|continue|new-project)$'
 SESSION_FLAG_PATTERN_grok='^--(resume|continue|session-id|fork-session)$'
 SESSION_FLAG_PATTERN_cursor='^--(resume|continue|new-session-id)$'
@@ -2353,6 +2359,10 @@ SESSION_FLAGS_FALLBACK_pi="--continue -c
 --session"
 SESSION_FLAGS_FALLBACK_omp="--continue -c
 --fork
+--from-claude
+--from-codex
+--goal
+--restore
 --resume -r
 --session"
 SESSION_FLAGS_FALLBACK_agy="--conversation

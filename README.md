@@ -48,7 +48,7 @@ RESTORE (on tmux start or manual prefix+Ctrl-r)
          opencode --verbose -s <session-id>
          codex --full-auto resume <session-id>
          pi --model sonnet --session <session-id>
-         omp --profile work --resume <session-id>
+         omp --profile work --restore <session-id>
          grok --resume <session-id>
          kiro-cli chat --resume-id <session-id>
          agy --conversation <session-id>
@@ -71,7 +71,7 @@ Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 | **OpenCode** | `-s` / `--session` in process args | Plugin state file | SQLite DB query (`$XDG_DATA_HOME/opencode/opencode.db`, default `~/.local/share`) | Go binary overwrites process title; DB fallback matches most recent session by cwd |
 | **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | SQLite `~/.codex/state_*.sqlite` `threads` table (Codex >= 0.118); rollout JSONL `~/.codex/sessions/` (Codex ~0.100-0.117) | Codex runs via Node.js, so args are always visible in `ps` |
 | **Pi** | Session header lookup in `~/.pi/agent/sessions/--<cwd>--/*.jsonl` | `--session` in process args | - | Session-file lookup is cwd-scoped and uses process-time scoring + dedup |
-| **Oh My Pi** | Terminal breadcrumb + session JSONL lookup (`$XDG_STATE_HOME/omp`, `$XDG_DATA_HOME/omp`) | `--resume` / `-r` in process args | `--session-dir` / `--profile` scoped lookup | Distinct `omp` tool; no hook/plugin required |
+| **Oh My Pi** | Terminal breadcrumb + session JSONL lookup (`$XDG_STATE_HOME/omp`, `$XDG_DATA_HOME/omp`) | `--resume` / `-r` / `--restore` in process args | `--session-dir` / `--profile` scoped lookup | Distinct `omp` tool; no hook/plugin required. Restored with `--restore` when the installed omp lists it (18.10.x and later), otherwise `--resume` |
 | **Antigravity CLI (`agy`)** | PID-owned CLI log | `--conversation <UUID>` in process args | - | No cwd/newest-session guessing; log format is an observed contract |
 | **Grok** | PID lookup in `~/.grok/active_sessions.json` | `-r` / `--resume <uuid>` in process args | - | Registry records every live session (including a bare `grok` with no args) keyed by PID, so sessions sharing a cwd never collide; no hook/plugin required |
 | **Kiro CLI** | Session lock (`$KIRO_HOME`, default `~/.kiro`) whose `pid` is a live descendant of the pane's `kiro-cli`: `sessions/cli/<uuid>.lock` (default TUI, v2 engine) or `sessions/<workspace-hash>/sess_<uuid>/.lock` (`--v3`) | `--resume-id <id>` in process args | - | The lock is held by a descendant, not `kiro-cli` itself (`kiro-cli-chat acp` in the default TUI, the `bun` TUI process with `--v3`), so the match walks the process tree; stale locks from killed sessions are ignored. Restore runs `kiro-cli chat --resume-id <id>` for both layouts (a `sess_` ID selects the v3 engine) without replaying flags. Verified with kiro-cli 2.22.0 on Linux; `--classic`/`--legacy-ui` is not supported (see [Limitations](#limitations)) |
@@ -495,7 +495,7 @@ cat "$RESURRECT_DIR/assistant-save.log"
 | Session ID missing for Pi | Verify session files exist under `~/.pi/agent/sessions/--<cwd>--/*.jsonl` and that pane cwd matches the Pi session cwd |
 | Session ID missing for Grok | Verify `~/.grok/active_sessions.json` exists and contains an entry with your Grok process's PID: `jq '.[] | select(.pid == <PID>)' ~/.grok/active_sessions.json`. If you set `GROK_HOME`, the save hook reads it from the Grok process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g GROK_HOME ...`) |
 | Session ID missing for Kiro CLI | Find the lock-holding PID under the pane (`ps -eo pid,ppid,args`): `kiro-cli-chat acp` in the default TUI, the `bun` TUI process with `--v3`. Check it appears in a lock: `grep -l '"pid":<PID>,' "${KIRO_HOME:-$HOME/.kiro}"/sessions/cli/*.lock "${KIRO_HOME:-$HOME/.kiro}"/sessions/*/sess_*/.lock` (use the Kiro process's `KIRO_HOME` if your shell does not have it). The matching metadata (`cli/<uuid>.json` or `sess_<uuid>/session.json`) must exist too. If you set `KIRO_HOME`, the save hook reads it from the process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g KIRO_HOME ...`). `--classic`/`--legacy-ui` panes keep no lock and cannot be resolved |
-| Session ID missing for Oh My Pi | The primary method is a terminal breadcrumb under `$XDG_STATE_HOME/omp` (or `~/.local/state/omp`); verify the pane tty matches the breadcrumb file. Fallback is `--resume` / `-r` in process args. `--session-dir` or `--profile` scoped JSONL lookup is also used when those flags are present |
+| Session ID missing for Oh My Pi | The primary method is a terminal breadcrumb under `$XDG_STATE_HOME/omp` (or `~/.local/state/omp`); verify the pane tty matches the breadcrumb file. Fallback is `--resume` / `-r` / `--restore` in process args. `--session-dir` or `--profile` scoped JSONL lookup is also used when those flags are present |
 | Codex/OpenCode/Pi session ID missing (python3 methods) | The save hook auto-detects `python3` in common locations. If your setup uses a non-standard path, set it in tmux: `set-environment -g PATH "/your/python3/dir:$PATH"` |
 | Restore launches but assistant says "session not found" | The session ID may have expired. This is normal — start a fresh session and the next save will pick up the new ID |
 | Assistants launch twice after restore | Make sure assistants are **not** listed in `@resurrect-processes` — the plugin handles all resuming via the post-restore hook |
@@ -796,6 +796,23 @@ Add to `~/.tmux.conf`:
 
 ```bash
 set -g @continuum-save-interval '10'  # minutes (default: 5)
+```
+
+### Oh My Pi: continuing an interrupted turn
+
+`omp --resume <id>` reopens a session; `omp --restore <id>` also goes on with
+what the session's last process left unfinished -- the turn that a reboot or a
+`SIGKILL` cut off, and the subagents it was running. Restore uses `--restore`
+whenever the installed omp lists it in `omp --help` (18.10.x and later), and
+falls back to `--resume` on older builds, when `omp --help` cannot be run from
+the hook, or when the saved arguments carry something `--restore` refuses
+(`--continue`, `--fork`, `--goal`, `--no-session`, an import, `--print`/`--mode`).
+
+Continuing a turn means its pending tool calls are issued again without anyone
+at the keyboard. To reopen sessions without that:
+
+```bash
+set -g @assistant-resurrect-omp-restore 'off'      # always plain --resume
 ```
 
 ### Restore pacing (per-pane delays)

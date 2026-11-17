@@ -120,6 +120,33 @@ _valid_delay "$CLEAR_DELAY" || CLEAR_DELAY=0.3
 LAUNCH_STAGGER=$(tmux show-option -gqv @assistant-resurrect-launch-stagger 2>/dev/null || true)
 _valid_delay "$LAUNCH_STAGGER" || LAUNCH_STAGGER=1
 
+# Which flag reopens an Oh My Pi session. `--restore` (omp >= 18.10.x) resumes
+# and then goes on with the turn the dead process left unfinished; older builds
+# reject it as an unknown flag, so it is used only when the installed omp's
+# --help lists it. No help at all (omp not resolvable from the hook's PATH)
+# degrades to the plain `--resume` every version accepts.
+# `@assistant-resurrect-omp-restore 'off'` keeps `--resume` unconditionally, for
+# anyone who does not want interrupted tool calls re-issued unattended.
+# Resolved once, into a global rather than through $(): every omp pane shares
+# the answer, and `omp --help` is not free.
+OMP_RESUME_FLAG=""
+_omp_resume_flag() {
+	[ -z "$OMP_RESUME_FLAG" ] || return 0
+	OMP_RESUME_FLAG="--resume"
+	local setting help
+	setting=$(tmux show-option -gqv @assistant-resurrect-omp-restore 2>/dev/null || true)
+	case "$setting" in
+		off | no | false | 0) return 0 ;;
+	esac
+	# Matched from a variable, not a pipe: `grep -q` closing a pipe early would
+	# read as "unsupported" under pipefail.
+	help=$(_tool_help omp)
+	if grep -qE -- '(^|[^[:alnum:]-])--restore([^[:alnum:]-]|$)' <<<"$help"; then
+		OMP_RESUME_FLAG="--restore"
+	fi
+	return 0
+}
+
 # Wait for panes to be fully initialized after resurrect restore
 sleep 2
 
@@ -441,12 +468,20 @@ while read -r entry; do
 		# --restore is --resume plus "go on with what the dead process left
 		# unfinished": a turn cut off by a reboot/SIGKILL is replayed instead of
 		# being left aborted, which is the whole point of restoring the pane.
-		# It refuses the launch-only selectors, so fall back to --resume when
-		# the saved argv carries one (a replayed --continue would also re-pick
-		# a different session than the id we saved).
-		omp_resume_flag="--restore"
+		# Only an omp that lists the flag gets it (see _omp_resume_flag): an
+		# older one hard-fails on it and the pane would not come back at all.
+		# It also refuses the launch-only selectors and non-interactive modes,
+		# so fall back to --resume when the saved argv carries one (a replayed
+		# --continue would also re-pick a different session than the id we
+		# saved). Current saves strip most of these; sidecars written before
+		# that still carry them.
+		_omp_resume_flag
+		omp_resume_flag="$OMP_RESUME_FLAG"
 		case " ${cli_args} " in
-			*" --continue "* | *" -c "* | *" --goal "* | *" --fork "* | *" --no-session "*) omp_resume_flag="--resume" ;;
+			*" --continue "* | *" -c "* | *" --fork "* | *" --fork="* | \
+			*" --goal "* | *" --goal="* | *" --no-session "* | \
+			*" --from-claude "* | *" --from-codex "* | \
+			*" --print "* | *" -p "* | *" --mode "* | *" --mode="*) omp_resume_flag="--resume" ;;
 		esac
 		if [ -n "$safe_cli_args" ]; then
 			resume_cmd="command omp${safe_cli_args} ${omp_resume_flag} ${safe_sid}"
