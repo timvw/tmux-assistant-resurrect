@@ -362,8 +362,22 @@ uninstall-opencode-plugin:
     #!/usr/bin/env bash
     set -euo pipefail
     plugin_file="$HOME/.config/opencode/plugins/session-tracker.js"
+    plugin2_link="$HOME/.config/opencode/plugins/assistant-resurrect"
+    removed=0
     if [ -L "$plugin_file" ] || [ -f "$plugin_file" ]; then
         rm -f "$plugin_file"
+        removed=1
+    fi
+    # The OpenCode 2 tracker is a linked directory. Only our link is removed.
+    if [ -L "$plugin2_link" ]; then
+        case "$(readlink "$plugin2_link")" in
+        */hooks/opencode2 | */hooks/opencode2/)
+            rm -f "$plugin2_link"
+            removed=1
+            ;;
+        esac
+    fi
+    if [ "$removed" -eq 1 ]; then
         echo "OpenCode session-tracker plugin removed"
     else
         echo "OpenCode plugin not found, nothing to remove"
@@ -482,11 +496,24 @@ status:
         echo "[--] Cursor SessionEnd hook not installed"
     fi
 
-    # OpenCode plugin
+    # OpenCode plugin. The OpenCode 2 path may hold a user's own symlink, which
+    # the installer leaves alone, so only a link to our tracker counts.
+    opencode2_link=~/.config/opencode/plugins/assistant-resurrect
+    opencode2_target=""
+    if [ -L "$opencode2_link" ]; then
+        opencode2_target=$(readlink "$opencode2_link") || opencode2_target=""
+    fi
     if [ -L ~/.config/opencode/plugins/session-tracker.js ]; then
-        echo "[ok] OpenCode session-tracker plugin linked"
+        echo "[ok] OpenCode session-tracker plugin linked (OpenCode 1)"
     else
-        echo "[--] OpenCode session-tracker plugin not linked"
+        case "$opencode2_target" in
+        */hooks/opencode2 | */hooks/opencode2/)
+            echo "[ok] OpenCode session-tracker plugin linked (OpenCode 2)"
+            ;;
+        *)
+            echo "[--] OpenCode session-tracker plugin not linked"
+            ;;
+        esac
     fi
 
     echo ""

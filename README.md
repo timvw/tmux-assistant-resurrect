@@ -158,7 +158,7 @@ and automatically set up:
 - Claude Code hooks in `~/.claude/settings.json`
 - Cursor Agent CLI hooks in `~/.cursor/hooks.json`
 - Copilot support via its per-session `inuse.<pid>.lock` file (no hook/plugin required)
-- OpenCode **v1** session-tracker plugin in `~/.config/opencode/plugins/`
+- OpenCode session-tracker plugin in `~/.config/opencode/plugins/` (one for v1, one for v2)
 - Pi support via session-file lookup in `~/.pi/agent/sessions` (no hook/plugin required)
 - Oh My Pi support via terminal/session-file lookup in `$XDG_STATE_HOME/omp`, `$XDG_DATA_HOME/omp`, or `~/.omp` (no hook/plugin required)
 - Grok support via the `~/.grok/active_sessions.json` registry (no hook/plugin required)
@@ -177,24 +177,31 @@ Set only the options for assistants you want to disable. Reload your tmux
 configuration to apply them. Claude/Cursor opt-outs remove our current and
 stale hook commands while preserving unrelated hooks, settings, dotfile
 symlinks and target modes. The OpenCode installer removes its own
-`session-tracker.js` symlink (including stale checkout paths) and leaves regular
-files and unrelated symlinks alone. `on`, or leaving the option unset, enables
-installation when compatible OpenCode v1 commands are found on tmux's `PATH`.
+`session-tracker.js` and `assistant-resurrect` symlinks (including stale checkout
+paths) and leaves regular files, directories and unrelated symlinks alone. `on`,
+or leaving the option unset, enables installation when OpenCode v1 or v2 commands
+are found on tmux's `PATH`.
 These options control native hook/plugin installation; they do not disable the
 save/restore hooks or native-state/process-argument/database fallbacks. Hookless
 assistants have no installer to opt out of.
 
-OpenCode v2 uses a different plugin API and a separate server process. The
+OpenCode v1 and v2 use different plugin APIs, so each has its own tracker. The
 installer checks `opencode --version` (and `opencode2`, when present) **before**
-linking and removes our old v1 link for v2, future majors, unknown/dev versions,
-failed probes, or a missing binary. It creates no OpenCode configuration
-directory in those cases. Mixed v1/v2 installations sharing the global plugin
-directory also skip the v1 hook when the v2 command is visible on tmux's `PATH`.
-Native v2 session tracking is not yet supported; the existing save/restore fallbacks
-are best effort, not a guarantee that the selected v2 TUI session is recovered.
-After installing v1 or correcting tmux's `PATH`, reload the configuration to
-install its tracker. Restart OpenCode after removing a previously loaded plugin
-to clear its diagnostics.
+linking:
+
+| Found on tmux's `PATH` | Installed |
+|---|---|
+| v1 only | `plugins/session-tracker.js` (v1 tracker) |
+| v2 only, or v1 and v2 together | `plugins/assistant-resurrect` (v2 tracker) |
+| A future major, an unknown/dev version, a failed probe, or no binary | Neither; both of our links are removed |
+
+OpenCode v2 reports the v1 file as a failed plugin, so the v1 tracker is not
+installed when a v2 command is visible, even beside a v1 command. In that mixed
+case v1 panes fall back to the `-s` flag and the database lookup. OpenCode v1
+ignores the v2 tracker, which is a directory. After installing OpenCode or
+correcting tmux's `PATH`, reload the configuration to install the right tracker.
+Restart OpenCode after a tracker is added or removed so running TUIs pick up the
+change.
 
 ## Uninstallation
 
@@ -240,7 +247,8 @@ hooks/
   lib-cursor-pid.sh               # Finds a Cursor Agent CLI ancestor (not Cursor Desktop)
   cursor-session-track.sh         # Cursor sessionStart hook (writes session ID)
   cursor-session-cleanup.sh       # Cursor sessionEnd hook (removes state file)
-  opencode-session-track.js       # OpenCode plugin (tracks session ID + cleanup)
+  opencode-session-track.js       # OpenCode v1 plugin (tracks session ID + cleanup)
+  opencode2/tui.js                # OpenCode v2 TUI plugin (tracks the session each TUI shows)
 scripts/
   lib-detect.sh                   # Shared library (detect_tool, pane_has_assistant, posix_quote)
   save-assistant-sessions.sh      # Resurrect post-save hook (process detection + session IDs)
@@ -912,6 +920,24 @@ An OpenCode v1 plugin that listens for `session.created`, `session.updated`, and
 `$STATE_DIR/opencode-<PID>.json`. This handles the case where
 a user switches sessions at runtime (via `/sessions` or `Ctrl+x l`). The plugin
 also cleans up its state file on process exit (SIGINT, SIGTERM).
+
+### OpenCode v2 plugin (`hooks/opencode2/tui.js`)
+
+OpenCode v2 runs one background server for every TUI, so a server plugin cannot
+tell which pane shows which session. The v2 tracker is therefore a TUI plugin:
+it runs inside the `opencode` process in the pane, whose PID is the one the save
+hook finds. It writes the same `$STATE_DIR/opencode-<PID>.json` file as the v1
+plugin, naming the session that TUI currently shows.
+
+- Switching tabs or opening another session emits no server event, so the plugin
+  checks the displayed session once a second as well as on every server event.
+- On the home screen, or on an archived session, it removes its file, and the
+  save hook falls back to the `-s` flag and the database lookup.
+- While a subagent's session is displayed, the file names its top-level session.
+- It removes its file when the TUI exits.
+
+A TUI with several session tabs records the tab in view. Restore reopens that
+session; the other tabs are not reopened.
 
 ### Codex CLI
 

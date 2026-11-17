@@ -511,6 +511,19 @@ assert_eq "OpenCode off keeps Cursor tracking installed" 1 \
 FAKE_OPENCODE_OPTION=on open_install
 assert_eq "OpenCode on re-enables V1 installation" "$OPEN_SOURCE" "$(readlink "$OPEN_INSTALL_FILE")"
 
+# The V2 tracker is a plugin directory with a TUI part. It is linked as a whole
+# beside the V1 file, and each host loads only its own.
+OPEN2_INSTALL_LINK="$OPEN_INSTALL_HOME/.config/opencode/plugins/assistant-resurrect"
+OPEN2_SOURCE="$ROOT_DIR/hooks/opencode2"
+assert_open2_absent() {
+    if [ ! -e "$OPEN2_INSTALL_LINK" ] && [ ! -L "$OPEN2_INSTALL_LINK" ]; then
+        pass "$1"
+    else
+        fail "$1"
+    fi
+}
+assert_open2_absent "OpenCode V1 does not install the V2 tracker"
+
 for open_version in '2.0.22' 'opencode v2.0.22' 'v2.0.0-beta.1' '3.0.0' '0.0.0-dev-20443' 'local' '' '1.18.34 extra' $'diagnostic\n1.18.34'; do
     open_install
     FAKE_OPENCODE_VERSION="$open_version" open_install
@@ -518,6 +531,26 @@ for open_version in '2.0.22' 'opencode v2.0.22' 'v2.0.0-beta.1' '3.0.0' '0.0.0-d
     FAKE_OPENCODE_VERSION="$open_version" open_install
     assert_open_absent "OpenCode [$open_version] never reinstalls an incompatible tracker"
 done
+
+for open_version in '2.0.22' 'opencode v2.2.7' 'v2.0.0-beta.1'; do
+    open_install
+    FAKE_OPENCODE_VERSION="$open_version" open_install
+    assert_eq "OpenCode [$open_version] installs the V2 tracker" "$OPEN2_SOURCE" "$(readlink "$OPEN2_INSTALL_LINK")"
+    FAKE_OPENCODE_VERSION="$open_version" open_install
+    assert_eq "OpenCode [$open_version] V2 install is idempotent" "$OPEN2_SOURCE" "$(readlink "$OPEN2_INSTALL_LINK")"
+done
+for open_version in '3.0.0' '0.0.0-dev-20443' 'local' '' '2.0.22 extra'; do
+    FAKE_OPENCODE_VERSION='2.0.22' open_install
+    FAKE_OPENCODE_VERSION="$open_version" open_install
+    assert_open2_absent "OpenCode [$open_version] removes an already-linked V2 tracker"
+done
+FAKE_OPENCODE_VERSION='2.0.22' open_install
+open_install
+assert_open2_absent "downgrading to V1 removes the V2 tracker"
+assert_eq "downgrading to V1 restores the V1 tracker" "$OPEN_SOURCE" "$(readlink "$OPEN_INSTALL_FILE")"
+FAKE_OPENCODE_VERSION='2.0.22' open_install
+FAKE_OPENCODE_OPTION=off FAKE_OPENCODE_VERSION='2.0.22' open_install
+assert_open2_absent "OpenCode off removes the V2 tracker"
 open_install
 FAKE_OPENCODE_STATUS=1 open_install
 assert_open_absent "failed OpenCode version probe removes the incompatible tracker"
@@ -530,9 +563,13 @@ OPENCODE2
 chmod +x "$FAKE_BIN/opencode2"
 open_install
 assert_open_absent "V1 opencode with V2 opencode2 removes the shared incompatible tracker"
+assert_eq "V1 opencode with V2 opencode2 installs the V2 tracker" "$OPEN2_SOURCE" "$(readlink "$OPEN2_INSTALL_LINK")"
 open_install
 assert_open_absent "mixed V1/V2 installation stays disabled on the next tmux start"
 rm "$FAKE_BIN/opencode2"
+open_install
+assert_open2_absent "removing the V2 command removes the V2 tracker"
+rm -f "$OPEN_INSTALL_FILE"
 
 # Stale paths may be dangling after a TPM/Nix/worktree change. Remove the link
 # itself without following it. Unrelated links and regular files are user data.
@@ -550,6 +587,22 @@ for open_option in off on; do
     FAKE_OPENCODE_OPTION="$open_option" FAKE_OPENCODE_VERSION='opencode v2.0.22' open_install
     assert_eq "OpenCode $open_option preserves an unrelated symlink on V2" "$SYMLINK_TARGET" "$(readlink "$OPEN_INSTALL_FILE")"
     rm "$OPEN_INSTALL_FILE"
+
+    rm -f "$OPEN2_INSTALL_LINK"
+    ln -s '/removed/checkout/hooks/opencode2' "$OPEN2_INSTALL_LINK"
+    FAKE_OPENCODE_OPTION="$open_option" open_install
+    assert_open2_absent "OpenCode $open_option removes a dangling V2 tracker from a stale checkout"
+
+    mkdir "$OPEN2_INSTALL_LINK"
+    printf 'user plugin\n' >"$OPEN2_INSTALL_LINK/tui.js"
+    FAKE_OPENCODE_OPTION="$open_option" FAKE_OPENCODE_VERSION='opencode v2.0.22' open_install
+    assert_eq "OpenCode $open_option preserves a user's plugin directory of the same name" 'user plugin' "$(cat "$OPEN2_INSTALL_LINK/tui.js")"
+    rm -r "$OPEN2_INSTALL_LINK"
+
+    ln -s "$SYMLINK_TARGET" "$OPEN2_INSTALL_LINK"
+    FAKE_OPENCODE_OPTION="$open_option" FAKE_OPENCODE_VERSION='opencode v2.0.22' open_install
+    assert_eq "OpenCode $open_option preserves an unrelated symlink at the V2 path" "$SYMLINK_TARGET" "$(readlink "$OPEN2_INSTALL_LINK")"
+    rm "$OPEN2_INSTALL_LINK"
 done
 
 OPEN_INSTALL_HOME="$TEST_ROOT/open-disabled-home"
@@ -557,9 +610,13 @@ OPEN_INSTALL_FILE="$OPEN_INSTALL_HOME/.config/opencode/plugins/session-tracker.j
 FAKE_OPENCODE_OPTION=off open_install
 assert_eq "OpenCode off does not create a plugin directory" false \
     "$([ -e "$OPEN_INSTALL_HOME/.config/opencode" ] && echo true || echo false)"
-FAKE_OPENCODE_VERSION='opencode v2.0.22' open_install
-assert_eq "OpenCode V2 does not create a plugin directory" false \
+FAKE_OPENCODE_VERSION='3.0.0' open_install
+assert_eq "an unrecognized OpenCode version does not create a plugin directory" false \
     "$([ -e "$OPEN_INSTALL_HOME/.config/opencode" ] && echo true || echo false)"
+FAKE_OPENCODE_VERSION='opencode v2.0.22' open_install
+assert_eq "OpenCode V2 installs its tracker into a fresh home" "$ROOT_DIR/hooks/opencode2" \
+    "$(readlink "$OPEN_INSTALL_HOME/.config/opencode/plugins/assistant-resurrect")"
+rm -rf "$OPEN_INSTALL_HOME/.config/opencode"
 
 # NO_JQ_BIN contains only the entrypoint's shell utilities, no OpenCode binary.
 HOME="$OPEN_INSTALL_HOME" PATH="$NO_JQ_BIN" \
@@ -747,6 +804,87 @@ if [ ! -e "$signal_state" ]; then
 else
     fail "OpenCode plugin removes state before signal termination"
 fi
+
+# The OpenCode 2 tracker reads the displayed session from the TUI's router. A
+# fake context drives the decisions the real-binary contract test cannot reach
+# without a second pane: tab switches, subagent and archived sessions, session
+# data that has not loaded yet, a file removed behind its back, and disposal.
+OPEN2_STATE="$TEST_ROOT/open2 state"
+MODULE2_COPY="$TEST_ROOT/opencode2-tui.mjs"
+cp "$ROOT_DIR/hooks/opencode2/tui.js" "$MODULE2_COPY"
+MODULE2_URL=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$MODULE2_COPY")
+node_result=$(MODULE_URL="$MODULE2_URL" TMUX_ASSISTANT_RESURRECT_DIR="$OPEN2_STATE" \
+    PATH="$FAKE_BIN:$PATH" node --input-type=module <<'NODE'
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+const plugin = (await import(process.env.MODULE_URL)).default;
+const dir = process.env.TMUX_ASSISTANT_RESURRECT_DIR;
+const file = `${dir}/opencode-${process.pid}.json`;
+const current = () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")).session_id : "<none>");
+const sessions = {
+  top: { id: "top", location: { directory: "/work" } },
+  other: { id: "other" },
+  child: { id: "child", parentID: "top" },
+  archived: { id: "archived", time: { archived: 1 } },
+};
+let route = { type: "home" };
+let loaded = true;
+let poll;
+const context = {
+  ui: { router: { current: () => route } },
+  data: {
+    session: {
+      get: (id) => (loaded ? sessions[id] : undefined),
+      root: (id) => {
+        let session = sessions[id];
+        while (session?.parentID) session = sessions[session.parentID];
+        return session?.id;
+      },
+    },
+    listen: (callback) => {
+      poll = callback;
+      return () => {};
+    },
+  },
+  location: { directory: "/context" },
+};
+const show = (sessionID) => {
+  route = sessionID ? { type: "session", sessionID } : { type: "home" };
+  poll();
+  return current();
+};
+// A predecessor with this PID left a file behind; the TUI starts on the home screen.
+mkdirSync(dir, { recursive: true });
+writeFileSync(file, JSON.stringify({ session_id: "predecessor" }));
+const dispose = plugin.setup(context);
+const out = [current()];
+out.push(show("top"));
+out.push(`${(statSync(file).mode & 0o777).toString(8)}:${JSON.parse(readFileSync(file, "utf8")).cwd}`);
+out.push(show("other"));
+out.push(show("child"));
+out.push(show("archived"));
+out.push(show("top"));
+unlinkSync(file);
+out.push(show("top"));
+out.push(show(null));
+// Session data not loaded: a child must not be recorded while it may still load...
+loaded = false;
+out.push(show("child"));
+loaded = true;
+out.push(show("child"));
+// ...and neither is anything else unverified, however long the data stays away.
+show(null);
+loaded = false;
+show("other");
+show("other");
+out.push(show("other"));
+dispose();
+out.push(current());
+out.push(String(process.listenerCount("SIGINT") + process.listenerCount("SIGTERM")));
+console.log(out.join("\t"));
+NODE
+)
+assert_eq "OpenCode 2 tracker follows the displayed session" \
+    $'<none>\ttop\t600:/work\tother\ttop\t<none>\ttop\ttop\t<none>\t<none>\ttop\t<none>\t<none>\t0' "$node_result"
 
 # SQLite read-only URIs must encode valid filename metacharacters.
 DB_ROOT="$TEST_ROOT/db?#files"
