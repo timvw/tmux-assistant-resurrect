@@ -272,6 +272,13 @@ cat >"$MOCK_BIN/omp" <<'MOCK_OMP'
 [ -n "${MOCK_OMP_HELP:-}" ] || exit 1
 printf '%s\n' "$MOCK_OMP_HELP"
 MOCK_OMP
+# A second, older omp that only a replayed PATH resolves.
+mkdir -p "$SANDBOX/old-omp-bin"
+cat >"$SANDBOX/old-omp-bin/omp" <<'MOCK_OLD_OMP'
+#!/usr/bin/env bash
+printf '%s\n' '  -r, --resume=<value>    Resume a session'
+MOCK_OLD_OMP
+chmod +x "$SANDBOX/old-omp-bin/omp"
 
 chmod +x "$MOCK_BIN/sleep" "$MOCK_BIN/tmux" "$MOCK_BIN/claude" "$MOCK_BIN/ps" "$MOCK_BIN/omp"
 
@@ -911,7 +918,30 @@ run_restore
 assert_contains "@assistant-resurrect-omp-restore off keeps --resume" "$(cat "$TMUX_LOG")" \
 	"command omp --resume '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e'"
 assert_not_contains "@assistant-resurrect-omp-restore off never sends --restore" "$(cat "$TMUX_LOG")" "--restore"
-unset MOCK_OMP_RESTORE MOCK_OMP_HELP
+unset MOCK_OMP_RESTORE
+
+# With PATH in @assistant-resurrect-capture-env the pane runs whichever omp the
+# saved PATH resolves, which need not be the one the hook sees.
+export MOCK_PANES='%15|0|0|omp-test
+%16|0|0|omp-oldpath'
+export MOCK_SHELLS='%15|bash
+%16|bash'
+export MOCK_CAPTURE_ENV='PATH'
+OLD_OMP_PATH="$SANDBOX/old-omp-bin:/usr/bin:/bin"
+jq -n --arg old_path "$OLD_OMP_PATH" '{sessions:[{
+  pane:"omp-test:0.0", session_name:"omp-test", window_index:"0", pane_index:"0",
+  tool:"omp", session_id:"01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e", cwd:"", cli_args:"", env:{}
+},{
+  pane:"omp-oldpath:0.0", session_name:"omp-oldpath", window_index:"0", pane_index:"0",
+  tool:"omp", session_id:"01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa12", cwd:"", cli_args:"", env:{PATH:$old_path}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_contains "OMP pane without a replayed PATH still gets --restore" "$(cat "$TMUX_LOG")" \
+	"omp --restore '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e'"
+assert_contains "OMP pane whose replayed PATH resolves an older omp keeps --resume" "$(cat "$TMUX_LOG")" \
+	"omp --resume '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa12'"
+export MOCK_CAPTURE_ENV=''
+unset MOCK_OMP_HELP
 
 echo "== malformed entries are isolated =="
 export MOCK_PANES='%1|0|0|bad-env

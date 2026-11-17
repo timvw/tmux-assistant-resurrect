@@ -726,6 +726,12 @@ for omp_help in - "$OMP_HELP_FIXTURE"; do
 		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --profile work --goal ship-it")"
 	assert_eq "omp ($omp_help_label): one-time imports are not replayed" "--profile work" \
 		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --from-claude --from-codex --profile work")"
+	# The imports are booleans: the word after one is the prompt, and dropping
+	# it would promote a flag-looking word inside the prompt to a real flag.
+	assert_eq "omp ($omp_help_label): a prompt after an import never becomes a flag" "" \
+		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --from-claude Audit --auto-approve")"
+	assert_eq "omp ($omp_help_label): flags before an import and its prompt survive" "--profile work" \
+		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --profile work --from-codex Audit --auto-approve")"
 done
 assert_eq "omp: session ID is read from --restore <id>" "$OMP_SID" \
 	"$(get_omp_session 1 "omp --profile work --restore $OMP_SID" "$SANDBOX" "")"

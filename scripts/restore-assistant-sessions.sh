@@ -127,23 +127,55 @@ _valid_delay "$LAUNCH_STAGGER" || LAUNCH_STAGGER=1
 # degrades to the plain `--resume` every version accepts.
 # `@assistant-resurrect-omp-restore 'off'` keeps `--resume` unconditionally, for
 # anyone who does not want interrupted tool calls re-issued unattended.
-# Resolved once, into a global rather than through $(): every omp pane shares
-# the answer, and `omp --help` is not free.
+# Answers in OMP_RESUME_FLAG, a global rather than $(), so the probe result is
+# kept: every omp pane shares it, and `omp --help` is not free.
+#
+# $1 is the PATH the pane is replayed with when @assistant-resurrect-capture-env
+# carries one. That PATH, not the hook's, decides which omp the pane runs, so a
+# different one is probed on its own and never borrows the hook's answer.
 OMP_RESUME_FLAG=""
+_OMP_RESTORE_ENABLED=""
+_OMP_FLAG_HOOK_PATH=""
+_OMP_FLAG_REPLAY_PATH=""
+_OMP_FLAG_REPLAY_PATH_KEY=""
+# Matched from a variable, not a pipe: `grep -q` closing a pipe early would
+# read as "unsupported" under pipefail.
+_omp_help_lists_restore() {
+	grep -qE -- '(^|[^[:alnum:]-])--restore([^[:alnum:]-]|$)' <<<"$1"
+}
 _omp_resume_flag() {
-	[ -z "$OMP_RESUME_FLAG" ] || return 0
+	local replay_path="${1:-}" setting help
 	OMP_RESUME_FLAG="--resume"
-	local setting help
-	setting=$(tmux show-option -gqv @assistant-resurrect-omp-restore 2>/dev/null || true)
-	case "$setting" in
-		off | no | false | 0) return 0 ;;
-	esac
-	# Matched from a variable, not a pipe: `grep -q` closing a pipe early would
-	# read as "unsupported" under pipefail.
-	help=$(_tool_help omp)
-	if grep -qE -- '(^|[^[:alnum:]-])--restore([^[:alnum:]-]|$)' <<<"$help"; then
-		OMP_RESUME_FLAG="--restore"
+	if [ -z "$_OMP_RESTORE_ENABLED" ]; then
+		_OMP_RESTORE_ENABLED=1
+		setting=$(tmux show-option -gqv @assistant-resurrect-omp-restore 2>/dev/null || true)
+		case "$setting" in
+			off | no | false | 0) _OMP_RESTORE_ENABLED=0 ;;
+		esac
 	fi
+	[ "$_OMP_RESTORE_ENABLED" -eq 1 ] || return 0
+
+	if [ -n "$replay_path" ] && [ "$replay_path" != "$PATH" ]; then
+		if [ -z "$_OMP_FLAG_REPLAY_PATH" ] || [ "$replay_path" != "$_OMP_FLAG_REPLAY_PATH_KEY" ]; then
+			_OMP_FLAG_REPLAY_PATH_KEY="$replay_path"
+			_OMP_FLAG_REPLAY_PATH="--resume"
+			help=$(env PATH="$replay_path" omp --help 2>/dev/null) || help=""
+			if _omp_help_lists_restore "$help"; then
+				_OMP_FLAG_REPLAY_PATH="--restore"
+			fi
+		fi
+		OMP_RESUME_FLAG="$_OMP_FLAG_REPLAY_PATH"
+		return 0
+	fi
+
+	if [ -z "$_OMP_FLAG_HOOK_PATH" ]; then
+		_OMP_FLAG_HOOK_PATH="--resume"
+		help=$(_tool_help omp)
+		if _omp_help_lists_restore "$help"; then
+			_OMP_FLAG_HOOK_PATH="--restore"
+		fi
+	fi
+	OMP_RESUME_FLAG="$_OMP_FLAG_HOOK_PATH"
 	return 0
 }
 
@@ -335,6 +367,7 @@ while read -r entry; do
 	nu_env=""
 	redacted_env_prefix=""
 	redacted_nu_env=""
+	replay_path=""
 	if [ -n "$env_json" ] && [ "$env_json" != "null" ] && [ "$env_json" != "{}" ]; then
 		capture_env=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
 		reglob=""
@@ -353,6 +386,8 @@ while read -r entry; do
 			fi
 			val=$(printf '%s\n' "$env_json" | jq -r --arg k "$var" '.[$k] // empty')
 			if [ -n "$val" ]; then
+				# The executable the pane resolves, when PATH is replayed.
+				[ "$var" != "PATH" ] || replay_path="$val"
 				env_prefix="${env_prefix}${var}=$(shell_quote "$pane_cmd" "$val") "
 				nu_env="${nu_env}${var}: $(shell_quote "$pane_cmd" "$val"), "
 				redacted_env_prefix="${redacted_env_prefix}${var}=*** "
@@ -475,7 +510,7 @@ while read -r entry; do
 		# --continue would also re-pick a different session than the id we
 		# saved). Current saves strip most of these; sidecars written before
 		# that still carry them.
-		_omp_resume_flag
+		_omp_resume_flag "$replay_path"
 		omp_resume_flag="$OMP_RESUME_FLAG"
 		case " ${cli_args} " in
 			*" --continue "* | *" -c "* | *" --fork "* | *" --fork="* | \
