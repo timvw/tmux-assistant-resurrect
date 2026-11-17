@@ -871,7 +871,7 @@ loaded = false;
 out.push(show("child"));
 loaded = true;
 out.push(show("child"));
-// ...but a host that never loads it still gets the displayed id after a few polls.
+// ...and neither is anything else unverified, however long the data stays away.
 show(null);
 loaded = false;
 show("other");
@@ -884,7 +884,7 @@ console.log(out.join("\t"));
 NODE
 )
 assert_eq "OpenCode 2 tracker follows the displayed session" \
-    $'<none>\ttop\t600:/work\tother\ttop\t<none>\ttop\ttop\t<none>\t<none>\ttop\tother\t<none>\t0' "$node_result"
+    $'<none>\ttop\t600:/work\tother\ttop\t<none>\ttop\ttop\t<none>\t<none>\ttop\t<none>\t<none>\t0' "$node_result"
 
 # SQLite read-only URIs must encode valid filename metacharacters.
 DB_ROOT="$TEST_ROOT/db?#files"

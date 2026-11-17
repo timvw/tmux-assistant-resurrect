@@ -66,7 +66,6 @@ export default {
     };
 
     let recorded = null;
-    let unloaded = { id: null, polls: 0 };
     const forget = () => {
       if (recorded === null) return;
       recorded = null;
@@ -91,14 +90,9 @@ export default {
         // Session data not loaded yet; the next poll retries
       }
       // Until the session's data is loaded, a subagent session cannot be told from a top-level
-      // one, and recording it would let a save in that window resume a child. Wait a few polls
-      // for the data, then record the displayed id anyway: on a release that never loads it, an
-      // unverified id still beats the cwd-scoped database guess.
-      if (!session && route.sessionID !== recorded) {
-        if (unloaded.id !== route.sessionID) unloaded = { id: route.sessionID, polls: 0 };
-        unloaded.polls += 1;
-        if (unloaded.polls < 3) return;
-      }
+      // one, and the save hook trusts this file ahead of the database, which does exclude
+      // children. Record nothing unverified; the next poll retries.
+      if (!session) return;
       // Subagent (child) and archived sessions are not resumable top-level conversations, and
       // scripts/py/opencode_db.py excludes them too. Viewing a child keeps its root on record.
       let sessionID = route.sessionID;

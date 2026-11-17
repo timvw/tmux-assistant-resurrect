@@ -119,7 +119,12 @@ if wait_for "tracker starts in the TUI" 150 test -d "$STATE_DIR"; then
 	assert_eq "no state file while the TUI shows the home screen" 0 "$state_files"
 fi
 
-first=$(api POST /api/session '{"title":"contract first"}' | jq -r '.data.id // .id')
+# Where the server places a session created this way has differed between 2.x
+# releases (2.0.22 uses the service's own directory, not the one in the query),
+# so the directory to expect is the one the server reports for the session.
+first_json=$(api POST /api/session '{"title":"contract first"}')
+first=$(jq -r '.data.id // .id' <<<"$first_json")
+first_dir=$(jq -r '(.data // .).location.directory // empty' <<<"$first_json")
 second=$(api POST /api/session '{"title":"contract second"}' | jq -r '.data.id // .id')
 case "$first$second" in
 *ses_*ses_*) pass "created two sessions over the local API" ;;
@@ -138,11 +143,10 @@ if wait_for "tracker records the session the TUI opened" 150 has_sid "$pane_pid"
 	file=$(state_file_for "$pane_pid")
 	assert_eq "state file records tool" opencode "$(jq -r .tool "$file")"
 	assert_eq "state file records the process PID" "$pane_pid" "$(jq -r .pid "$file")"
-	assert_eq "state file records the session's directory" "$ROOT/home/project" "$(jq -r .cwd "$file")"
-	# The directory comes from the host's own session data, which has differed
-	# between 2.x releases. Show what this one reported when the check fails.
-	if [ "$(jq -r .cwd "$file")" != "$ROOT/home/project" ]; then
-		jq '{cwd, session, init: .init.directory}' "$file" | sed 's/^/        /'
+	if [ -n "$first_dir" ]; then
+		assert_eq "state file records the session's directory" "$first_dir" "$(jq -r .cwd "$file")"
+	else
+		fail "the server reports a directory for the session it created" "$first_json"
 	fi
 	assert_eq "state file captures TMUX_PANE" "%contract" "$(jq -r .env.tmux_pane "$file")"
 	mode=$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file")

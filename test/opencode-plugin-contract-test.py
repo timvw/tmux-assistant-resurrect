@@ -219,7 +219,10 @@ def run(v1, v2, root):
         wait_for(lambda: request("/session"), lambda value: isinstance(value, list), "V1 ready beside the V2 tracker")
         info = request("/session", "POST", {"title": "contract mixed"})
         assert info["id"], "V1 could not create a session beside the V2 tracker"
-    assert not list(Path(env["TMUX_ASSISTANT_RESURRECT_DIR"]).glob("opencode-*.json")), "V1 loaded a tracker it should not see"
+        # Checked while the server runs: a tracker that did load removes its
+        # own file on shutdown. It polls once a second, so give it two polls.
+        time.sleep(2.5)
+        assert not list(Path(env["TMUX_ASSISTANT_RESURRECT_DIR"]).glob("opencode-*.json")), "V1 loaded a tracker it should not see"
     print("PASS: V1 starts and creates a session with the V2 tracker directory present, and loads no tracker")
 
 
