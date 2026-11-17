@@ -805,6 +805,87 @@ else
     fail "OpenCode plugin removes state before signal termination"
 fi
 
+# The OpenCode 2 tracker reads the displayed session from the TUI's router. A
+# fake context drives the decisions the real-binary contract test cannot reach
+# without a second pane: tab switches, subagent and archived sessions, session
+# data that has not loaded yet, a file removed behind its back, and disposal.
+OPEN2_STATE="$TEST_ROOT/open2 state"
+MODULE2_COPY="$TEST_ROOT/opencode2-tui.mjs"
+cp "$ROOT_DIR/hooks/opencode2/tui.js" "$MODULE2_COPY"
+MODULE2_URL=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$MODULE2_COPY")
+node_result=$(MODULE_URL="$MODULE2_URL" TMUX_ASSISTANT_RESURRECT_DIR="$OPEN2_STATE" \
+    PATH="$FAKE_BIN:$PATH" node --input-type=module <<'NODE'
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+const plugin = (await import(process.env.MODULE_URL)).default;
+const dir = process.env.TMUX_ASSISTANT_RESURRECT_DIR;
+const file = `${dir}/opencode-${process.pid}.json`;
+const current = () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")).session_id : "<none>");
+const sessions = {
+  top: { id: "top", location: { directory: "/work" } },
+  other: { id: "other" },
+  child: { id: "child", parentID: "top" },
+  archived: { id: "archived", time: { archived: 1 } },
+};
+let route = { type: "home" };
+let loaded = true;
+let poll;
+const context = {
+  ui: { router: { current: () => route } },
+  data: {
+    session: {
+      get: (id) => (loaded ? sessions[id] : undefined),
+      root: (id) => {
+        let session = sessions[id];
+        while (session?.parentID) session = sessions[session.parentID];
+        return session?.id;
+      },
+    },
+    listen: (callback) => {
+      poll = callback;
+      return () => {};
+    },
+  },
+  location: { directory: "/context" },
+};
+const show = (sessionID) => {
+  route = sessionID ? { type: "session", sessionID } : { type: "home" };
+  poll();
+  return current();
+};
+// A predecessor with this PID left a file behind; the TUI starts on the home screen.
+mkdirSync(dir, { recursive: true });
+writeFileSync(file, JSON.stringify({ session_id: "predecessor" }));
+const dispose = plugin.setup(context);
+const out = [current()];
+out.push(show("top"));
+out.push(`${(statSync(file).mode & 0o777).toString(8)}:${JSON.parse(readFileSync(file, "utf8")).cwd}`);
+out.push(show("other"));
+out.push(show("child"));
+out.push(show("archived"));
+out.push(show("top"));
+unlinkSync(file);
+out.push(show("top"));
+out.push(show(null));
+// Session data not loaded: a child must not be recorded while it may still load...
+loaded = false;
+out.push(show("child"));
+loaded = true;
+out.push(show("child"));
+// ...but a host that never loads it still gets the displayed id after a few polls.
+show(null);
+loaded = false;
+show("other");
+show("other");
+out.push(show("other"));
+dispose();
+out.push(current());
+out.push(String(process.listenerCount("SIGINT") + process.listenerCount("SIGTERM")));
+console.log(out.join("\t"));
+NODE
+)
+assert_eq "OpenCode 2 tracker follows the displayed session" \
+    $'<none>\ttop\t600:/work\tother\ttop\t<none>\ttop\ttop\t<none>\t<none>\ttop\tother\t<none>\t0' "$node_result"
+
 # SQLite read-only URIs must encode valid filename metacharacters.
 DB_ROOT="$TEST_ROOT/db?#files"
 mkdir -p "$DB_ROOT/codex"

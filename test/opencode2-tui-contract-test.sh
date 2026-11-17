@@ -139,6 +139,11 @@ if wait_for "tracker records the session the TUI opened" 150 has_sid "$pane_pid"
 	assert_eq "state file records tool" opencode "$(jq -r .tool "$file")"
 	assert_eq "state file records the process PID" "$pane_pid" "$(jq -r .pid "$file")"
 	assert_eq "state file records the session's directory" "$ROOT/home/project" "$(jq -r .cwd "$file")"
+	# The directory comes from the host's own session data, which has differed
+	# between 2.x releases. Show what this one reported when the check fails.
+	if [ "$(jq -r .cwd "$file")" != "$ROOT/home/project" ]; then
+		jq '{cwd, session, init: .init.directory}' "$file" | sed 's/^/        /'
+	fi
 	assert_eq "state file captures TMUX_PANE" "%contract" "$(jq -r .env.tmux_pane "$file")"
 	mode=$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file")
 	assert_eq "state file is private" 600 "$mode"
