@@ -1124,7 +1124,9 @@ get_omp_session() {
 	local pane_tty="${4:-}"
 
 	local sid
-	sid=$(_arg_value "$args" --resume -r --session)
+	# --restore names the session the same way --resume does, and is what a
+	# restored pane runs under on an omp that supports it.
+	sid=$(_arg_value "$args" --resume -r --session --restore)
 	if [ -n "$sid" ]; then
 		echo "$sid"
 		return
@@ -2319,7 +2321,12 @@ SESSION_FLAG_PATTERN_claude='^--(resume|continue|session-id|fork-session|from-pr
 SESSION_FLAG_PATTERN_copilot='^--(connect|continue|interactive|name|prompt|resume|session-id)$'
 SESSION_FLAG_PATTERN_opencode='^--session$'
 SESSION_FLAG_PATTERN_pi='^--(session|resume|continue|fork)$'
-SESSION_FLAG_PATTERN_omp='^--(session|resume|continue|fork)$'
+# omp: --restore is --resume plus "go on with the interrupted turn", and is what
+# a restored pane runs under -- left in, it would be replayed beside the fresh
+# one on the next restore. --goal is launch-only: omp rejects it next to
+# --resume/--restore. (The --from-* imports are booleans and are stripped as
+# such in extract_cli_args -- see SESSION_BOOL_FLAGS_omp.)
+SESSION_FLAG_PATTERN_omp='^--(session|resume|restore|continue|fork|goal)$'
 SESSION_FLAG_PATTERN_agy='^--(conversation|continue|new-project)$'
 SESSION_FLAG_PATTERN_grok='^--(resume|continue|session-id|fork-session)$'
 SESSION_FLAG_PATTERN_cursor='^--(resume|continue|new-session-id)$'
@@ -2353,8 +2360,17 @@ SESSION_FLAGS_FALLBACK_pi="--continue -c
 --session"
 SESSION_FLAGS_FALLBACK_omp="--continue -c
 --fork
+--goal
+--restore
 --resume -r
 --session"
+# Launch-only selectors that never take a value. The generic pass above strips
+# `--flag` together with a following non-option word, which is right for
+# `--resume <id>` but would eat the first word of a prompt after a boolean:
+# `omp --from-claude "Audit --auto-approve"` would lose `Audit`, and with it the
+# positional boundary that keeps `--auto-approve` from being replayed as a flag.
+# omp's one-time session imports must not run again on a resume.
+SESSION_BOOL_FLAGS_omp="--from-claude --from-codex"
 SESSION_FLAGS_FALLBACK_agy="--conversation
 --continue -c
 --new-project"
@@ -2565,6 +2581,13 @@ extract_cli_args() {
 	if [ "$tool" = "agy" ]; then
 		args=$(python3 "$PY_DIR/agy_session.py" --replay "$pid" "$raw_args" "$(_discover_option_value_flags agy)")
 	fi
+
+	# Strip value-less launch selectors on their own, leaving any following
+	# word in place as the positional it is.
+	local bool_flags_var="SESSION_BOOL_FLAGS_${tool}" bool_flag
+	for bool_flag in ${!bool_flags_var:-}; do
+		args=$(_strip_bool_opt "$bool_flag" "$args")
+	done
 
 	# Strip tool-specific session/resume flags.
 	local pattern_var="SESSION_FLAG_PATTERN_${tool}"

@@ -698,6 +698,46 @@ comma_ps=$(grep -rnE -- '[a-z]=,[a-z]+=' "$REPO_DIR/scripts" "$REPO_DIR/hooks" "
 	grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
 assert_eq "no ps -o list joins an empty-header field with a comma" "" "$comma_ps"
 
+# --- a restored omp pane round-trips ------------------------------------------
+# Restore launches `omp --restore <id>` on an omp that supports it. The next
+# save must read the ID back out of that argv and must not keep the flag, or the
+# following restore replays a stale `--restore` beside the fresh one. Checked
+# with no --help (static fallbacks) and with a --help that lists the flag as
+# value-taking, which is what makes _drop_positional_args keep the ID with it.
+OMP_SID=01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e
+OMP_HELP_FIXTURE='FLAGS
+  -c, --continue          Continue previous session
+  -r, --resume=<value>    Resume a session
+      --restore=<value>   Resume a session, then go on with the interrupted turn
+      --goal=<value>      Start with a goal
+      --profile=<value>   Use a named profile'
+for omp_help in - "$OMP_HELP_FIXTURE"; do
+	omp_help_label="no --help"
+	[ "$omp_help" = "-" ] || omp_help_label="--help lists it"
+	assert_eq "omp ($omp_help_label): --restore <id> is not saved for replay" "" \
+		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --restore $OMP_SID")"
+	assert_eq "omp ($omp_help_label): --restore=<id> is not saved for replay" "" \
+		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --restore=$OMP_SID")"
+	assert_eq "omp ($omp_help_label): flags around --restore survive" "--profile work" \
+		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --profile work --restore $OMP_SID")"
+	assert_eq "omp ($omp_help_label): bare --restore beside --session is stripped" "--profile work" \
+		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --profile work --session $OMP_SID --restore")"
+	assert_eq "omp ($omp_help_label): launch-only --goal is not replayed into a resume" "--profile work" \
+		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --profile work --goal ship-it")"
+	assert_eq "omp ($omp_help_label): one-time imports are not replayed" "--profile work" \
+		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --from-claude --from-codex --profile work")"
+	# The imports are booleans: the word after one is the prompt, and dropping
+	# it would promote a flag-looking word inside the prompt to a real flag.
+	assert_eq "omp ($omp_help_label): a prompt after an import never becomes a flag" "" \
+		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --from-claude Audit --auto-approve")"
+	assert_eq "omp ($omp_help_label): flags before an import and its prompt survive" "--profile work" \
+		"$(_TOOL_HELP_omp="$omp_help"; extract_cli_args omp "omp --profile work --from-codex Audit --auto-approve")"
+done
+assert_eq "omp: session ID is read from --restore <id>" "$OMP_SID" \
+	"$(get_omp_session 1 "omp --profile work --restore $OMP_SID" "$SANDBOX" "")"
+assert_eq "omp: session ID is read from --restore=<id>" "$OMP_SID" \
+	"$(get_omp_session 1 "omp --restore=$OMP_SID" "$SANDBOX" "")"
+
 # --- repeated options are stripped completely ---------------------------------
 # The strip patterns consume the separator on both sides, so with /g the
 # separator an adjacent repeat needs has already been eaten and only every

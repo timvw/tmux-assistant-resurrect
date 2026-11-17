@@ -200,6 +200,7 @@ show-option)
 	@assistant-resurrect-pin-state-root) printf '%s\n' "${MOCK_PIN_STATE_ROOT:-}" ;;
 	@assistant-resurrect-codex-pin-state-root) printf '%s\n' "${MOCK_CODEX_PIN_STATE_ROOT:-}" ;;
 	@assistant-resurrect-relaunch) printf '%s\n' "${MOCK_RELAUNCH_ENABLED:-on}" ;;
+	@assistant-resurrect-omp-restore) printf '%s\n' "${MOCK_OMP_RESTORE:-}" ;;
 	@assistant-resurrect-relaunch-allow-file) printf '%s\n' "${MOCK_VOUCHER:-}" ;;
 	esac
 	;;
@@ -263,7 +264,23 @@ if [ -n "${MOCK_PS_SNAPSHOT+x}" ]; then
 fi
 MOCK_PS
 
-chmod +x "$MOCK_BIN/sleep" "$MOCK_BIN/tmux" "$MOCK_BIN/claude" "$MOCK_BIN/ps"
+# Restore asks `omp --help` whether --restore exists. Always shadow a developer's
+# real omp so the answer comes from the fixture, never from the machine.
+cat >"$MOCK_BIN/omp" <<'MOCK_OMP'
+#!/usr/bin/env bash
+[ -n "${MOCK_OMP_HELP_LOG:-}" ] && printf '%s\n' "$*" >>"$MOCK_OMP_HELP_LOG"
+[ -n "${MOCK_OMP_HELP:-}" ] || exit 1
+printf '%s\n' "$MOCK_OMP_HELP"
+MOCK_OMP
+# A second, older omp that only a replayed PATH resolves.
+mkdir -p "$SANDBOX/old-omp-bin"
+cat >"$SANDBOX/old-omp-bin/omp" <<'MOCK_OLD_OMP'
+#!/usr/bin/env bash
+printf '%s\n' '  -r, --resume=<value>    Resume a session'
+MOCK_OLD_OMP
+chmod +x "$SANDBOX/old-omp-bin/omp"
+
+chmod +x "$MOCK_BIN/sleep" "$MOCK_BIN/tmux" "$MOCK_BIN/claude" "$MOCK_BIN/ps" "$MOCK_BIN/omp"
 
 export PATH="$MOCK_BIN:$PATH"
 export TMUX_RESURRECT_DIR="$RESURRECT_DIR"
@@ -821,6 +838,110 @@ run_restore
 assert_eq "Cursor restore succeeds" "0" "$RESTORE_STATUS"
 assert_contains "Cursor resumes the exact session with saved invocation flags" "$(cat "$TMUX_LOG")" \
 	"command agent '--mode' 'plan' '--model' 'auto' '--sandbox' 'enabled' --resume '750b1c55-f1b2-4ff1-804e-9c38d1b2c7e2'"
+
+echo "== Oh My Pi continues an interrupted turn instead of only reopening =="
+# The shape of `omp --help` from 18.10.x on, and of the builds before it.
+OMP_HELP_WITH_RESTORE='USAGE
+  $ omp [MESSAGES...] [FLAGS]
+
+FLAGS
+  -c, --continue          Continue previous session
+  -r, --resume=<value>    Resume a session (by ID prefix, path, or picker if omitted)
+      --restore=<value>   Resume a session as --resume does, then go on with what
+                          its last process left unfinished
+      --profile=<value>   Use a named profile'
+OMP_HELP_WITHOUT_RESTORE='USAGE
+  $ omp [MESSAGES...] [FLAGS]
+
+FLAGS
+  -c, --continue          Continue previous session
+  -r, --resume=<value>    Resume a session (by ID prefix, path, or picker if omitted)
+      --restore-defaults  Not the flag we are looking for
+      --profile=<value>   Use a named profile'
+export MOCK_PANES='%15|0|0|omp-test
+%16|0|0|omp-continue
+%17|0|0|omp-import
+%18|0|0|omp-mode'
+export MOCK_SHELLS='%15|bash
+%16|bash
+%17|bash
+%18|bash'
+export MOCK_CAPTURE_ENV=''
+jq -n '{sessions:[{
+  pane:"omp-test:0.0", session_name:"omp-test", window_index:"0", pane_index:"0",
+  tool:"omp", session_id:"01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e", cwd:"", cli_args:"", env:{}
+},{
+  pane:"omp-continue:0.0", session_name:"omp-continue", window_index:"0", pane_index:"0",
+  tool:"omp", session_id:"01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0f", cwd:"", cli_args:"--profile work --continue", env:{}
+},{
+  pane:"omp-import:0.0", session_name:"omp-import", window_index:"0", pane_index:"0",
+  tool:"omp", session_id:"01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa10", cwd:"", cli_args:"--from-claude", env:{}
+},{
+  pane:"omp-mode:0.0", session_name:"omp-mode", window_index:"0", pane_index:"0",
+  tool:"omp", session_id:"01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa11", cwd:"", cli_args:"--mode=json", env:{}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+export MOCK_OMP_HELP="$OMP_HELP_WITH_RESTORE"
+export MOCK_OMP_HELP_LOG="$SANDBOX/omp-help.log"
+: >"$MOCK_OMP_HELP_LOG"
+run_restore
+assert_eq "OMP restore succeeds" "0" "$RESTORE_STATUS"
+assert_contains "OMP reopens with --restore so a killed turn is replayed" "$(cat "$TMUX_LOG")" \
+	"command omp --restore '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e'"
+assert_contains "OMP falls back to --resume when the launch-only --continue is replayed" "$(cat "$TMUX_LOG")" \
+	"command omp '--profile' 'work' '--continue' --resume '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0f'"
+assert_contains "OMP falls back to --resume for an import selector --restore refuses" "$(cat "$TMUX_LOG")" \
+	"command omp '--from-claude' --resume '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa10'"
+assert_contains "OMP falls back to --resume for a non-interactive --mode=<value>" "$(cat "$TMUX_LOG")" \
+	"command omp '--mode=json' --resume '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa11'"
+assert_eq "omp --help is probed once for all omp panes" "1" \
+	"$(grep -c -- '--help' "$MOCK_OMP_HELP_LOG" | tr -d '[:space:]')"
+unset MOCK_OMP_HELP_LOG
+
+# An omp older than 18.10.x rejects --restore as an unknown flag and the pane
+# would not come back at all. A look-alike flag must not count as support.
+export MOCK_OMP_HELP="$OMP_HELP_WITHOUT_RESTORE"
+run_restore
+assert_contains "OMP without --restore in --help keeps --resume" "$(cat "$TMUX_LOG")" \
+	"command omp --resume '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e'"
+assert_not_contains "OMP without --restore in --help never sends it" "$(cat "$TMUX_LOG")" "--restore"
+
+# The hook's PATH may not resolve omp even though the pane's shell does.
+export MOCK_OMP_HELP=''
+run_restore
+assert_contains "OMP with no --help output keeps --resume" "$(cat "$TMUX_LOG")" \
+	"command omp --resume '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e'"
+assert_not_contains "OMP with no --help output never sends --restore" "$(cat "$TMUX_LOG")" "--restore"
+
+export MOCK_OMP_HELP="$OMP_HELP_WITH_RESTORE"
+export MOCK_OMP_RESTORE='off'
+run_restore
+assert_contains "@assistant-resurrect-omp-restore off keeps --resume" "$(cat "$TMUX_LOG")" \
+	"command omp --resume '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e'"
+assert_not_contains "@assistant-resurrect-omp-restore off never sends --restore" "$(cat "$TMUX_LOG")" "--restore"
+unset MOCK_OMP_RESTORE
+
+# With PATH in @assistant-resurrect-capture-env the pane runs whichever omp the
+# saved PATH resolves, which need not be the one the hook sees.
+export MOCK_PANES='%15|0|0|omp-test
+%16|0|0|omp-oldpath'
+export MOCK_SHELLS='%15|bash
+%16|bash'
+export MOCK_CAPTURE_ENV='PATH'
+OLD_OMP_PATH="$SANDBOX/old-omp-bin:/usr/bin:/bin"
+jq -n --arg old_path "$OLD_OMP_PATH" '{sessions:[{
+  pane:"omp-test:0.0", session_name:"omp-test", window_index:"0", pane_index:"0",
+  tool:"omp", session_id:"01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e", cwd:"", cli_args:"", env:{}
+},{
+  pane:"omp-oldpath:0.0", session_name:"omp-oldpath", window_index:"0", pane_index:"0",
+  tool:"omp", session_id:"01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa12", cwd:"", cli_args:"", env:{PATH:$old_path}
+}]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_contains "OMP pane without a replayed PATH still gets --restore" "$(cat "$TMUX_LOG")" \
+	"omp --restore '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa0e'"
+assert_contains "OMP pane whose replayed PATH resolves an older omp keeps --resume" "$(cat "$TMUX_LOG")" \
+	"omp --resume '01a1d5c2-1e9c-73cd-9f7f-a5e883d0fa12'"
+export MOCK_CAPTURE_ENV=''
+unset MOCK_OMP_HELP
 
 echo "== malformed entries are isolated =="
 export MOCK_PANES='%1|0|0|bad-env
