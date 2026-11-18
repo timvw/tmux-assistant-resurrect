@@ -27,8 +27,9 @@
 
 - **Running state is not preserved**: Assistants restart with their conversation
   history loaded, but any in-flight tool calls or pending operations are lost.
-  Oh My Pi is the exception: with an omp that supports `--restore`, the
-  interrupted turn and its pending tool calls are continued (see
+  Oh My Pi is the exception: with an omp that supports `--restore`, and unless
+  `@assistant-resurrect-omp-restore` is `off`, the interrupted turn and its
+  pending tool calls are continued (see
   [Oh My Pi: continuing an interrupted turn](configuration.md#oh-my-pi-continuing-an-interrupted-turn)).
 - **Deleted working directories are not replayed**: If a saved pane's working
   directory no longer exists, restore leaves that pane at its shell instead of
