@@ -412,8 +412,13 @@ watchdog first `SIGTERM`s the stuck worker subprocesses so a merely-wedged save
 can unblock and finish; if the hook is still running shortly after, it escalates
 to `SIGKILL` and terminates the save hook itself. The sidecar
 `assistant-sessions.json` is written atomically (temp file + rename), so a
-terminated or failed save never corrupts the previously saved sessions. A hard
-timeout is reported on the hook's **stderr** (surfaced wherever tmux-resurrect
+terminated or failed save never corrupts the previously saved sessions. A save
+whose session lookups were interrupted by the deadline is not published either,
+even if it manages to finish: its snapshot could be missing panes, so the
+previous sidecar is kept and the hook exits non-zero. (A deadline reached
+earlier, while probing `<tool> --help`, only degrades flag discovery to the
+built-in fallbacks; that save is still published, provided it finishes within
+the grace period before the `SIGKILL` escalation.) A timeout is reported on the hook's **stderr** (surfaced wherever tmux-resurrect
 captures hook output) rather than to `assistant-save.log` — writing to the log
 could itself block on the same stalled filesystem that triggered the timeout.
 

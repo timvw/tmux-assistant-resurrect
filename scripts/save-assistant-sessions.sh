@@ -668,22 +668,14 @@ get_opencode_session() {
 	local cwd="${3:-}"
 	local allow_db_fallback="${4:-1}"
 
-	# Method 1: -s flag in process args (fastest)
+	# Method 1: plugin state file, keyed by this exact PID. It names the session
+	# the TUI shows *now*, so it must win over argv: every restored pane is
+	# launched with `-s <id>`, and that launch-time value stays in the process
+	# args after the user switches sessions in the TUI. Reading argv first saved
+	# the session the pane started with instead of the one in view. (main's
+	# batched state cache already resolves in this order; this keeps the direct
+	# path -- jq < 1.7, or a failed batch read -- consistent with it.)
 	local sid
-	sid=$(echo "$args" | sed -n 's/.*-s \(ses_[A-Za-z0-9_]*\).*/\1/p')
-	if [ -n "$sid" ]; then
-		echo "$sid"
-		return
-	fi
-
-	# Method 2: --session flag in process args (supports --session=<id> too)
-	sid=$(echo "$args" | sed -n 's/.*--session[= ] *\(ses_[A-Za-z0-9_]*\).*/\1/p')
-	if [ -n "$sid" ]; then
-		echo "$sid"
-		return
-	fi
-
-	# Method 3: plugin state file (handles runtime session switches)
 	local state_file="$STATE_DIR/opencode-${child_pid}.json"
 	if [ -f "$state_file" ]; then
 		sid=$(jq -r '.session_id // empty' "$state_file" 2>/dev/null || true)
@@ -691,6 +683,21 @@ get_opencode_session() {
 			echo "$sid"
 			return
 		fi
+	fi
+
+	# Method 2: -s flag in process args. Covers the window before the plugin
+	# has written its file, and panes without the plugin.
+	sid=$(echo "$args" | sed -n 's/.*-s \(ses_[A-Za-z0-9_]*\).*/\1/p')
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return
+	fi
+
+	# Method 3: --session flag in process args (supports --session=<id> too)
+	sid=$(echo "$args" | sed -n 's/.*--session[= ] *\(ses_[A-Za-z0-9_]*\).*/\1/p')
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return
 	fi
 
 	# Method 4: SQLite database (version-resilient fallback).
@@ -2876,6 +2883,12 @@ save_watchdog() {
 	# Round 1: TERM the current workers so a merely-wedged save can unblock and
 	# finish cleanly during the grace period.
 	victims=$(victim_pids "$target" "$self")
+	# Tell main the victim set is final. A worker main forks from now on is not
+	# in it and will not be TERMed, which is what lets main publish a save whose
+	# lookups only started after this point (see publish_sidecar). Written
+	# after the capture, never before: "fired" alone must not be read as "my
+	# lookups are safe", or one forked between the two would be TERMed unseen.
+	echo captured >>"$firedfile" 2>/dev/null || true
 	# shellcheck disable=SC2086
 	signal_pids TERM $victims
 	sleep 2 || true
@@ -2919,6 +2932,36 @@ stop_save_watchdog() {
 	WATCHDOG_PID=""
 }
 
+# Rename the freshly built sidecar into place -- unless the watchdog fired
+# while session lookups were running. Its SIGTERM unblocks a wedged lookup
+# precisely so main can finish, but that lookup returned nothing. Usually the
+# TERM also takes the lookup's $() subshell and `set -e` ends the save; if the
+# subshell wins the race and returns empty first, main carries on and the
+# snapshot is missing that pane. Publishing it would silently drop a session
+# the previous sidecar still holds, so such a save keeps the previous sidecar.
+#
+# A deadline reached *before* the lookups started (a `<tool> --help` probe that
+# hung during warm-up, say) is different: the probe degrades to the pinned flag
+# fallbacks by design, the lookups then run untouched, and the snapshot is
+# complete. WATCHDOG_FIRED_BEFORE_LOOKUPS records that case so a tool whose
+# --help always hangs cannot freeze the sidecar forever. It is only set once
+# the watchdog has captured its TERM victims: a lookup forked after that
+# capture cannot be among them.
+#
+# On a failed rename the temp file is left for the caller's EXIT trap.
+#
+# Reported on stderr only, like the watchdog's own diagnostic: the log may sit
+# on the stalled filesystem that caused the timeout.
+publish_sidecar() {
+	local tmp="$1"
+	if [ "${WATCHDOG_FIRED_BEFORE_LOOKUPS:-0}" != 1 ] && [ -s "${WATCHDOG_FIRED_FILE:-/nonexistent}" ]; then
+		rm -f "$tmp"
+		echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] save hook reached its ${SAVE_TIMEOUT}s deadline; session lookups were interrupted, keeping previous $OUTPUT_FILE" >&2
+		return 1
+	fi
+	mv -f "$tmp" "$OUTPUT_FILE"
+}
+
 # --- Main ---
 
 # Save flow: snapshot the process table and the tmux pane table once each,
@@ -2940,6 +2983,7 @@ main() {
 	WATCHDOG_PID=""
 	WATCHDOG_SELF_FILE=""
 	WATCHDOG_FIRED_FILE=""
+	WATCHDOG_FIRED_BEFORE_LOOKUPS=0
 	SESSIONS_TMP=""
 	OUTPUT_TMP=""
 	# stop_save_watchdog MUST run before the rm: it reads WATCHDOG_FIRED_FILE to
@@ -3092,6 +3136,13 @@ main() {
 	# Only tools present in MATCHES are warmed (see _warm_session_discovery).
 	_warm_session_discovery "$MATCHES"
 
+	# From here on a watchdog TERM can cut a session lookup short; see
+	# publish_sidecar for why it matters whether the deadline came before this.
+	WATCHDOG_FIRED_BEFORE_LOOKUPS=0
+	if grep -q '^captured$' "${WATCHDOG_FIRED_FILE:-/nonexistent}" 2>/dev/null; then
+		WATCHDOG_FIRED_BEFORE_LOOKUPS=1
+	fi
+
 	# Process only matched panes (those with a detected tool)
 	if [ -n "$MATCHES" ]; then
 		local current_target="" current_cwd="" current_tty="" pane_candidates=""
@@ -3146,8 +3197,9 @@ main() {
 		return 1
 	fi
 	rm -f "$SESSIONS_TMP"
-	mv -f "$OUTPUT_TMP" "$OUTPUT_FILE"
 	SESSIONS_TMP=""
+	# OUTPUT_TMP stays set on failure so the EXIT trap removes whatever is left.
+	publish_sidecar "$OUTPUT_TMP" || return 1
 	OUTPUT_TMP=""
 	count=$(jq '.sessions | length' "$OUTPUT_FILE")
 	relaunch_count=$(jq '.relaunch | length' "$OUTPUT_FILE")

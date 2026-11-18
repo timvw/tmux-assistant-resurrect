@@ -67,8 +67,9 @@ before hooks/plugins have fired):
   `$COPILOT_HOME/session-state/<uuid>/inuse.<pid>.lock` marker, matched by the
   native PID (primary); `--session-id` / `--resume` in process args (fallback,
   for the startup window before the lock exists).
-- **OpenCode**: `-s` / `--session` flag in process args (fast path); plugin
-  state file (fallback for runtime session switches); SQLite database query
+- **OpenCode**: plugin state file (primary; names the session in view, so it
+  survives runtime session switches); `-s` / `--session` flag in process args
+  (fallback before the plugin has written its file); SQLite database query
   at `~/.local/share/opencode/opencode.db` matching the pane's cwd (version-
   resilient fallback when the plugin hasn't fired)
 - **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary);

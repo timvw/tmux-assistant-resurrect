@@ -286,6 +286,141 @@ env PATH="$STUB_DIR:$PATH" \
 assert_eq "post-open symlink swap cannot redirect save log writes" \
 	"do not overwrite" "$(cat "$RACE_VICTIM")"
 
+echo "== OpenCode: the session in view wins over launch-time argv =="
+# A restored pane always runs `opencode -s <id>`. After the user switches
+# sessions in the TUI the plugin state file names the new one while argv still
+# carries the old one; saving argv would restore the wrong conversation.
+OC_STATE="$SANDBOX/opencode-state"
+mkdir -p "$OC_STATE"
+OC_SAVED_STATE_DIR="$STATE_DIR"
+STATE_DIR="$OC_STATE"
+printf '%s\n' '{"session_id":"ses_inview"}' >"$OC_STATE/opencode-4242.json"
+assert_eq "plugin state beats -s in argv" ses_inview \
+	"$(get_opencode_session 4242 'opencode -s ses_launch' /nonexistent 0)"
+assert_eq "plugin state beats --session in argv" ses_inview \
+	"$(get_opencode_session 4242 'opencode --session=ses_launch' /nonexistent 0)"
+assert_eq "argv is used for a PID without plugin state" ses_launch \
+	"$(get_opencode_session 4243 'opencode -s ses_launch' /nonexistent 0)"
+printf '%s\n' '{"session_id":""}' >"$OC_STATE/opencode-4244.json"
+assert_eq "argv is used when plugin state names no session" ses_launch \
+	"$(get_opencode_session 4244 'opencode -s ses_launch' /nonexistent 0)"
+printf 'not json\n' >"$OC_STATE/opencode-4245.json"
+assert_eq "argv is used when plugin state is unreadable" ses_launch \
+	"$(get_opencode_session 4245 'opencode -s ses_launch' /nonexistent 0)"
+STATE_DIR="$OC_SAVED_STATE_DIR"
+
+echo "== watchdog deadline and sidecar publication =="
+# The gate: a deadline that hit while session lookups were running keeps the
+# previous sidecar; no deadline, or one that came before the lookups, publishes.
+WD_GATE="$SANDBOX/watchdog-gate"
+mkdir -p "$WD_GATE"
+OUTPUT_FILE="$WD_GATE/assistant-sessions.json"
+WATCHDOG_FIRED_FILE="$WD_GATE/fired"
+# shellcheck disable=SC2034 # read by publish_sidecar() from the sourced save script
+WATCHDOG_FIRED_BEFORE_LOOKUPS=0
+: >"$WATCHDOG_FIRED_FILE"
+printf 'old\n' >"$OUTPUT_FILE"
+printf 'new\n' >"$WD_GATE/tmp1"
+publish_sidecar "$WD_GATE/tmp1" 2>/dev/null
+assert_eq "unfired watchdog publishes the new sidecar" new "$(cat "$OUTPUT_FILE")"
+
+echo fired >"$WATCHDOG_FIRED_FILE"
+printf 'newer\n' >"$WD_GATE/tmp2"
+wd_gate_err=$(publish_sidecar "$WD_GATE/tmp2" 2>&1 >/dev/null)
+wd_gate_rc=$?
+assert_eq "deadline during lookups keeps the previous sidecar" new "$(cat "$OUTPUT_FILE")"
+assert_eq "deadline during lookups fails the save" 1 "$wd_gate_rc"
+assert_eq "deadline during lookups discards the temp sidecar" no \
+	"$([ -e "$WD_GATE/tmp2" ] && echo yes || echo no)"
+case "$wd_gate_err" in
+*'keeping previous'*) assert_eq "kept sidecar is diagnosed on stderr" yes yes ;;
+*) assert_eq "kept sidecar is diagnosed on stderr" yes no ;;
+esac
+
+# shellcheck disable=SC2034 # read by publish_sidecar() from the sourced save script
+WATCHDOG_FIRED_BEFORE_LOOKUPS=1
+printf 'newest\n' >"$WD_GATE/tmp3"
+publish_sidecar "$WD_GATE/tmp3" 2>/dev/null
+assert_eq "deadline before lookups still publishes" newest "$(cat "$OUTPUT_FILE")"
+WATCHDOG_FIRED_FILE=""
+# shellcheck disable=SC2034
+WATCHDOG_FIRED_BEFORE_LOOKUPS=0
+
+# End to end: `opencode --help` hangs during warm-up until the watchdog TERMs
+# it. The probe degrades to the pinned fallbacks, the lookups then run
+# untouched, and the complete snapshot must still be published -- a tool whose
+# --help hangs on every save must not freeze the sidecar.
+WD_RUN="$SANDBOX/watchdog-run"
+WD_STUB="$SANDBOX/watchdog-bin"
+mkdir -p "$WD_RUN" "$WD_STUB"
+cat >"$WD_STUB/opencode" <<'STUB'
+#!/bin/sh
+case "$*" in
+*--help*)
+	# Record that the probe ran and that it ended by TERM, so the test proves
+	# the watchdog -- not the sleep running out -- is what unblocked the save.
+	: >"$TMUX_RESURRECT_DIR/.help-started"
+	trap ': >"$TMUX_RESURRECT_DIR/.help-termed"; kill "$child" 2>/dev/null; exit 143' TERM
+	sleep 30 &
+	child=$!
+	wait "$child"
+	exit 0
+	;;
+esac
+# Stay visible to ps as `opencode ...` (so no exec), but take the sleep along
+# on TERM so the test leaves nothing behind.
+trap 'kill "$child" 2>/dev/null; exit 0' TERM
+sleep 300 &
+child=$!
+wait "$child"
+STUB
+cat >"$WD_STUB/tmux" <<'STUB'
+#!/bin/sh
+case "$*" in
+*list-panes*P\|*) printf 'P|%%1|%s|0|0|/dev/ttys999|keep\n' "$WD_PANE_PID" ;;
+*list-panes*C\|*) printf 'C|%%1|%s\n' "$WD_CWD" ;;
+*list-panes*) printf 'G|%%1|\n' ;;
+*) exit 1 ;;
+esac
+STUB
+# No ps stub: detection and the watchdog both need the real process table.
+chmod +x "$WD_STUB/opencode" "$WD_STUB/tmux"
+# Detached from the suite's stdout/stderr: a leftover process must never hold a
+# caller's pipe open.
+"${TEST_BASH:-bash}" -c '"$1" -s ses_live & wait' _ "$WD_STUB/opencode" >/dev/null 2>&1 &
+WD_PANE_PID=$!
+# Poll until the stub is visible to ps as a child of the pane shell; a fixed
+# sleep would let a slow runner snapshot the process table without it.
+wd_tries=0
+until ps -eo ppid= -o args= | awk -v p="$WD_PANE_PID" '$1 == p && /opencode -s ses_live/ {f=1} END {exit !f}'; do
+	wd_tries=$((wd_tries + 1))
+	[ "$wd_tries" -ge 100 ] && break
+	sleep 0.1
+done
+assert_eq "OpenCode stub is running under the pane shell" yes \
+	"$([ "$wd_tries" -lt 100 ] && echo yes || echo no)"
+printf '%s\n' '{"sessions":[],"relaunch":[]}' >"$WD_RUN/assistant-sessions.json"
+wd_stderr=$(env PATH="$WD_STUB:$PATH" WD_PANE_PID="$WD_PANE_PID" WD_CWD="$SANDBOX" \
+	TMUX_RESURRECT_DIR="$WD_RUN" \
+	TMUX_ASSISTANT_RESURRECT_DIR="$SANDBOX/watchdog-state" \
+	ASSISTANT_RESURRECT_SAVE_TIMEOUT=1 \
+	"${TEST_BASH:-bash}" "$REPO_DIR/scripts/save-assistant-sessions.sh" 2>&1 >/dev/null)
+wd_status=$?
+pkill -TERM -P "$WD_PANE_PID" 2>/dev/null
+kill "$WD_PANE_PID" 2>/dev/null
+wait "$WD_PANE_PID" 2>/dev/null
+assert_eq "the --help probe ran" yes \
+	"$([ -e "$WD_RUN/.help-started" ] && echo yes || echo no)"
+assert_eq "the watchdog ended the --help probe with TERM" yes \
+	"$([ -e "$WD_RUN/.help-termed" ] && echo yes || echo no)"
+assert_eq "save completes after a hung --help probe is terminated" 0 "$wd_status"
+assert_eq "session found after the deadline is published" ses_live \
+	"$(jq -r '.sessions[0].session_id // empty' "$WD_RUN/assistant-sessions.json" 2>/dev/null)"
+case "$wd_stderr" in
+*'keeping previous'*) assert_eq "pre-lookup deadline does not report a kept sidecar" no yes ;;
+*) assert_eq "pre-lookup deadline does not report a kept sidecar" no no ;;
+esac
+
 echo "== unpredictable archive replacement =="
 ARCHIVE_DIR="$SANDBOX/archive-case"
 mkdir -p "$ARCHIVE_DIR/source/pane_contents"

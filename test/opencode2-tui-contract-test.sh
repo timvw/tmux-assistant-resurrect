@@ -157,7 +157,7 @@ if wait_for "tracker records the session the TUI opened" 150 has_sid "$pane_pid"
 		"$(find "$STATE_DIR" -name '*.tmp' | wc -l | tr -d ' ')"
 fi
 
-# The save hook reads this file through get_opencode_session (method 3).
+# The save hook reads this file through get_opencode_session (method 1).
 resolved=$(
 	TMUX_ASSISTANT_RESURRECT_DIR="$STATE_DIR" bash -c '
 		source "$1/scripts/save-assistant-sessions.sh"
