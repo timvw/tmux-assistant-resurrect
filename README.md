@@ -63,8 +63,9 @@ in [Architecture](docs/architecture.md).
 - [tmux](https://github.com/tmux/tmux) (tested with 3.4 through 3.7)
 - [TPM](https://github.com/tmux-plugins/tpm) (Tmux Plugin Manager)
 - [jq](https://jqlang.github.io/jq/) (used by save/restore scripts)
-- At least one of: Claude Code, Cursor Agent CLI, GitHub Copilot CLI, OpenCode,
-  Codex CLI, Pi, Oh My Pi, Grok, Kiro CLI
+
+No assistant is required: the plugin is safe to install on its own and simply
+has nothing to resume until one of the supported assistants runs in a pane.
 
 ## Installation
 
@@ -102,6 +103,7 @@ and automatically set up:
 - Pi support via session-file lookup in `~/.pi/agent/sessions` (no hook/plugin required)
 - Oh My Pi support via terminal/session-file lookup in `$XDG_STATE_HOME/omp`, `$XDG_DATA_HOME/omp`, or `~/.omp` (no hook/plugin required)
 - Grok support via the `~/.grok/active_sessions.json` registry (no hook/plugin required)
+- Antigravity CLI support via the log file its process has open (no hook/plugin required)
 - Kiro CLI support via its session lock files under `~/.kiro/sessions/` (`cli/<uuid>.lock` for the default TUI, `<workspace-hash>/sess_<uuid>/.lock` for `--v3`; no hook/plugin required)
 
 Native hook/plugin installers are enabled by default and can be switched off

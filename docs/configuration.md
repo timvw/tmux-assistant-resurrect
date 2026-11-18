@@ -115,7 +115,7 @@ searched, so the mismatch is visible rather than silent.
 ## Environment variable capture and restoration
 
 By default, the plugin captures `TMUX_PANE` and `SHELL` in hook/plugin-backed
-assistant state files (Claude/OpenCode). To capture additional environment
+assistant state files (Claude/Cursor/OpenCode). To capture additional environment
 variables, set a space-separated list in `tmux.conf`:
 
 ```bash
@@ -130,7 +130,7 @@ to `assistant-sessions.json`. On restore, variables listed in
 VIRTUAL_ENV='/home/user/.venv' claude --resume <session-id>
 ```
 
-**Tools without a session hook** (Copilot, Codex, Pi, Oh My Pi, Grok, Kiro CLI) have no state file
+**Tools without a session hook** (Copilot, Codex, Pi, Oh My Pi, Grok, Antigravity CLI, Kiro CLI) have no state file
 to capture from at launch. On **Linux and WSL**, the save hook instead reads the
 configured variables straight from each detected assistant's environment via
 `/proc/<pid>/environ`, so values like `CODEX_HOME` survive a restart. Only the
@@ -194,7 +194,7 @@ respected rather than reset on every save.
 Two different things, and the difference matters:
 
 **Captured environment values are stored, and masked only in the logs.** A
-variable you list in `@resurrect-capture-env` has to be written to the sidecar
+variable you list in `@assistant-resurrect-capture-env` has to be written to the sidecar
 verbatim, because restoring it is the entire point. The save and restore logs
 show `VAR=***` so that a log you paste into an issue does not carry your key,
 but the sidecar JSON itself holds the real value. It is mode 0600, as are both
@@ -245,7 +245,7 @@ set -g @assistant-resurrect-drop-env 'OLD_LAUNCH_SETTING'
 Global and assistant-specific lists are combined; duplicates are harmless.
 Assistant-specific lists add exclusions and cannot re-enable a global exclusion.
 Replace `claude` in the option name with `cursor`, `copilot`, `opencode`, `codex`,
-`pi`, `omp`, `grok`, or `kiro` to scope a rule to that assistant. All lists are
+`pi`, `omp`, `grok`, `agy`, or `kiro` to scope a rule to that assistant. All lists are
 whitespace-separated and empty by default.
 
 **Flag exclusions** remove every occurrence, together with its values. They

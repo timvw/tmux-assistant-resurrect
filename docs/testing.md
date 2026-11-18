@@ -31,8 +31,9 @@ v2 plugin rejection, and checks that the installer removes it (including mixed
 `opencode` v1 / `opencode2` v2 installations). No login or model request is needed.
 
 `just test` builds a Docker image with tmux, jq, just, and the real
-`@anthropic-ai/claude-code`, `opencode-ai`, `@openai/codex`, and
-`@earendil-works/pi-coding-agent` npm packages, then runs the full test suite
+`@anthropic-ai/claude-code`, `@github/copilot`, `opencode-ai`, `@openai/codex`,
+`@earendil-works/pi-coding-agent`, `@oh-my-pi/pi-coding-agent` and
+`@xai-official/grok` npm packages, then runs the full test suite
 covering install, save, restore, uninstall, hooks, cleanup, TPM plugin
 installation, session ID extraction, POSIX quoting, process tree detection,
 upgrade-path migration, and regression scenarios. Pi runs with `--offline` flag

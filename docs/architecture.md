@@ -86,7 +86,12 @@ hooks/
   opencode2/tui.js                # OpenCode v2 TUI plugin (tracks the session each TUI shows)
 scripts/
   lib-detect.sh                   # Shared library (detect_tool, pane_has_assistant, posix_quote)
+  lib-detect.awk                  # AWK detect_tool() used by the save hook's process walk
+  lib-replay.sh                   # Replay policy: drop-flags/drop-env, state-root pinning
+  lib-fs.sh                       # Safe in-place updates of user-owned config files
+  lib-log.sh                      # Owner-only, rotated save/restore logs
   save-assistant-sessions.sh      # Resurrect post-save hook (process detection + session IDs)
+  save-assistant-sessions.awk     # Walks the ps snapshot per pane, emits assistant candidates
   restore-assistant-sessions.sh   # Resurrect post-restore hook (resumes assistants)
   py/                             # Helper programs invoked by the save hook via argv
                                   #   (never via shell heredocs — see issue #48)
@@ -95,5 +100,6 @@ test/
   bench-save-hook.sh              # Single-scenario save-hook benchmark runner (inside Docker)
   bench-matrix.sh                 # Docker benchmark matrix + CSV/Markdown summary generator
   run-tests.sh                    # Integration test suite
+  *-unit-tests.sh, *-contract-*   # Hermetic unit suites and per-assistant contract tests
 justfile                          # Install/uninstall/status/save/restore/test recipes
 ```

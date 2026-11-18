@@ -5,9 +5,8 @@
 You can verify the full save → kill → restore cycle on your own machine using
 the normal TPM installation — no cloning or build tools needed.
 
-**Prerequisites**: tmux, jq, and at least one of claude / copilot / opencode /
-codex / pi
-installed.
+**Prerequisites**: tmux and jq. To see something come back, you also need at
+least one [supported assistant](../README.md) installed.
 
 ## 1. Install
 

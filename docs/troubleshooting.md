@@ -6,15 +6,17 @@
 
 | Symptom | Check |
 |---------|-------|
-| Save finds 0 sessions | Run `ps -eo pid= -o ppid= -o args= \| grep -E 'claude\|copilot\|opencode\|codex\|pi\|omp\|grok\|kiro-cli'` to verify assistants are running |
+| Save finds 0 sessions | Run `ps -eo pid= -o ppid= -o args= \| grep -E 'claude\|agent\|copilot\|opencode\|codex\|pi\|omp\|grok\|agy\|kiro-cli'` to verify assistants are running |
 | Session ID missing for Claude | Verify the hook is installed: `jq '.hooks.SessionStart' ~/.claude/settings.json` |
 | Session ID missing, hook *is* installed | Check `assistant-save.log` — a `no session ID available` line names the state file it looked for. If that directory is empty but `ls ~/.local/state/tmux-assistant-resurrect` elsewhere is not, the two sides disagree on the path; see [State directory](configuration.md#state-directory) |
+| Session ID missing for Cursor Agent CLI | Verify the hook is installed: `jq '.hooks.sessionStart' ~/.cursor/hooks.json`, and that `@assistant-resurrect-cursor` is not `off`. Only the `agent`/`cursor-agent` CLI is tracked, not Cursor Desktop |
 | Session ID missing for Copilot | Check `ls ~/.copilot/session-state/*/inuse.*.lock` — the number in the filename must be the native Copilot PID from `ps`. If you set `COPILOT_HOME`, the save hook must see it too (tmux hooks do not inherit your shell profile; use `tmux set-environment -g COPILOT_HOME ...`) |
 | Session ID missing for OpenCode | Launch with `-s <id>`, or verify the plugin: `ls ~/.config/opencode/plugins/session-tracker.js`. The DB fallback follows `XDG_DATA_HOME` (default `~/.local/share`); on macOS set it for tmux too (`tmux set-environment -g XDG_DATA_HOME ...`) |
 | Session ID missing for Codex | Verify `session-tags.jsonl` under `CODEX_HOME` (default `~/.codex`) lists your Codex PID. If you set `CODEX_HOME`, the save hook reads it from the process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g CODEX_HOME ...`) |
 | Session ID missing for Pi | Verify session files exist under `~/.pi/agent/sessions/--<cwd>--/*.jsonl` and that pane cwd matches the Pi session cwd |
 | Session ID missing for Grok | Verify `~/.grok/active_sessions.json` exists and contains an entry with your Grok process's PID: `jq '.[] | select(.pid == <PID>)' ~/.grok/active_sessions.json`. If you set `GROK_HOME`, the save hook reads it from the Grok process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g GROK_HOME ...`) |
 | Session ID missing for Kiro CLI | Find the lock-holding PID under the pane (`ps -eo pid,ppid,args`): `kiro-cli-chat acp` in the default TUI, the `bun` TUI process with `--v3`. Check it appears in a lock: `grep -l '"pid":<PID>,' "${KIRO_HOME:-$HOME/.kiro}"/sessions/cli/*.lock "${KIRO_HOME:-$HOME/.kiro}"/sessions/*/sess_*/.lock` (use the Kiro process's `KIRO_HOME` if your shell does not have it). The matching metadata (`cli/<uuid>.json` or `sess_<uuid>/session.json`) must exist too. If you set `KIRO_HOME`, the save hook reads it from the process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g KIRO_HOME ...`). `--classic`/`--legacy-ui` panes keep no lock and cannot be resolved |
+| Session ID missing for Antigravity CLI | agy is resolved from the log file its process has open. A brand-new, still-empty conversation has no selection event yet and is skipped by design; launching with `--conversation <UUID>` also works. See [Antigravity CLI](assistants.md#antigravity-cli-agy) |
 | Session ID missing for Oh My Pi | The primary method is a terminal breadcrumb under `$XDG_STATE_HOME/omp` (or `~/.local/state/omp`); verify the pane tty matches the breadcrumb file. Fallback is `--resume` / `-r` / `--restore` in process args. `--session-dir` or `--profile` scoped JSONL lookup is also used when those flags are present |
 | Codex/OpenCode/Pi session ID missing (python3 methods) | The save hook auto-detects `python3` in common locations. If your setup uses a non-standard path, set it in tmux: `set-environment -g PATH "/your/python3/dir:$PATH"` |
 | Restore launches but assistant says "session not found" | The session ID may have expired. This is normal — start a fresh session and the next save will pick up the new ID |
@@ -43,7 +45,7 @@
   advisory only. It does not participate in save or restore authorization and
   cannot silently become a maintainer-owned command allowlist.
 - **First save after install (chicken-and-egg)**: An assistant must expose a
-  session ID before it can be saved. Claude and OpenCode normally do this at
+  session ID before it can be saved. Claude, Cursor and OpenCode normally do this at
   session start. **A Copilot session you have not typed into yet cannot be
   restored**: Copilot only makes a session resumable once it has content, so an
   idle pane sitting at a fresh Copilot prompt comes back as a plain shell.
