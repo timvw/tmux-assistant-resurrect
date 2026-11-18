@@ -416,7 +416,8 @@ whose session lookups were interrupted by the deadline is not published either,
 even if it manages to finish: its snapshot could be missing panes, so the
 previous sidecar is kept and the hook exits non-zero. (A deadline reached
 earlier, while probing `<tool> --help`, only degrades flag discovery to the
-built-in fallbacks; that save is still published.) A timeout is reported on the hook's **stderr** (surfaced wherever tmux-resurrect
+built-in fallbacks; that save is still published, provided it finishes within
+the grace period before the `SIGKILL` escalation.) A timeout is reported on the hook's **stderr** (surfaced wherever tmux-resurrect
 captures hook output) rather than to `assistant-save.log` — writing to the log
 could itself block on the same stalled filesystem that triggered the timeout.
 

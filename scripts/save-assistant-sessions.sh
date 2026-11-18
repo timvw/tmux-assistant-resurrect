@@ -2883,6 +2883,12 @@ save_watchdog() {
 	# Round 1: TERM the current workers so a merely-wedged save can unblock and
 	# finish cleanly during the grace period.
 	victims=$(victim_pids "$target" "$self")
+	# Tell main the victim set is final. A worker main forks from now on is not
+	# in it and will not be TERMed, which is what lets main publish a save whose
+	# lookups only started after this point (see publish_sidecar). Written
+	# after the capture, never before: "fired" alone must not be read as "my
+	# lookups are safe", or one forked between the two would be TERMed unseen.
+	echo captured >>"$firedfile" 2>/dev/null || true
 	# shellcheck disable=SC2086
 	signal_pids TERM $victims
 	sleep 2 || true
@@ -2938,7 +2944,11 @@ stop_save_watchdog() {
 # hung during warm-up, say) is different: the probe degrades to the pinned flag
 # fallbacks by design, the lookups then run untouched, and the snapshot is
 # complete. WATCHDOG_FIRED_BEFORE_LOOKUPS records that case so a tool whose
-# --help always hangs cannot freeze the sidecar forever.
+# --help always hangs cannot freeze the sidecar forever. It is only set once
+# the watchdog has captured its TERM victims: a lookup forked after that
+# capture cannot be among them.
+#
+# On a failed rename the temp file is left for the caller's EXIT trap.
 #
 # Reported on stderr only, like the watchdog's own diagnostic: the log may sit
 # on the stalled filesystem that caused the timeout.
@@ -3129,7 +3139,9 @@ main() {
 	# From here on a watchdog TERM can cut a session lookup short; see
 	# publish_sidecar for why it matters whether the deadline came before this.
 	WATCHDOG_FIRED_BEFORE_LOOKUPS=0
-	[ -s "${WATCHDOG_FIRED_FILE:-/nonexistent}" ] && WATCHDOG_FIRED_BEFORE_LOOKUPS=1
+	if grep -q '^captured$' "${WATCHDOG_FIRED_FILE:-/nonexistent}" 2>/dev/null; then
+		WATCHDOG_FIRED_BEFORE_LOOKUPS=1
+	fi
 
 	# Process only matched panes (those with a detected tool)
 	if [ -n "$MATCHES" ]; then
@@ -3186,10 +3198,8 @@ main() {
 	fi
 	rm -f "$SESSIONS_TMP"
 	SESSIONS_TMP=""
-	if ! publish_sidecar "$OUTPUT_TMP"; then
-		OUTPUT_TMP=""
-		return 1
-	fi
+	# OUTPUT_TMP stays set on failure so the EXIT trap removes whatever is left.
+	publish_sidecar "$OUTPUT_TMP" || return 1
 	OUTPUT_TMP=""
 	count=$(jq '.sessions | length' "$OUTPUT_FILE")
 	relaunch_count=$(jq '.relaunch | length' "$OUTPUT_FILE")

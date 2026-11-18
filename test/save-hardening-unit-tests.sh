@@ -356,7 +356,16 @@ mkdir -p "$WD_RUN" "$WD_STUB"
 cat >"$WD_STUB/opencode" <<'STUB'
 #!/bin/sh
 case "$*" in
-*--help*) exec sleep 30 ;;
+*--help*)
+	# Record that the probe ran and that it ended by TERM, so the test proves
+	# the watchdog -- not the sleep running out -- is what unblocked the save.
+	: >"$TMUX_RESURRECT_DIR/.help-started"
+	trap ': >"$TMUX_RESURRECT_DIR/.help-termed"; kill "$child" 2>/dev/null; exit 143' TERM
+	sleep 30 &
+	child=$!
+	wait "$child"
+	exit 0
+	;;
 esac
 # Stay visible to ps as `opencode ...` (so no exec), but take the sleep along
 # on TERM so the test leaves nothing behind.
@@ -380,7 +389,16 @@ chmod +x "$WD_STUB/opencode" "$WD_STUB/tmux"
 # caller's pipe open.
 "${TEST_BASH:-bash}" -c '"$1" -s ses_live & wait' _ "$WD_STUB/opencode" >/dev/null 2>&1 &
 WD_PANE_PID=$!
-sleep 1
+# Poll until the stub is visible to ps as a child of the pane shell; a fixed
+# sleep would let a slow runner snapshot the process table without it.
+wd_tries=0
+until ps -eo ppid= -o args= | awk -v p="$WD_PANE_PID" '$1 == p && /opencode -s ses_live/ {f=1} END {exit !f}'; do
+	wd_tries=$((wd_tries + 1))
+	[ "$wd_tries" -ge 100 ] && break
+	sleep 0.1
+done
+assert_eq "OpenCode stub is running under the pane shell" yes \
+	"$([ "$wd_tries" -lt 100 ] && echo yes || echo no)"
 printf '%s\n' '{"sessions":[],"relaunch":[]}' >"$WD_RUN/assistant-sessions.json"
 wd_stderr=$(env PATH="$WD_STUB:$PATH" WD_PANE_PID="$WD_PANE_PID" WD_CWD="$SANDBOX" \
 	TMUX_RESURRECT_DIR="$WD_RUN" \
@@ -391,6 +409,10 @@ wd_status=$?
 pkill -TERM -P "$WD_PANE_PID" 2>/dev/null
 kill "$WD_PANE_PID" 2>/dev/null
 wait "$WD_PANE_PID" 2>/dev/null
+assert_eq "the --help probe ran" yes \
+	"$([ -e "$WD_RUN/.help-started" ] && echo yes || echo no)"
+assert_eq "the watchdog ended the --help probe with TERM" yes \
+	"$([ -e "$WD_RUN/.help-termed" ] && echo yes || echo no)"
 assert_eq "save completes after a hung --help probe is terminated" 0 "$wd_status"
 assert_eq "session found after the deadline is published" ses_live \
 	"$(jq -r '.sessions[0].session_id // empty' "$WD_RUN/assistant-sessions.json" 2>/dev/null)"
