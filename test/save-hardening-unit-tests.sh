@@ -286,6 +286,29 @@ env PATH="$STUB_DIR:$PATH" \
 assert_eq "post-open symlink swap cannot redirect save log writes" \
 	"do not overwrite" "$(cat "$RACE_VICTIM")"
 
+echo "== OpenCode: the session in view wins over launch-time argv =="
+# A restored pane always runs `opencode -s <id>`. After the user switches
+# sessions in the TUI the plugin state file names the new one while argv still
+# carries the old one; saving argv would restore the wrong conversation.
+OC_STATE="$SANDBOX/opencode-state"
+mkdir -p "$OC_STATE"
+OC_SAVED_STATE_DIR="$STATE_DIR"
+STATE_DIR="$OC_STATE"
+printf '%s\n' '{"session_id":"ses_inview"}' >"$OC_STATE/opencode-4242.json"
+assert_eq "plugin state beats -s in argv" ses_inview \
+	"$(get_opencode_session 4242 'opencode -s ses_launch' /nonexistent 0)"
+assert_eq "plugin state beats --session in argv" ses_inview \
+	"$(get_opencode_session 4242 'opencode --session=ses_launch' /nonexistent 0)"
+assert_eq "argv is used for a PID without plugin state" ses_launch \
+	"$(get_opencode_session 4243 'opencode -s ses_launch' /nonexistent 0)"
+printf '%s\n' '{"session_id":""}' >"$OC_STATE/opencode-4244.json"
+assert_eq "argv is used when plugin state names no session" ses_launch \
+	"$(get_opencode_session 4244 'opencode -s ses_launch' /nonexistent 0)"
+printf 'not json\n' >"$OC_STATE/opencode-4245.json"
+assert_eq "argv is used when plugin state is unreadable" ses_launch \
+	"$(get_opencode_session 4245 'opencode -s ses_launch' /nonexistent 0)"
+STATE_DIR="$OC_SAVED_STATE_DIR"
+
 echo "== watchdog deadline and sidecar publication =="
 # The gate: a deadline that hit while session lookups were running keeps the
 # previous sidecar; no deadline, or one that came before the lookups, publishes.

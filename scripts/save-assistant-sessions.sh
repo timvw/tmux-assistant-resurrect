@@ -668,22 +668,14 @@ get_opencode_session() {
 	local cwd="${3:-}"
 	local allow_db_fallback="${4:-1}"
 
-	# Method 1: -s flag in process args (fastest)
+	# Method 1: plugin state file, keyed by this exact PID. It names the session
+	# the TUI shows *now*, so it must win over argv: every restored pane is
+	# launched with `-s <id>`, and that launch-time value stays in the process
+	# args after the user switches sessions in the TUI. Reading argv first saved
+	# the session the pane started with instead of the one in view. (main's
+	# batched state cache already resolves in this order; this keeps the direct
+	# path -- jq < 1.7, or a failed batch read -- consistent with it.)
 	local sid
-	sid=$(echo "$args" | sed -n 's/.*-s \(ses_[A-Za-z0-9_]*\).*/\1/p')
-	if [ -n "$sid" ]; then
-		echo "$sid"
-		return
-	fi
-
-	# Method 2: --session flag in process args (supports --session=<id> too)
-	sid=$(echo "$args" | sed -n 's/.*--session[= ] *\(ses_[A-Za-z0-9_]*\).*/\1/p')
-	if [ -n "$sid" ]; then
-		echo "$sid"
-		return
-	fi
-
-	# Method 3: plugin state file (handles runtime session switches)
 	local state_file="$STATE_DIR/opencode-${child_pid}.json"
 	if [ -f "$state_file" ]; then
 		sid=$(jq -r '.session_id // empty' "$state_file" 2>/dev/null || true)
@@ -691,6 +683,21 @@ get_opencode_session() {
 			echo "$sid"
 			return
 		fi
+	fi
+
+	# Method 2: -s flag in process args. Covers the window before the plugin
+	# has written its file, and panes without the plugin.
+	sid=$(echo "$args" | sed -n 's/.*-s \(ses_[A-Za-z0-9_]*\).*/\1/p')
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return
+	fi
+
+	# Method 3: --session flag in process args (supports --session=<id> too)
+	sid=$(echo "$args" | sed -n 's/.*--session[= ] *\(ses_[A-Za-z0-9_]*\).*/\1/p')
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return
 	fi
 
 	# Method 4: SQLite database (version-resilient fallback).
