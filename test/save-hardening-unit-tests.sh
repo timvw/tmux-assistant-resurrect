@@ -286,6 +286,96 @@ env PATH="$STUB_DIR:$PATH" \
 assert_eq "post-open symlink swap cannot redirect save log writes" \
 	"do not overwrite" "$(cat "$RACE_VICTIM")"
 
+echo "== watchdog deadline and sidecar publication =="
+# The gate: a deadline that hit while session lookups were running keeps the
+# previous sidecar; no deadline, or one that came before the lookups, publishes.
+WD_GATE="$SANDBOX/watchdog-gate"
+mkdir -p "$WD_GATE"
+OUTPUT_FILE="$WD_GATE/assistant-sessions.json"
+WATCHDOG_FIRED_FILE="$WD_GATE/fired"
+# shellcheck disable=SC2034 # read by publish_sidecar() from the sourced save script
+WATCHDOG_FIRED_BEFORE_LOOKUPS=0
+: >"$WATCHDOG_FIRED_FILE"
+printf 'old\n' >"$OUTPUT_FILE"
+printf 'new\n' >"$WD_GATE/tmp1"
+publish_sidecar "$WD_GATE/tmp1" 2>/dev/null
+assert_eq "unfired watchdog publishes the new sidecar" new "$(cat "$OUTPUT_FILE")"
+
+echo fired >"$WATCHDOG_FIRED_FILE"
+printf 'newer\n' >"$WD_GATE/tmp2"
+wd_gate_err=$(publish_sidecar "$WD_GATE/tmp2" 2>&1 >/dev/null)
+wd_gate_rc=$?
+assert_eq "deadline during lookups keeps the previous sidecar" new "$(cat "$OUTPUT_FILE")"
+assert_eq "deadline during lookups fails the save" 1 "$wd_gate_rc"
+assert_eq "deadline during lookups discards the temp sidecar" no \
+	"$([ -e "$WD_GATE/tmp2" ] && echo yes || echo no)"
+case "$wd_gate_err" in
+*'keeping previous'*) assert_eq "kept sidecar is diagnosed on stderr" yes yes ;;
+*) assert_eq "kept sidecar is diagnosed on stderr" yes no ;;
+esac
+
+# shellcheck disable=SC2034 # read by publish_sidecar() from the sourced save script
+WATCHDOG_FIRED_BEFORE_LOOKUPS=1
+printf 'newest\n' >"$WD_GATE/tmp3"
+publish_sidecar "$WD_GATE/tmp3" 2>/dev/null
+assert_eq "deadline before lookups still publishes" newest "$(cat "$OUTPUT_FILE")"
+WATCHDOG_FIRED_FILE=""
+# shellcheck disable=SC2034
+WATCHDOG_FIRED_BEFORE_LOOKUPS=0
+
+# End to end: `opencode --help` hangs during warm-up until the watchdog TERMs
+# it. The probe degrades to the pinned fallbacks, the lookups then run
+# untouched, and the complete snapshot must still be published -- a tool whose
+# --help hangs on every save must not freeze the sidecar.
+WD_RUN="$SANDBOX/watchdog-run"
+WD_STUB="$SANDBOX/watchdog-bin"
+mkdir -p "$WD_RUN" "$WD_STUB"
+cat >"$WD_STUB/opencode" <<'STUB'
+#!/bin/sh
+case "$*" in
+*--help*) exec sleep 30 ;;
+esac
+# Stay visible to ps as `opencode ...` (so no exec), but take the sleep along
+# on TERM so the test leaves nothing behind.
+trap 'kill "$child" 2>/dev/null; exit 0' TERM
+sleep 300 &
+child=$!
+wait "$child"
+STUB
+cat >"$WD_STUB/tmux" <<'STUB'
+#!/bin/sh
+case "$*" in
+*list-panes*P\|*) printf 'P|%%1|%s|0|0|/dev/ttys999|keep\n' "$WD_PANE_PID" ;;
+*list-panes*C\|*) printf 'C|%%1|%s\n' "$WD_CWD" ;;
+*list-panes*) printf 'G|%%1|\n' ;;
+*) exit 1 ;;
+esac
+STUB
+# No ps stub: detection and the watchdog both need the real process table.
+chmod +x "$WD_STUB/opencode" "$WD_STUB/tmux"
+# Detached from the suite's stdout/stderr: a leftover process must never hold a
+# caller's pipe open.
+"${TEST_BASH:-bash}" -c '"$1" -s ses_live & wait' _ "$WD_STUB/opencode" >/dev/null 2>&1 &
+WD_PANE_PID=$!
+sleep 1
+printf '%s\n' '{"sessions":[],"relaunch":[]}' >"$WD_RUN/assistant-sessions.json"
+wd_stderr=$(env PATH="$WD_STUB:$PATH" WD_PANE_PID="$WD_PANE_PID" WD_CWD="$SANDBOX" \
+	TMUX_RESURRECT_DIR="$WD_RUN" \
+	TMUX_ASSISTANT_RESURRECT_DIR="$SANDBOX/watchdog-state" \
+	ASSISTANT_RESURRECT_SAVE_TIMEOUT=1 \
+	"${TEST_BASH:-bash}" "$REPO_DIR/scripts/save-assistant-sessions.sh" 2>&1 >/dev/null)
+wd_status=$?
+pkill -TERM -P "$WD_PANE_PID" 2>/dev/null
+kill "$WD_PANE_PID" 2>/dev/null
+wait "$WD_PANE_PID" 2>/dev/null
+assert_eq "save completes after a hung --help probe is terminated" 0 "$wd_status"
+assert_eq "session found after the deadline is published" ses_live \
+	"$(jq -r '.sessions[0].session_id // empty' "$WD_RUN/assistant-sessions.json" 2>/dev/null)"
+case "$wd_stderr" in
+*'keeping previous'*) assert_eq "pre-lookup deadline does not report a kept sidecar" no yes ;;
+*) assert_eq "pre-lookup deadline does not report a kept sidecar" no no ;;
+esac
+
 echo "== unpredictable archive replacement =="
 ARCHIVE_DIR="$SANDBOX/archive-case"
 mkdir -p "$ARCHIVE_DIR/source/pane_contents"

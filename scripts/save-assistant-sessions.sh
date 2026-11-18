@@ -2919,6 +2919,32 @@ stop_save_watchdog() {
 	WATCHDOG_PID=""
 }
 
+# Rename the freshly built sidecar into place -- unless the watchdog fired
+# while session lookups were running. Its SIGTERM unblocks a wedged lookup
+# precisely so main can finish, but that lookup returned nothing. Usually the
+# TERM also takes the lookup's $() subshell and `set -e` ends the save; if the
+# subshell wins the race and returns empty first, main carries on and the
+# snapshot is missing that pane. Publishing it would silently drop a session
+# the previous sidecar still holds, so such a save keeps the previous sidecar.
+#
+# A deadline reached *before* the lookups started (a `<tool> --help` probe that
+# hung during warm-up, say) is different: the probe degrades to the pinned flag
+# fallbacks by design, the lookups then run untouched, and the snapshot is
+# complete. WATCHDOG_FIRED_BEFORE_LOOKUPS records that case so a tool whose
+# --help always hangs cannot freeze the sidecar forever.
+#
+# Reported on stderr only, like the watchdog's own diagnostic: the log may sit
+# on the stalled filesystem that caused the timeout.
+publish_sidecar() {
+	local tmp="$1"
+	if [ "${WATCHDOG_FIRED_BEFORE_LOOKUPS:-0}" != 1 ] && [ -s "${WATCHDOG_FIRED_FILE:-/nonexistent}" ]; then
+		rm -f "$tmp"
+		echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] save hook reached its ${SAVE_TIMEOUT}s deadline; session lookups were interrupted, keeping previous $OUTPUT_FILE" >&2
+		return 1
+	fi
+	mv -f "$tmp" "$OUTPUT_FILE"
+}
+
 # --- Main ---
 
 # Save flow: snapshot the process table and the tmux pane table once each,
@@ -2940,6 +2966,7 @@ main() {
 	WATCHDOG_PID=""
 	WATCHDOG_SELF_FILE=""
 	WATCHDOG_FIRED_FILE=""
+	WATCHDOG_FIRED_BEFORE_LOOKUPS=0
 	SESSIONS_TMP=""
 	OUTPUT_TMP=""
 	# stop_save_watchdog MUST run before the rm: it reads WATCHDOG_FIRED_FILE to
@@ -3092,6 +3119,11 @@ main() {
 	# Only tools present in MATCHES are warmed (see _warm_session_discovery).
 	_warm_session_discovery "$MATCHES"
 
+	# From here on a watchdog TERM can cut a session lookup short; see
+	# publish_sidecar for why it matters whether the deadline came before this.
+	WATCHDOG_FIRED_BEFORE_LOOKUPS=0
+	[ -s "${WATCHDOG_FIRED_FILE:-/nonexistent}" ] && WATCHDOG_FIRED_BEFORE_LOOKUPS=1
+
 	# Process only matched panes (those with a detected tool)
 	if [ -n "$MATCHES" ]; then
 		local current_target="" current_cwd="" current_tty="" pane_candidates=""
@@ -3146,8 +3178,11 @@ main() {
 		return 1
 	fi
 	rm -f "$SESSIONS_TMP"
-	mv -f "$OUTPUT_TMP" "$OUTPUT_FILE"
 	SESSIONS_TMP=""
+	if ! publish_sidecar "$OUTPUT_TMP"; then
+		OUTPUT_TMP=""
+		return 1
+	fi
 	OUTPUT_TMP=""
 	count=$(jq '.sessions | length' "$OUTPUT_FILE")
 	relaunch_count=$(jq '.relaunch | length' "$OUTPUT_FILE")
