@@ -51,6 +51,20 @@ jobs:
       - name: node --check (JS plugin)
         run: node --check hooks/opencode-session-track.js && node --check hooks/opencode2/tui.js
 
+  links:
+    runs-on: ubuntu-latest
+    name: docs (relative links + anchors)
+    steps:
+      - uses: actions/checkout@v7
+
+      # Offline: only repo-relative links and #anchors are checked, so an
+      # external site being down never turns the build red. This guards the
+      # README <-> docs/ cross-links.
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --include-fragments --no-progress './**/*.md'
+          fail: true
+
   test:
     runs-on: ubuntu-latest
     strategy:

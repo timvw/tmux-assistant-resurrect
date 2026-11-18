@@ -7,8 +7,9 @@ classification or screen content analysis. The save script:
 
 1. Takes a single `ps -eo pid= -o ppid= -o args=` snapshot (efficient, no per-pane calls)
 2. For each tmux pane, finds direct child processes of the pane's shell
-3. Matches binary names via `case` patterns (`*/claude`, `*/copilot`,
-   `*/opencode`, `*/codex`, `*/pi`, `*/omp`, `*/grok`)
+3. Matches binary names via `case` patterns (`*/claude`, `agent`/`cursor-agent`,
+   `*/copilot`, `*/opencode`, `*/codex`, `*/pi`, `*/omp`, `*/grok`, `*/agy`,
+   `*/kiro-cli`)
 4. Excludes known false positives (e.g., `opencode run ...` LSP subprocesses)
 
 This is simple, fast, and deterministic. No API calls, no LLM costs, no

@@ -18,9 +18,28 @@ restore them automatically.
 - `scripts/save-assistant-sessions.sh` -- Resurrect post-save hook (process detection + session IDs + enriched fields via `extract_cli_args()`)
 - `scripts/restore-assistant-sessions.sh` -- Resurrect post-restore hook (resumes assistants with CLI flags + env vars)
 - `config/` -- tmux configuration snippet (used by `just install`, not TPM)
-- `docs/design-principles.md` -- Detection approach, session ID extraction, process title behavior
+- `docs/` -- User and contributor documentation (see [Documentation](#documentation))
 - `justfile` -- Developer recipes (install, uninstall, status, test); end users use TPM
 - `test/` -- Docker-based integration tests with real CLI binaries
+
+## Documentation
+
+`README.md` is the landing page: pitch, install, usage, a short limitations
+summary and a table of contents. Keep it short. Details belong in `docs/`:
+
+- `docs/configuration.md` -- every `@assistant-resurrect-*` option and env var, state/save locations, secrets handling
+- `docs/assistants.md` -- per-assistant session-ID extraction table and how each one is tracked and resumed
+- `docs/troubleshooting.md` -- symptom/check table and the full limitations list
+- `docs/architecture.md` -- save/restore flow, hook internals, repository layout
+- `docs/design-principles.md` -- detection approach, session ID extraction, process title behavior
+- `docs/walkthrough.md` -- manual save/kill/restore walkthrough with example output
+- `docs/testing.md` -- how to run the test suites and benchmarks
+- `docs/notes/` -- investigation notes; not user documentation
+
+When behavior changes, update the page that owns the topic rather than adding
+detail to the README. Link to a section of another page instead of repeating
+it, and use relative links (`configuration.md#state-roots`) so they work on
+GitHub. CI runs a link checker over all Markdown files.
 
 ## Design constraints
 
@@ -521,10 +540,15 @@ conversation establishes that.
 4. Optionally add a hook/plugin in `hooks/` if the tool doesn't expose session IDs externally
 5. Update install/uninstall recipes in `justfile` and `tmux-assistant-resurrect.tmux` if a new hook was added
 6. Add tests in `test/run-tests.sh`
+7. Document it: the supported list in `README.md` (intro, How it works,
+   prerequisites, installation), a row in the extraction table plus a section in
+   `docs/assistants.md`, a row in the troubleshooting table and any limitations
+   in `docs/troubleshooting.md`, and its state-root variable in
+   `docs/configuration.md` if it has one
 
 ## Commit messages
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):
 - `feat: add support for <tool>`
 - `fix: handle <edge case>`
-- `docs: update README`
+- `docs: document <option>`
