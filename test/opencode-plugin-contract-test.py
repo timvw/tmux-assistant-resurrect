@@ -43,6 +43,16 @@ def wait_for(read, predicate, label):
     raise AssertionError(f"Timed out: {label}")
 
 
+def holds_for(read, predicate, label, window=1.5):
+    """Require predicate on every sample over the window (for "nothing changes")."""
+    deadline = time.monotonic() + window
+    while time.monotonic() < deadline:
+        value = read()
+        if not predicate(value):
+            raise AssertionError(f"{label}: {value!r}")
+        time.sleep(0.1)
+
+
 @contextlib.contextmanager
 def server(binary, home, env):
     with socket.socket() as sock:
@@ -174,9 +184,9 @@ def run(v1, v2, root):
             )
 
         def stays(session_id, label):
-            # Give a wrong write time to land, then require the expected id.
-            time.sleep(1)
-            wait_for(read_state, lambda value: value is not None and value["session_id"] == session_id, label)
+            # A wrong write lands asynchronously, so one sample proves little:
+            # every sample over the window must name the expected session.
+            holds_for(read_state, lambda value: value is not None and value["session_id"] == session_id, label)
 
         prompt(first["id"])
         wait_for(read_state, lambda value: value and value["session_id"] == first["id"], "V1 user message records its session")
@@ -193,8 +203,7 @@ def run(v1, v2, root):
     # with its metadata, fetched from the server, once it is used.
     with server(v1, home, env) as request:
         wait_for(lambda: request("/session"), lambda value: isinstance(value, list), "V1 restart ready")
-        time.sleep(1)
-        assert read_state() is None, "V1 restart recorded a session before it was used"
+        holds_for(read_state, lambda value: value is None, "V1 restart recorded a session before it was used")
         request(
             f"/session/{first['id']}/message",
             "POST",

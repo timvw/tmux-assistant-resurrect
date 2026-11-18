@@ -782,14 +782,16 @@ assert_eq "OpenCode plugin ignores subagent sessions and drops its own archived 
 # that changes (a rename in the picker, say), so it may only refresh the one on
 # record; a user message or an explicit TUI selection moves the record, but a
 # subagent's "user" message (sent by the task tool) never does. A session the
-# plugin has not seen is looked up through the client, once.
+# plugin has not seen is looked up through the client, once; one the lookup
+# cannot confirm (unknown, or the call throws) is not recorded, since it might
+# be a subagent.
 node_result=$(MODULE_URL="$MODULE_URL" TMUX_ASSISTANT_RESURRECT_DIR="$OPEN_STATE" \
     PATH="$FAKE_BIN:$PATH" node --input-type=module <<'NODE'
 import { readFileSync, existsSync } from "fs";
 const { SessionTracker } = await import(process.env.MODULE_URL);
 const lookups = [];
 const known = { old: { id: "old", title: "from server" }, "old-child": { id: "old-child", parentID: "old" } };
-const client = { session: { get: async ({ path }) => { lookups.push(path.id); return { data: known[path.id] }; } } };
+const client = { session: { get: async ({ path }) => { lookups.push(path.id); if (path.id === "broken") throw new Error("down"); return { data: known[path.id] }; } } };
 const plugin = await SessionTracker({ client, directory: "/work" });
 const file = `${process.env.TMUX_ASSISTANT_RESURRECT_DIR}/opencode-${process.pid}.json`;
 const read = () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null);
@@ -818,13 +820,16 @@ await userMessage("old-child");
 out.push(current());                                   // old: looked-up child ignored
 await userMessage("old");
 out.push(lookups.join(","));                           // old,old-child: one lookup each
+await userMessage("unknown");
+await userMessage("broken");
+out.push(current());                                   // old: unconfirmed sessions not recorded
 await ev("session.deleted", { info: { id: "old" } });
 out.push(current());                                   // <none>: deleted record dropped
 console.log(out.join("\t"));
 NODE
 )
 assert_eq "OpenCode plugin records the session in use, not every session that changes" \
-    $'a\ta\ta\ta\tA renamed\tb:B renamed\told:from server\told\told,old-child\t<none>' "$node_result"
+    $'a\ta\ta\ta\tA renamed\tb:B renamed\told:from server\told\told,old-child\told\t<none>' "$node_result"
 
 # A plugin must not turn SIGTERM into a successful process exit. This subprocess
 # stays alive after plugin initialization so the observed status is signal-based.

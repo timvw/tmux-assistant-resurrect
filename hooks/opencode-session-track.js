@@ -125,8 +125,11 @@ export const SessionTracker = async ({ client, directory }) => {
     if (info?.id) sessions.set(info.id, info);
   };
   // A session from before this process started (a restored pane resumed with
-  // -s) has not been announced; ask the server once. Best effort: unknown
-  // stays unknown, and is then treated as top-level.
+  // -s) has not been announced; ask the server once. If that fails, return
+  // null and record nothing: without metadata a subagent session cannot be
+  // told apart from a top-level one, and a wrong id here would outrank -s in
+  // the save hook. Leaving the file alone keeps the previous record (or lets
+  // the save hook fall back to -s / the DB).
   const lookup = async (sessionID) => {
     if (sessions.has(sessionID)) return sessions.get(sessionID);
     try {
@@ -138,7 +141,7 @@ export const SessionTracker = async ({ client, directory }) => {
     } catch {
       // Older client or no server: fall through
     }
-    return { id: sessionID };
+    return null;
   };
 
   const recordedSessionID = () => {
