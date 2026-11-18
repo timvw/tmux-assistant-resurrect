@@ -11,10 +11,10 @@
 | Session ID missing, hook *is* installed | Check `assistant-save.log` — a `no session ID available` line names the state file it looked for. If that directory is empty but `ls ~/.local/state/tmux-assistant-resurrect` elsewhere is not, the two sides disagree on the path; see [State directory](configuration.md#state-directory) |
 | Session ID missing for Cursor Agent CLI | Verify the hook is installed: `jq '.hooks.sessionStart' ~/.cursor/hooks.json`, and that `@assistant-resurrect-cursor` is not `off`. Only the `agent`/`cursor-agent` CLI is tracked, not Cursor Desktop |
 | Session ID missing for Copilot | Check `ls ~/.copilot/session-state/*/inuse.*.lock` — the number in the filename must be the native Copilot PID from `ps`. If you set `COPILOT_HOME`, the save hook must see it too (tmux hooks do not inherit your shell profile; use `tmux set-environment -g COPILOT_HOME ...`) |
-| Session ID missing for OpenCode | Launch with `-s <id>`, or verify the plugin: `ls ~/.config/opencode/plugins/session-tracker.js`. The DB fallback follows `XDG_DATA_HOME` (default `~/.local/share`); on macOS set it for tmux too (`tmux set-environment -g XDG_DATA_HOME ...`) |
+| Session ID missing for OpenCode | Launch with `-s <id>`, or verify the plugin: `ls ~/.config/opencode/plugins/session-tracker.js` (OpenCode v1) or `ls ~/.config/opencode/plugins/assistant-resurrect` (OpenCode v2). The DB fallback follows `XDG_DATA_HOME` (default `~/.local/share`); on macOS set it for tmux too (`tmux set-environment -g XDG_DATA_HOME ...`) |
 | Session ID missing for Codex | Verify `session-tags.jsonl` under `CODEX_HOME` (default `~/.codex`) lists your Codex PID. If you set `CODEX_HOME`, the save hook reads it from the process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g CODEX_HOME ...`) |
 | Session ID missing for Pi | Verify session files exist under `~/.pi/agent/sessions/--<cwd>--/*.jsonl` and that pane cwd matches the Pi session cwd |
-| Session ID missing for Grok | Verify `~/.grok/active_sessions.json` exists and contains an entry with your Grok process's PID: `jq '.[] | select(.pid == <PID>)' ~/.grok/active_sessions.json`. If you set `GROK_HOME`, the save hook reads it from the Grok process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g GROK_HOME ...`) |
+| Session ID missing for Grok | Verify `~/.grok/active_sessions.json` exists and contains an entry with your Grok process's PID: `jq '.[] \| select(.pid == <PID>)' ~/.grok/active_sessions.json`. If you set `GROK_HOME`, the save hook reads it from the Grok process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g GROK_HOME ...`) |
 | Session ID missing for Kiro CLI | Find the lock-holding PID under the pane (`ps -eo pid,ppid,args`): `kiro-cli-chat acp` in the default TUI, the `bun` TUI process with `--v3`. Check it appears in a lock: `grep -l '"pid":<PID>,' "${KIRO_HOME:-$HOME/.kiro}"/sessions/cli/*.lock "${KIRO_HOME:-$HOME/.kiro}"/sessions/*/sess_*/.lock` (use the Kiro process's `KIRO_HOME` if your shell does not have it). The matching metadata (`cli/<uuid>.json` or `sess_<uuid>/session.json`) must exist too. If you set `KIRO_HOME`, the save hook reads it from the process on Linux/WSL; on macOS set it for tmux too (`tmux set-environment -g KIRO_HOME ...`). `--classic`/`--legacy-ui` panes keep no lock and cannot be resolved |
 | Session ID missing for Antigravity CLI | agy is resolved from the log file its process has open. A brand-new, still-empty conversation has no selection event yet and is skipped by design; launching with `--conversation <UUID>` also works. See [Antigravity CLI](assistants.md#antigravity-cli-agy) |
 | Session ID missing for Oh My Pi | The primary method is a terminal breadcrumb under `$XDG_STATE_HOME/omp` (or `~/.local/state/omp`); verify the pane tty matches the breadcrumb file. Fallback is `--resume` / `-r` / `--restore` in process args. `--session-dir` or `--profile` scoped JSONL lookup is also used when those flags are present |
@@ -27,14 +27,20 @@
 
 - **Running state is not preserved**: Assistants restart with their conversation
   history loaded, but any in-flight tool calls or pending operations are lost.
+  Oh My Pi is the exception: with an omp that supports `--restore`, and unless
+  `@assistant-resurrect-omp-restore` is `off`, the interrupted turn and its
+  pending tool calls are continued (see
+  [Oh My Pi: continuing an interrupted turn](configuration.md#oh-my-pi-continuing-an-interrupted-turn)).
 - **Deleted working directories are not replayed**: If a saved pane's working
   directory no longer exists, restore leaves that pane at its shell instead of
   launching the assistant in an unrelated fallback directory.
 - **Session-less modes require one user action per command**: Until you add an
   observed command to the voucher, that pane deliberately returns as a shell.
 - **The voucher is user authority**: `relaunch-add` warns about known hazard
-  tokens, but a user can hand-edit a dangerous command into the file. The safety
-  property is “nothing unattended,” not “nothing dangerous.”
+  tokens, but a user can hand-edit a dangerous command into the file. A vouched
+  command is relaunched on every restore without further confirmation. The
+  safety property is “nothing runs that you did not vouch for exactly,” not
+  “nothing dangerous” and not “nothing unattended.”
 - **Flattened argv is lossy**: `ps` cannot preserve quoted multi-word argument
   boundaries. The advisory shape filter excludes those commands instead of
   proposing a replay it cannot reproduce exactly.
@@ -62,7 +68,9 @@
   with no per-process lock, so its panes are detected but not resolved and are
   not resumed. `--agent-engine v1` and macOS have not been tested.
 - **OpenCode without plugin**: If the OpenCode plugin isn't installed and the
-  process was started without `-s`, the session ID cannot be detected.
+  process was started without `-s`, only the database fallback is left. It
+  matches by working directory (see the same-cwd ambiguity below); when it finds
+  no session for the pane's cwd, the pane returns as a plain shell.
 - **Copilot storage contract**: Copilot support relies on the live session
   writing `session-state/<uuid>/inuse.<pid>.lock`, which is not a documented
   interface. `test/copilot-contract-test.sh` pins it against the real binary;

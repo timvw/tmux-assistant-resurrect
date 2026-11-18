@@ -151,10 +151,12 @@ The main caveats (the [full list](docs/troubleshooting.md#limitations) covers
 each assistant in detail):
 
 - **Running state is not preserved**: assistants come back with their
-  conversation history, but in-flight tool calls are lost.
+  conversation history, but in-flight tool calls are lost (except Oh My Pi,
+  which can continue an interrupted turn).
 - **Some sessions cannot be identified yet**: a Copilot session you have not
-  typed into, OpenCode without its plugin or `-s`, and Kiro's classic UI come
-  back as a plain shell.
+  typed into, Kiro's classic UI, and OpenCode without its plugin or `-s` when
+  its database fallback finds nothing for the pane's directory come back as a
+  plain shell.
 - **Same-cwd ambiguity**: where an assistant falls back to a cwd-scoped lookup
   (OpenCode database, Pi session files, Claude transcripts), two sessions in the
   same directory can be mixed up.
