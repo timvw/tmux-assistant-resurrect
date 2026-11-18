@@ -89,13 +89,31 @@ observed (`agent` or `cursor-agent`) and passes `--resume <session-id>`.
 
 ## OpenCode plugin (`hooks/opencode-session-track.js`)
 
-An OpenCode v1 plugin that listens for `session.created`, `session.updated`, and
-`session.idle` events. On each event, it captures the full session object
-(including model, title, and other metadata) along with init-time context
-(`process.argv`, client API surface) and writes it to
-`$STATE_DIR/opencode-<PID>.json`. This handles the case where
-a user switches sessions at runtime (via `/sessions` or `Ctrl+x l`). The plugin
-also cleans up its state file on process exit (SIGINT, SIGTERM).
+An OpenCode v1 plugin that records the session this OpenCode process is
+working in, with the full session object (model, title and other metadata) and
+init-time context (`process.argv`, client API surface), in
+`$STATE_DIR/opencode-<PID>.json`.
+
+A v1 server plugin cannot see which session the TUI shows, and
+`session.updated` fires for every session that changes: renaming another
+session in the picker looks the same as activity. So only these events move
+the record to a different session:
+
+- `session.created` for a new top-level session;
+- a user message (`message.updated` with role `user`) in a top-level session,
+  meaning someone prompted it;
+- `tui.session.select`, an explicit selection through the TUI API.
+
+`session.updated` only refreshes the session already on record, and drops it
+once that session is archived or deleted. Subagent sessions are never
+recorded, even though the task tool prompts them with "user" messages. A
+session the plugin has not seen yet (one a restored pane resumed with `-s`) is
+looked up through the plugin's client.
+
+A runtime switch (via `/sessions` or `Ctrl+x l`) is therefore recorded once you
+send a message in the new session. Switching and only reading leaves the
+previous session on record. The plugin also cleans up its state file on process
+exit (SIGINT, SIGTERM).
 
 ## OpenCode v2 plugin (`hooks/opencode2/tui.js`)
 

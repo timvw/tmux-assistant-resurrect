@@ -155,14 +155,58 @@ def run(v1, v2, root):
             assert data["env"]["TEST_CAPTURE_VAR"] == "contract value"
             assert data["env"]["tmux_pane"] == "%contract-test"
             assert (state / f"opencode-{data['pid']}.json").stat().st_mode & 0o777 == 0o600
-        request(f"/session/{info['id']}", "PATCH", {"title": "contract updated"})
+        second = info
+        first = next(s for s in request("/session") if s["title"] == "contract first")
+        request(f"/session/{second['id']}", "PATCH", {"title": "contract updated"})
         wait_for(
             read_state,
             lambda value: value is not None and value["session"].get("title") == "contract updated",
             "V1 native session.updated tracking",
         )
+
+        # The file must name the session in use, not the last one any event
+        # mentioned. noReply records a user message without a model call.
+        def prompt(session_id):
+            request(
+                f"/session/{session_id}/message",
+                "POST",
+                {"noReply": True, "parts": [{"type": "text", "text": "contract"}]},
+            )
+
+        def stays(session_id, label):
+            # Give a wrong write time to land, then require the expected id.
+            time.sleep(1)
+            wait_for(read_state, lambda value: value is not None and value["session_id"] == session_id, label)
+
+        prompt(first["id"])
+        wait_for(read_state, lambda value: value and value["session_id"] == first["id"], "V1 user message records its session")
+        request(f"/session/{second['id']}", "PATCH", {"title": "renamed elsewhere"})
+        stays(first["id"], "V1 rename of another session leaves the recorded one")
+        child = request("/session", "POST", {"title": "contract child", "parentID": first["id"]})
+        prompt(child["id"])
+        stays(first["id"], "V1 subagent session is never recorded")
+        request("/tui/select-session", "POST", {"sessionID": second["id"]})
+        wait_for(read_state, lambda value: value and value["session_id"] == second["id"], "V1 tui.session.select records its session")
     wait_for(lambda: list(state.glob("*.json")), lambda files: not files, "V1 exit cleanup")
-    print(f"PASS: {version} native plugin loads, tracks created/updated sessions, captures env, cleans up")
+
+    # A session from before the process started (a restored pane) is recorded
+    # with its metadata, fetched from the server, once it is used.
+    with server(v1, home, env) as request:
+        wait_for(lambda: request("/session"), lambda value: isinstance(value, list), "V1 restart ready")
+        time.sleep(1)
+        assert read_state() is None, "V1 restart recorded a session before it was used"
+        request(
+            f"/session/{first['id']}/message",
+            "POST",
+            {"noReply": True, "parts": [{"type": "text", "text": "contract"}]},
+        )
+        data = wait_for(read_state, lambda value: value and value["session_id"] == first["id"], "V1 pre-existing session recorded")
+        assert data["session"].get("title") == "contract first", data["session"]
+    wait_for(lambda: list(state.glob("*.json")), lambda files: not files, "V1 restart exit cleanup")
+    print(
+        f"PASS: {version} native plugin loads, records the session in use (not renamed or "
+        "subagent sessions), follows tui.session.select, captures env, cleans up"
+    )
 
     home = root / "v2"
     env = environment(home, v2)
