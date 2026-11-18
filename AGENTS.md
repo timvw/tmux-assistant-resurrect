@@ -541,7 +541,7 @@ conversation establishes that.
 5. Update install/uninstall recipes in `justfile` and `tmux-assistant-resurrect.tmux` if a new hook was added
 6. Add tests in `test/run-tests.sh`
 7. Document it: the supported list in `README.md` (intro, How it works,
-   prerequisites, installation), a row in the extraction table plus a section in
+   installation; assistants are not prerequisites), a row in the extraction table plus a section in
    `docs/assistants.md`, a row in the troubleshooting table and any limitations
    in `docs/troubleshooting.md`, and its state-root variable in
    `docs/configuration.md` if it has one

@@ -49,11 +49,17 @@ tmux-resurrect's save directory.
 > `TMUX_RESURRECT_DIR` to override.
 
 Find your actual save directory with `just status` (from the plugin directory)
-or this one-liner that mirrors the same resolution logic:
+or this snippet, which mirrors the same resolution logic:
 
 ```bash
-RESURRECT_DIR="${TMUX_RESURRECT_DIR:-$(tmux show-option -gqv @resurrect-dir 2>/dev/null)}"
-[ -n "$RESURRECT_DIR" ] || { [ -d ~/.tmux/resurrect ] && RESURRECT_DIR=~/.tmux/resurrect || RESURRECT_DIR=${XDG_DATA_HOME:-~/.local/share}/tmux/resurrect; }
+if [ -n "${TMUX_RESURRECT_DIR:-}" ]; then
+  RESURRECT_DIR=$TMUX_RESURRECT_DIR
+else
+  RESURRECT_DIR=$(tmux show-option -gqv @resurrect-dir 2>/dev/null)
+  [ -n "$RESURRECT_DIR" ] || { [ -d ~/.tmux/resurrect ] && RESURRECT_DIR=~/.tmux/resurrect || RESURRECT_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect; }
+  # @resurrect-dir may contain ~, $HOME or $HOSTNAME: expand them like resurrect does
+  RESURRECT_DIR=$(printf '%s\n' "$RESURRECT_DIR" | sed "s,\$HOME,$HOME,g; s,\$HOSTNAME,$(hostname),g; s,~,$HOME,g")
+fi
 ```
 
 You can inspect what was saved:
@@ -109,6 +115,10 @@ target grammar reserves. Restore matches the three parts against
 
 ## 4. Kill tmux (simulate a reboot)
 
+> **Warning:** `tmux kill-server` ends *every* session on this tmux server,
+> including unrelated ones, and everything running in them. Save or close any
+> other work first.
+
 ```bash
 tmux kill-server
 ```
@@ -136,12 +146,16 @@ command to each pane, preserving the original CLI flags and environment:
 
 If the session was launched with flags like `--dangerously-skip-permissions` or
 `--model`, those flags are captured from `ps` at save time and replayed on
-restore. Environment variables configured via `@assistant-resurrect-capture-env`
+restore, for most assistants. Grok and Kiro CLI deliberately resume without
+replaying flags, and flags are lost if an assistant hides its arguments from
+`ps`; see [Supported assistants](assistants.md) for the per-assistant details. Environment variables configured via `@assistant-resurrect-capture-env`
 are prepended to the resume command.
 
 ## 6. Verify
 
-Check the restore log to see what happened:
+`tmux kill-server` also ended the shell where you set `RESURRECT_DIR`, so run
+the snippet from [step 3](#3-save) again in the new shell first. Then check the
+restore log to see what happened:
 
 ```bash
 cat "$RESURRECT_DIR/assistant-restore.log"

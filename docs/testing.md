@@ -53,7 +53,7 @@ To compare your current checkout against another repo path (for example a
 worktree on `main`):
 
 ```bash
-just benchmark base_repo=/path/to/base/worktree
+just benchmark 7 /path/to/base/worktree   # runs, then base_repo (positional)
 ```
 
 Results are written to:

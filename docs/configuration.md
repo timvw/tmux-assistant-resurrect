@@ -134,8 +134,9 @@ VIRTUAL_ENV='/home/user/.venv' claude --resume <session-id>
 to capture from at launch. On **Linux and WSL**, the save hook instead reads the
 configured variables straight from each detected assistant's environment via
 `/proc/<pid>/environ`, so values like `CODEX_HOME` survive a restart. Only the
-variables you list in `@assistant-resurrect-capture-env` are read — nothing else
-is inspected — and where a value is available from both a session hook and the
+variables you list in `@assistant-resurrect-capture-env` are read, plus the
+assistant's own state-root variable (see [State roots](#state-roots)); nothing
+else is inspected. Where a value is available from both a session hook and the
 live process, the live process wins.
 
 > **Platform note:** Reading another process's environment is only possible

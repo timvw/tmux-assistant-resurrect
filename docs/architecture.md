@@ -64,7 +64,10 @@ second line of defense.
 
 Runs after each tmux-resurrect restore. Reads the sidecar JSON and reconstructs
 the full CLI invocation for each assistant: `<env_prefix> <binary> <cli_args>
-<resume_arg>`. Sends the command to each pane via `tmux send-keys`. If enriched
+<resume_arg>`. Grok and Kiro CLI are the exception: they resume with a bare
+command and ignore `cli_args`, because the session file carries its own
+settings and replaying captured argv could resubmit a stale prompt (see
+[Supported assistants](assistants.md)). Sends the command to each pane via `tmux send-keys`. If enriched
 fields are missing (old-format JSON), falls back to bare resume commands. For a
 `.relaunch` entry, it instead requires an exact current voucher match and builds
 the command from the matching voucher line.
