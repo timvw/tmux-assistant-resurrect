@@ -67,6 +67,10 @@
   UI (`--classic`/`--legacy-ui`) keeps its conversations in a SQLite database
   with no per-process lock, so its panes are detected but not resolved and are
   not resumed. `--agent-engine v1` and macOS have not been tested.
+- **OpenCode v1 session switches**: the v1 plugin cannot see which session the
+  TUI shows, so a session you switched to is only recorded once you send a
+  message in it. Switch and only read, and the restore reopens the session you
+  last used. OpenCode v2 tracks the session in view directly.
 - **OpenCode without plugin**: If the OpenCode plugin isn't installed and the
   process was started without `-s`, only the database fallback is left. It
   matches by working directory (see the same-cwd ambiguity below); when it finds

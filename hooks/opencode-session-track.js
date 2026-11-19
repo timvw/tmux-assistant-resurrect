@@ -1,8 +1,21 @@
-// OpenCode plugin — tracks active session context to a file on disk.
-// Fires on session.created, session.updated, and session.idle events.
-// Captures full session metadata (model, title, etc.) and configurable
-// environment variables for richer save/restore context.
-// Cleans up state file on process exit.
+// OpenCode plugin — tracks the session this OpenCode process is working in.
+//
+// The save hook reads this file before -s/--session in argv, so it must name
+// the session the user is actually using, not merely the last one any event
+// mentioned. A server plugin cannot see which session the TUI shows, and
+// `session.updated` fires for *every* session that changes -- renaming another
+// session in the picker looks exactly like activity. So only these events
+// decide which session is recorded:
+//   - session.created for a top-level session (this process just made it)
+//   - a user message (message.updated, role "user") in a top-level session:
+//     someone prompted it, which is what using a session looks like
+//   - tui.session.select (an explicit selection through the TUI API)
+// session.updated only refreshes the metadata of the session already on
+// record (or drops it once archived). Subagent sessions are never recorded:
+// the task tool prompts them with "user" messages of its own.
+//
+// Captures session metadata (model, title, etc.) and configurable environment
+// variables for richer save/restore context. Cleans up on process exit.
 //
 // Install: symlink into ~/.config/opencode/plugins/ (global) or .opencode/plugins/ (project).
 
@@ -104,9 +117,43 @@ export const SessionTracker = async ({ client, directory }) => {
     process.prependListener(signal, cleanupOnSignal);
   }
 
-  const writeSessionFile = (event) => {
-    const sessionInfo = event.properties?.info || {};
-    const sessionID = sessionInfo.id || event.properties?.id;
+  // Session metadata seen on this server, by id. Lets a user message (which
+  // carries only a sessionID) be checked for a parent and recorded with its
+  // title/model, and is kept current by session.created/updated.
+  const sessions = new Map();
+  const remember = (info) => {
+    if (info?.id) sessions.set(info.id, info);
+  };
+  // A session from before this process started (a restored pane resumed with
+  // -s) has not been announced; ask the server once. If that fails, return
+  // null and record nothing: without metadata a subagent session cannot be
+  // told apart from a top-level one, and a wrong id here would outrank -s in
+  // the save hook. Leaving the file alone keeps the previous record (or lets
+  // the save hook fall back to -s / the DB).
+  const lookup = async (sessionID) => {
+    if (sessions.has(sessionID)) return sessions.get(sessionID);
+    try {
+      const res = await client?.session?.get?.({ path: { id: sessionID } });
+      if (res?.data?.id === sessionID) {
+        remember(res.data);
+        return res.data;
+      }
+    } catch {
+      // Older client or no server: fall through
+    }
+    return null;
+  };
+
+  const recordedSessionID = () => {
+    try {
+      return JSON.parse(readFileSync(stateFile, "utf8")).session_id;
+    } catch {
+      return null; // No file or unreadable
+    }
+  };
+
+  const writeSessionFile = (sessionInfo, eventType) => {
+    const sessionID = sessionInfo?.id;
     if (!sessionID) return;
     // Subagent (child) and archived sessions are not resumable top-level
     // conversations. The DB fallback (scripts/py/opencode_db.py) excludes them
@@ -117,13 +164,7 @@ export const SessionTracker = async ({ client, directory }) => {
     // restored. Removing it hands the next save to the DB fallback.
     if (sessionInfo.parentID) return;
     if (sessionInfo.time?.archived) {
-      let stored = null;
-      try {
-        stored = JSON.parse(readFileSync(stateFile, "utf8")).session_id;
-      } catch {
-        // No file or unreadable: nothing of ours to invalidate
-      }
-      if (stored === sessionID) cleanup();
+      if (recordedSessionID() === sessionID) cleanup();
       return;
     }
 
@@ -144,7 +185,7 @@ export const SessionTracker = async ({ client, directory }) => {
         cwd: directory || process.cwd(),
         timestamp: new Date().toISOString(),
         session: sessionInfo,
-        event_type: event.type,
+        event_type: eventType,
         init: initContext,
         env: env,
       },
@@ -171,13 +212,34 @@ export const SessionTracker = async ({ client, directory }) => {
 
   return {
     event: async ({ event }) => {
-      const sessionEvents = [
-        "session.created",
-        "session.updated",
-        "session.idle",
-      ];
-      if (sessionEvents.includes(event.type)) {
-        writeSessionFile(event);
+      const props = event.properties || {};
+      switch (event.type) {
+        case "session.created":
+          remember(props.info);
+          writeSessionFile(props.info, event.type);
+          break;
+        case "session.updated":
+          remember(props.info);
+          // Only the session on record: an update to any other session (a
+          // rename in the picker, say) says nothing about where the user is.
+          if (props.info?.id && props.info.id === recordedSessionID()) {
+            writeSessionFile(props.info, event.type);
+          }
+          break;
+        case "session.deleted":
+          if (props.info?.id) sessions.delete(props.info.id);
+          if (props.info?.id && props.info.id === recordedSessionID()) cleanup();
+          break;
+        case "message.updated":
+          if (props.info?.role === "user" && props.info.sessionID) {
+            writeSessionFile(await lookup(props.info.sessionID), event.type);
+          }
+          break;
+        case "tui.session.select":
+          if (props.sessionID) {
+            writeSessionFile(await lookup(props.sessionID), event.type);
+          }
+          break;
       }
     },
   };

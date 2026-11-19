@@ -743,7 +743,7 @@ node_result=$(MODULE_URL="$MODULE_URL" TMUX_ASSISTANT_RESURRECT_DIR="$OPEN_STATE
 import { statSync, readFileSync, readdirSync } from "fs";
 const { SessionTracker } = await import(process.env.MODULE_URL);
 const plugin = await SessionTracker({ client: {}, directory: "/work" });
-await plugin.event({ event: { type: "session.updated", properties: { info: { id: "open-test" } } } });
+await plugin.event({ event: { type: "session.created", properties: { info: { id: "open-test" } } } });
 const file = `${process.env.TMUX_ASSISTANT_RESURRECT_DIR}/opencode-${process.pid}.json`;
 const mode = (statSync(file).mode & 0o777).toString(8);
 const data = JSON.parse(readFileSync(file, "utf8"));
@@ -762,15 +762,15 @@ const { SessionTracker } = await import(process.env.MODULE_URL);
 const plugin = await SessionTracker({ client: {}, directory: "/work" });
 const file = `${process.env.TMUX_ASSISTANT_RESURRECT_DIR}/opencode-${process.pid}.json`;
 const current = () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")).session_id : "<none>");
-const send = (info) => plugin.event({ event: { type: "session.updated", properties: { info } } });
-await send({ id: "parent" });
-await send({ id: "child", parentID: "parent" });
+const send = (type, info) => plugin.event({ event: { type, properties: { info, sessionID: info.id } } });
+await send("session.created", { id: "parent" });
+await send("session.created", { id: "child", parentID: "parent" });
 const afterChild = current();
-await send({ id: "other", time: { archived: 1 } });
+await send("session.updated", { id: "other", time: { archived: 1 } });
 const afterOtherArchived = current();
-await send({ id: "next-parent", time: { created: 1 } });
+await send("session.created", { id: "next-parent", time: { created: 1 } });
 const afterNext = current();
-await send({ id: "next-parent", time: { created: 1, archived: 2 } });
+await send("session.updated", { id: "next-parent", time: { created: 1, archived: 2 } });
 const afterOwnArchived = current();
 console.log(`${afterChild}\t${afterOtherArchived}\t${afterNext}\t${afterOwnArchived}`);
 NODE
@@ -778,13 +778,66 @@ NODE
 assert_eq "OpenCode plugin ignores subagent sessions and drops its own archived one" \
     $'parent\tparent\tnext-parent\t<none>' "$node_result"
 
+# The file names the session in use. session.updated fires for every session
+# that changes (a rename in the picker, say), so it may only refresh the one on
+# record; a user message or an explicit TUI selection moves the record, but a
+# subagent's "user" message (sent by the task tool) never does. A session the
+# plugin has not seen is looked up through the client, once; one the lookup
+# cannot confirm (unknown, or the call throws) is not recorded, since it might
+# be a subagent.
+node_result=$(MODULE_URL="$MODULE_URL" TMUX_ASSISTANT_RESURRECT_DIR="$OPEN_STATE" \
+    PATH="$FAKE_BIN:$PATH" node --input-type=module <<'NODE'
+import { readFileSync, existsSync } from "fs";
+const { SessionTracker } = await import(process.env.MODULE_URL);
+const lookups = [];
+const known = { old: { id: "old", title: "from server" }, "old-child": { id: "old-child", parentID: "old" } };
+const client = { session: { get: async ({ path }) => { lookups.push(path.id); if (path.id === "broken") throw new Error("down"); return { data: known[path.id] }; } } };
+const plugin = await SessionTracker({ client, directory: "/work" });
+const file = `${process.env.TMUX_ASSISTANT_RESURRECT_DIR}/opencode-${process.pid}.json`;
+const read = () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null);
+const current = () => read()?.session_id ?? "<none>";
+const ev = (type, properties) => plugin.event({ event: { type, properties } });
+const userMessage = (sessionID) => ev("message.updated", { info: { id: `msg-${sessionID}`, sessionID, role: "user" }, sessionID });
+const out = [];
+await ev("session.created", { info: { id: "a", title: "A" } });
+await ev("session.created", { info: { id: "b", title: "B" } });
+await userMessage("a");
+out.push(current());                                   // a: prompted
+await ev("session.updated", { info: { id: "b", title: "B renamed" } });
+out.push(current());                                   // a: rename elsewhere ignored
+await ev("message.updated", { info: { id: "m2", sessionID: "b", role: "assistant" } });
+out.push(current());                                   // a: assistant messages do not move it
+await ev("session.created", { info: { id: "sub", parentID: "a" } });
+await userMessage("sub");
+out.push(current());                                   // a: subagent prompt ignored
+await ev("session.updated", { info: { id: "a", title: "A renamed" } });
+out.push(read()?.session?.title);                      // A renamed: own metadata refreshed
+await ev("tui.session.select", { sessionID: "b" });
+out.push(`${current()}:${read()?.session?.title}`);    // b:B renamed: selection, cached metadata
+await userMessage("old");
+out.push(`${current()}:${read()?.session?.title}`);    // old:from server: looked up
+await userMessage("old-child");
+out.push(current());                                   // old: looked-up child ignored
+await userMessage("old");
+out.push(lookups.join(","));                           // old,old-child: one lookup each
+await userMessage("unknown");
+await userMessage("broken");
+out.push(current());                                   // old: unconfirmed sessions not recorded
+await ev("session.deleted", { info: { id: "old" } });
+out.push(current());                                   // <none>: deleted record dropped
+console.log(out.join("\t"));
+NODE
+)
+assert_eq "OpenCode plugin records the session in use, not every session that changes" \
+    $'a\ta\ta\ta\tA renamed\tb:B renamed\told:from server\told\told,old-child\told\t<none>' "$node_result"
+
 # A plugin must not turn SIGTERM into a successful process exit. This subprocess
 # stays alive after plugin initialization so the observed status is signal-based.
 TMUX_ASSISTANT_RESURRECT_DIR="$OPEN_STATE" MODULE_URL="$MODULE_URL" \
     PATH="$FAKE_BIN:$PATH" node --input-type=module <<'NODE' &
 const { SessionTracker } = await import(process.env.MODULE_URL);
 const plugin = await SessionTracker({ client: {}, directory: "/work" });
-await plugin.event({ event: { type: "session.created", properties: { id: "signal-test" } } });
+await plugin.event({ event: { type: "session.created", properties: { info: { id: "signal-test" } } } });
 setInterval(() => {}, 1000);
 NODE
 node_pid=$!
@@ -793,6 +846,11 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ -f "$signal_state" ] && break
     sleep 0.1
 done
+if [ -f "$signal_state" ]; then
+    pass "OpenCode plugin wrote state before the signal"
+else
+    fail "OpenCode plugin wrote state before the signal"
+fi
 kill -TERM "$node_pid"
 set +e
 wait "$node_pid" 2>/dev/null
