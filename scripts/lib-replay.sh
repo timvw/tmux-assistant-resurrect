@@ -446,6 +446,11 @@ _drop_positional_args() {
 	local word flag="" expects_value=0 variadic=0
 	for word in "${words[@]}"; do
 		case "$word" in
+		--)
+			# End of options: everything after it is the prompt. Keeping it
+			# would turn the flags restore appends into prompt text.
+			break
+			;;
 		-*)
 			out[${#out[@]}]="$word"
 			flag="${word%%=*}"
