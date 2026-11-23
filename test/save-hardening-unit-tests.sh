@@ -655,7 +655,22 @@ if [ -r "/proc/$$/cmdline" ]; then
 	bash "$SANDBOX/launcher/claude" --append-system-prompt-file \
 		"$SANDBOX/sp.md" -- 'review the thing' >/dev/null 2>&1 &
 	SEPARATOR_PID=$!
-	sleep 1
+	# Poll until every launcher has exec'd: $! exists from the fork, and until
+	# the exec its cmdline is still this suite's, which a fixed sleep on a slow
+	# runner would read instead.
+	argv_tries=0
+	for argv_pid in "$SPACED_PID" "$PROMPTED_PID" "$NEWLINE_PID" \
+		"$RESTRICTED_PID" "$VARIADIC_PID" "$EMPTY_PID" "$OPTIONAL_PID" \
+		"$TAIL_RESTRICTED_PID" "$SEPARATOR_PID"; do
+		until tr '\0' ' ' <"/proc/$argv_pid/cmdline" 2>/dev/null |
+			grep -qF "$SANDBOX/launcher/claude "; do
+			argv_tries=$((argv_tries + 1))
+			[ "$argv_tries" -ge 100 ] && break
+			sleep 0.1
+		done
+	done
+	assert_eq "claude launchers show their own argv" yes \
+		"$([ "$argv_tries" -lt 100 ] && echo yes || echo no)"
 	# ps flattens both to the same shape; only cmdline tells them apart.
 	assert_eq "a space-bearing path drops its option and keeps the tail" \
 		"--model opus" \
