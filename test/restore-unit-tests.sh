@@ -943,6 +943,24 @@ assert_contains "OMP pane whose replayed PATH resolves an older omp keeps --resu
 export MOCK_CAPTURE_ENV=''
 unset MOCK_OMP_HELP
 
+echo "== a saved bare -- is not replayed =="
+# Sidecars written before save dropped the end-of-options separator still
+# hold it; replaying it would turn --model/--resume into prompt text.
+export MOCK_PANES='%1|0|0|sep
+%2|0|0|nosep'
+export MOCK_SHELLS=''
+export MOCK_CAPTURE_ENV=''
+jq -n '{sessions:[
+  {pane:"sep:0.0",tool:"claude",session_id:"sid-sep",cwd:"",model:"opus",
+   cli_args:"--append-system-prompt-file /p.md -- stale prompt"},
+  {pane:"nosep:0.0",tool:"claude",session_id:"sid-nosep",cwd:"",cli_args:"--debug --x--y"}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_contains "a saved -- and the text after it are dropped" "$(cat "$TMUX_LOG")" \
+	"send-keys|%1|command claude '--append-system-prompt-file' '/p.md' --model 'opus' --resume 'sid-sep'"
+assert_contains "args without a bare -- are untouched" "$(cat "$TMUX_LOG")" \
+	"send-keys|%2|command claude '--debug' '--x--y' --resume 'sid-nosep'"
+
 echo "== malformed entries are isolated =="
 export MOCK_PANES='%1|0|0|bad-env
 %2|0|0|bad-id

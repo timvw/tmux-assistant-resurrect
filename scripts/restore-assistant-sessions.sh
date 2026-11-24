@@ -259,6 +259,23 @@ while read -r entry; do
 	# restore log, so the save-side fix alone would not close the leak.
 	cli_args=$(strip_credential_flags "$cli_args" "saved $tool cli_args")
 	cli_args=$(replay_filter_cli_args "$tool" "$cli_args")
+	# Sidecars saved before a bare `--` ended the replayable options still
+	# carry it. Restore appends its own flags after cli_args, so replaying it
+	# would hand them to the assistant as prompt text and start a new session.
+	case " $cli_args " in
+	*" -- "*)
+		_kept=""
+		reglob=""
+		case "$-" in *f*) ;; *) reglob=1 ;; esac
+		set -f
+		for _arg in $cli_args; do
+			[ "$_arg" = "--" ] && break
+			_kept="${_kept:+$_kept }$_arg"
+		done
+		[ -n "$reglob" ] && set +f
+		cli_args="$_kept"
+		;;
+	esac
 	model=$(printf '%s\n' "$entry" | jq -r '.model // empty')
 	env_json=$(printf '%s\n' "$entry" | jq -c '.env // {}')
 	env_json=$(replay_filter_env "$tool" "$env_json")
