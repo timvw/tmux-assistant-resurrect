@@ -71,6 +71,41 @@ pane_shell_name() {
 	esac
 }
 
+# Shared by the launch-prefix check and the typed-line check below.
+has_control_chars() {
+	case "$1" in
+	*[[:cntrl:]]*) return 0 ;;
+	esac
+	return 1
+}
+
+# Sets LAUNCH_PREFIX to the tool's quoted wrapper path, or to nothing when the
+# option is unset or its value is rejected. Read from the tmux option only: a
+# sidecar must never be able to name an executable.
+resolve_launch_prefix() {
+	local tool="$1" pane="$2" pane_shell="$3" candidate
+	LAUNCH_PREFIX=""
+	candidate=$(tmux show-option -gqv "@assistant-resurrect-${tool}-launch-prefix" 2>/dev/null || true)
+	[ -n "$candidate" ] || return 0
+	case "$candidate" in
+	/*) ;;
+	*) log "launch prefix for $tool in $pane must be an absolute path, using plain command"; return 0 ;;
+	esac
+	if has_control_chars "$candidate"; then
+		log "launch prefix for $tool in $pane contains control characters, using plain command"
+		return 0
+	fi
+	if [[ "$candidate" =~ [[:space:]] ]]; then
+		log "launch prefix for $tool in $pane contains whitespace, using plain command"
+		return 0
+	fi
+	if [ ! -x "$candidate" ]; then
+		log "launch prefix for $tool in $pane is not executable, using plain command"
+		return 0
+	fi
+	LAUNCH_PREFIX=$(shell_quote "$pane_shell" "$candidate")
+}
+
 if [ ! -f "$INPUT_FILE" ]; then
 	log "no saved sessions found at $INPUT_FILE"
 	exit 0
@@ -584,6 +619,13 @@ while read -r entry; do
 		;;
 	esac
 	fi
+	# Session resumes only: a vouched relaunch stays the exact vouched command.
+	if [ "$kind" = "session" ]; then
+		resolve_launch_prefix "$tool" "$pane" "$pane_cmd"
+		if [ -n "$LAUNCH_PREFIX" ]; then
+			resume_cmd="$LAUNCH_PREFIX ${resume_cmd#command }"
+		fi
+	fi
 
 	# Pin the saved state root, for every tool listed in state_root_var. Not
 	# masked: it is a path save derived itself, not user-supplied credential
@@ -736,12 +778,10 @@ while read -r entry; do
 	# Last line of defence for the entry check above: whatever produced it
 	# (another field, a platform's jq output), a control character in the
 	# typed line would reach the pane's line editor as a keystroke.
-	case "$full_cmd" in
-	*[[:cntrl:]]*)
+	if has_control_chars "$full_cmd"; then
 		log "replay command for $tool in $pane contains control characters, skipping"
 		continue
-		;;
-	esac
+	fi
 
 	if [ "$kind" = "relaunch" ]; then
 		log "relaunching $tool in $pane (cmd: $log_cmd)"

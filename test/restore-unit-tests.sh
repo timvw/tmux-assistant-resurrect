@@ -197,6 +197,8 @@ show-option)
 	@assistant-resurrect-launch-stagger) printf '%s\n' "${MOCK_LAUNCH_STAGGER:-}" ;;
 	@assistant-resurrect-claude-drop-flags) printf '%s\n' "${MOCK_CLAUDE_DROP_FLAGS:-}" ;;
 	@assistant-resurrect-claude-drop-env) printf '%s\n' "${MOCK_CLAUDE_DROP_ENV:-}" ;;
+	@assistant-resurrect-claude-launch-prefix) printf '%s\n' "${MOCK_CLAUDE_LAUNCH_PREFIX:-}" ;;
+	@assistant-resurrect-codex-launch-prefix) printf '%s\n' "${MOCK_CODEX_LAUNCH_PREFIX:-}" ;;
 	@assistant-resurrect-pin-state-root) printf '%s\n' "${MOCK_PIN_STATE_ROOT:-}" ;;
 	@assistant-resurrect-codex-pin-state-root) printf '%s\n' "${MOCK_CODEX_PIN_STATE_ROOT:-}" ;;
 	@assistant-resurrect-relaunch) printf '%s\n' "${MOCK_RELAUNCH_ENABLED:-on}" ;;
@@ -1465,6 +1467,77 @@ for bad in 'abc' '1;rm' '1.2.3' '.' '-1'; do
 	assert_eq "rejected value [$bad] never reaches sleep" "0" "$(pace_counts "$bad")"
 done
 export MOCK_CLEAR_DELAY='' MOCK_LAUNCH_STAGGER=''
+
+echo "== per-tool launch prefix =="
+launch_prefix="$SANDBOX/launch-prefix"
+cat >"$launch_prefix" <<'PREFIX'
+#!/usr/bin/env bash
+export SAFE=wrapped
+exec "$@"
+PREFIX
+chmod +x "$launch_prefix"
+# The sidecar names a prefix too: only the tmux option may set one.
+launch_entry() {
+	jq -n --arg cwd "$SANDBOX" --arg prefix "$launch_prefix" --arg tool "$1" \
+		'{sessions:[{pane:"prefix-test:0.0",session_name:"prefix-test",window_index:"0",pane_index:"0",tool:$tool,session_id:"sid-prefix",cwd:$cwd,env:{SAFE:"captured"},launch_prefix:$prefix}]}' \
+		>"$RESURRECT_DIR/assistant-sessions.json"
+}
+launch_entry claude
+export MOCK_PANES='%91|0|0|prefix-test' MOCK_SHELLS='%91|bash' MOCK_EXEC_SHELL=bash
+export MOCK_CAPTURE_ENV='' MOCK_DROP_ENV='' MOCK_CLAUDE_LAUNCH_PREFIX="$launch_prefix"
+run_restore
+assert_contains 'valid prefix replaces command in front of claude' "$(cat "$TMUX_LOG")" "&& '$launch_prefix' claude --resume 'sid-prefix'"
+prefix_marker=$(cat "$ASSISTANT_MARKER" 2>/dev/null || true)
+assert_contains 'the wrapper runs before the assistant' "$prefix_marker" 'SAFE=wrapped'
+assert_contains "the wrapper's exec passes the arguments through" "$prefix_marker" 'arg=sid-prefix'
+export MOCK_EXEC_SHELL=''
+
+export MOCK_CAPTURE_ENV=SAFE
+run_restore
+assert_contains 'captured env stays in front of the prefix' "$(cat "$TMUX_LOG")" "SAFE='captured' '$launch_prefix' claude --resume 'sid-prefix'"
+export MOCK_CAPTURE_ENV=''
+
+export MOCK_SHELLS='%91|nu'
+run_restore
+assert_contains 'prefix uses Nushell external-command syntax' "$(cat "$TMUX_LOG")" "^r#'$launch_prefix'# claude --resume r#'sid-prefix'#"
+export MOCK_SHELLS='%91|csh'
+run_restore
+assert_contains 'prefix follows the csh env launcher' "$(cat "$TMUX_LOG")" "\\env '$launch_prefix' claude --resume 'sid-prefix'"
+export MOCK_SHELLS=''
+
+# The whitespace case is a real executable, so only its own check rejects it.
+: >"$SANDBOX/not-executable"
+cp "$launch_prefix" "$SANDBOX/path with space"
+for bad_prefix in relative-prefix "$SANDBOX/path with space" "$SANDBOX/not-executable" "$SANDBOX/control$(printf '\001')prefix"; do
+	case "$bad_prefix" in
+	relative-prefix) reason='must be an absolute path' ;;
+	*' with space') reason='contains whitespace' ;;
+	*not-executable) reason='is not executable' ;;
+	*) reason='contains control characters' ;;
+	esac
+	export MOCK_CLAUDE_LAUNCH_PREFIX="$bad_prefix"
+	run_restore
+	assert_contains "rejected prefix ($reason) falls back to the plain command" "$(cat "$TMUX_LOG")" "&& command claude --resume 'sid-prefix'"
+	assert_contains "rejected prefix ($reason) is logged" "$RESTORE_OUTPUT" "$reason"
+done
+
+export MOCK_CLAUDE_LAUNCH_PREFIX='' MOCK_CODEX_LAUNCH_PREFIX="$launch_prefix"
+launch_entry codex
+run_restore
+assert_contains 'the option is read per tool' "$(cat "$TMUX_LOG")" "'$launch_prefix' codex resume 'sid-prefix'"
+export MOCK_CODEX_LAUNCH_PREFIX=''
+launch_entry claude
+run_restore
+assert_not_contains 'a sidecar launch_prefix is ignored' "$(cat "$TMUX_LOG")" "$launch_prefix"
+
+export MOCK_VOUCHER="$SANDBOX/prefix-voucher" MOCK_CLAUDE_LAUNCH_PREFIX="$launch_prefix"
+printf '%s\n' 'claude agents' >"$MOCK_VOUCHER"
+jq -n --arg cwd "$SANDBOX" \
+	'{relaunch:[{pane:"prefix-test:0.0",session_name:"prefix-test",window_index:"0",pane_index:"0",tool:"claude",cmd:"claude agents",cwd:$cwd}]}' \
+	>"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_contains 'a vouched relaunch is sent as vouched' "$(cat "$TMUX_LOG")" "&& command claude 'agents'"
+export MOCK_VOUCHER='' MOCK_CLAUDE_LAUNCH_PREFIX=''
 
 echo "restore unit tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
