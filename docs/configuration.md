@@ -280,6 +280,34 @@ variable again after the process starts. The plugin does not rewrite JSON inside
 `--settings` or alter those files. Exclude the whole `--settings` option when its
 launch-time document should not be replayed.
 
+## Restore launch prefix
+
+To run one assistant through a wrapper on restore, set its per-tool option to
+the wrapper's absolute executable path. The path must contain no whitespace or
+control characters and must be executable. Restore shell-quotes it and places
+it before the normal resume command; it is read from the tmux option at restore
+time and is never stored in the sidecar. An invalid value is logged and restore
+falls back to the plain command. The prefix applies to session resumes only;
+vouched relaunch commands are sent as vouched.
+
+```bash
+set -g @assistant-resurrect-claude-launch-prefix '/home/me/bin/claude-wrapper'
+```
+
+The wrapper receives the assistant command and its arguments. With a prefix,
+restore no longer puts `command` in front of the assistant, so the wrapper must
+end with `exec "$@"`: a script has no interactive aliases or functions, and
+that reaches the real binary:
+
+```sh
+#!/bin/sh
+# Set up the environment needed by Claude here.
+exec "$@"
+```
+
+The option is named per tool, with the same tool names as the per-tool options
+in [Excluding replayed flags and environment variables](#excluding-replayed-flags-and-environment-variables).
+
 ## Session-less relaunch vouchers
 
 Long-lived modes such as `claude agents`, `claude gateway`, and
