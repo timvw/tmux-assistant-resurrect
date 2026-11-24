@@ -968,6 +968,44 @@ assert_not_contains "stale cwd pane is not cleared" "$(cat "$TMUX_LOG")" "send-k
 assert_contains "later valid entry is still replayed" "$(cat "$TMUX_LOG")" "send-keys|%4|command claude --resume 'sid-good'"
 assert_contains "only the valid entry is counted" "$restore_log" "restored 1 of 5"
 
+echo "== control characters are never typed into a pane =="
+# send-keys delivers them as keystrokes: a CR in a cwd would submit the rest
+# of the directory name as its own command, whatever the quoting.
+export MOCK_PANES='%1|0|0|cr-cwd
+%2|0|0|esc-env
+%3|0|0|ctl-key
+%4|0|0|ctl-args
+%5|0|0|ws-args
+%6|0|0|good'
+export MOCK_SHELLS=''
+export MOCK_CAPTURE_ENV='FOO'
+: >"$RESURRECT_DIR/assistant-restore.log"
+jq -n '{sessions:[
+  {pane:"cr-cwd:0.0",tool:"claude",session_id:"sid-cr",cwd:"/tmp/x\rtouch /tmp/pwned"},
+  {pane:"esc-env:0.0",tool:"claude",session_id:"sid-esc",cwd:"",env:{FOO:"a\u001b[2Jb"}},
+  {pane:"ctl-key:0.0",tool:"claude",session_id:"sid-key",cwd:"",env:{"FOO\u0003":"v"}},
+  {pane:"ctl-args:0.0",tool:"claude",session_id:"sid-args",cwd:"",cli_args:"--model\u0015 opus"},
+  {pane:"ws-args:0.0",tool:"claude",session_id:"sid-ws",cwd:"",cli_args:"--model\topus\n--debug"},
+  {pane:"good:0.0",tool:"claude",session_id:"sid-good",cwd:""}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+tmux_log=$(cat "$TMUX_LOG")
+assert_eq "control characters do not make restore fail" "0" "$RESTORE_STATUS"
+assert_contains "a CR in the cwd is rejected" "$restore_log" "sidecar entry 1 contains control characters"
+assert_contains "an ESC in a captured env value is rejected" "$restore_log" "sidecar entry 2 contains control characters"
+assert_contains "a control character in an env key is rejected" "$restore_log" "sidecar entry 3 contains control characters"
+assert_contains "a control character in cli_args is rejected" "$restore_log" "sidecar entry 4 contains control characters"
+for rejected in %1 %2 %3 %4; do
+	assert_not_contains "nothing is typed into rejected pane $rejected" "$tmux_log" "send-keys|$rejected|"
+done
+assert_not_contains "the injected text never reaches send-keys" "$tmux_log" "pwned"
+assert_contains "tab and newline in cli_args still split into arguments" "$tmux_log" \
+	"send-keys|%5|command claude '--model' 'opus' '--debug' --resume 'sid-ws'"
+assert_contains "a clean entry after them is still replayed" "$tmux_log" "send-keys|%6|command claude --resume 'sid-good'"
+assert_contains "only the clean entries are counted" "$restore_log" "restored 2 of 6"
+export MOCK_CAPTURE_ENV=''
+
 export MOCK_PANES='%6|0|0|broader-id'
 jq -n '{sessions:[{
   pane:"broader-id:0.0",tool:"codex",session_id:"_base64/id+=",cwd:""
@@ -1006,13 +1044,18 @@ assert_contains "duplicate pane is reported" "$restore_log" "duplicate sidecar e
 assert_contains "duplicate pane is excluded from summary" "$restore_log" "restored 1 of 2"
 
 evil_tool=$(printf 'claude\nFORGED-LOG-LINE')
+# Start from an empty log: earlier blocks already wrote the rejection message.
+: >"$RESURRECT_DIR/assistant-restore.log"
 jq -n --arg tool "$evil_tool" '{sessions:[
   {pane:"duplicate:0.0",tool:$tool,session_id:"--invalid",cwd:""}
 ]}' >"$RESURRECT_DIR/assistant-sessions.json"
 run_restore
 restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
-escaped_lines=$(grep -c 'claude.*FORGED-LOG-LINE' "$RESURRECT_DIR/assistant-restore.log" || true)
-assert_eq "embedded newline is escaped onto one log line" "1" "$escaped_lines"
+# The entry is now refused for its control character before any of its values
+# reach the log; either way no line of the log may start with the forged text.
+forged_lines=$(grep -c '^FORGED-LOG-LINE' "$RESURRECT_DIR/assistant-restore.log" || true)
+assert_eq "an embedded newline cannot forge a log line" "0" "$forged_lines"
+assert_contains "a newline in the tool name is refused" "$restore_log" "sidecar entry 1 contains control characters"
 forged_lines=$(grep -c '^FORGED-LOG-LINE' "$RESURRECT_DIR/assistant-restore.log" || true)
 assert_eq "standalone injected log line is rejected" "0" "$forged_lines"
 

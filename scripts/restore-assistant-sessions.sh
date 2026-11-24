@@ -222,6 +222,20 @@ while read -r entry; do
 		log "malformed sidecar entry $entry_number, skipping"
 		continue
 	fi
+	# Everything below is typed into the pane with send-keys, and quoting does
+	# not protect control characters there: they reach the line editor as
+	# keystrokes, where a CR submits the rest as a separate command and ^C or
+	# ^U discards the opening quote. No shell can quote that portably, so an
+	# entry carrying one in any value or key (a cwd from #{pane_current_path},
+	# a captured env value, ...) is not replayed. Tab and newline in cli_args
+	# are exempt: restore word-splits that field, so they never reach the pane.
+	if printf '%s\n' "$entry" | jq -e '
+		def has_ctl: test("[[:cntrl:]]");
+		(del(.cli_args) | [.. | (strings, (objects | keys[]))] | any(has_ctl))
+		or ((.cli_args // "") | gsub("[\t\n]"; "") | has_ctl)' >/dev/null 2>&1; then
+		log "sidecar entry $entry_number contains control characters, skipping"
+		continue
+	fi
 
 	pane=$(printf '%s\n' "$entry" | jq -r '.pane')
 	tool=$(printf '%s\n' "$entry" | jq -r '.tool')
@@ -235,6 +249,10 @@ while read -r entry; do
 	relaunch_cmd=$(printf '%s\n' "$entry" | jq -r '.cmd // empty')
 	cwd=$(printf '%s\n' "$entry" | jq -r '.cwd // empty')
 	cli_args=$(printf '%s\n' "$entry" | jq -r '.cli_args // empty')
+	# A native Windows jq writes each newline inside the value as CRLF. The
+	# entry check above rejected any CR in the saved cli_args, so every CR here
+	# came from that translation; left in, it would be typed into the pane.
+	cli_args="${cli_args//$'\r'/}"
 	# The save path stops writing credential flags into the sidecar, but files
 	# written before that are still on disk and are read verbatim here. Without
 	# this the old value would be replayed into the pane and copied into the
@@ -697,6 +715,16 @@ while read -r entry; do
 			fi
 		fi
 	fi
+
+	# Last line of defence for the entry check above: whatever produced it
+	# (another field, a platform's jq output), a control character in the
+	# typed line would reach the pane's line editor as a keystroke.
+	case "$full_cmd" in
+	*[[:cntrl:]]*)
+		log "replay command for $tool in $pane contains control characters, skipping"
+		continue
+		;;
+	esac
 
 	if [ "$kind" = "relaunch" ]; then
 		log "relaunching $tool in $pane (cmd: $log_cmd)"
