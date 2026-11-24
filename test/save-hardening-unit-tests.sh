@@ -485,6 +485,19 @@ assert_eq "--auth-token VALUE form is stripped" \
 	"--model gpt-4" \
 	"$(extract_cli_args pi "pi --auth-token bearer-xyz --model gpt-4")"
 
+echo "== a bare -- ends the options =="
+# Restore appends its own flags after cli_args, so a saved `--` would hand
+# them to the assistant as prompt text.
+assert_eq "a bare -- is dropped with the prompt after it" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --model gpt-4 -- review the thing")"
+assert_eq "a dash-leading prompt word after -- is not kept as a flag" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --model gpt-4 -- -n is the flag to explain")"
+assert_eq "flags before a prompt without -- are still kept" \
+	"--model gpt-4" \
+	"$(extract_cli_args pi "pi --model gpt-4 review the thing")"
+
 # @assistant-resurrect-drop-flags removes user-listed flags with their values,
 # in every spelling, and ignores entries that are not option-shaped.
 echo "== drop-flags =="
@@ -639,7 +652,25 @@ if [ -r "/proc/$$/cmdline" ]; then
 	bash "$SANDBOX/launcher/claude" --dangerously-skip-permissions \
 		'write a haiku' --permission-mode plan >/dev/null 2>&1 &
 	TAIL_RESTRICTED_PID=$!
-	sleep 1
+	bash "$SANDBOX/launcher/claude" --append-system-prompt-file \
+		"$SANDBOX/sp.md" -- 'review the thing' >/dev/null 2>&1 &
+	SEPARATOR_PID=$!
+	# Poll until every launcher has exec'd: $! exists from the fork, and until
+	# the exec its cmdline is still this suite's, which a fixed sleep on a slow
+	# runner would read instead.
+	argv_tries=0
+	for argv_pid in "$SPACED_PID" "$PROMPTED_PID" "$NEWLINE_PID" \
+		"$RESTRICTED_PID" "$VARIADIC_PID" "$EMPTY_PID" "$OPTIONAL_PID" \
+		"$TAIL_RESTRICTED_PID" "$SEPARATOR_PID"; do
+		until tr '\0' ' ' <"/proc/$argv_pid/cmdline" 2>/dev/null |
+			grep -qF "$SANDBOX/launcher/claude "; do
+			argv_tries=$((argv_tries + 1))
+			[ "$argv_tries" -ge 100 ] && break
+			sleep 0.1
+		done
+	done
+	assert_eq "claude launchers show their own argv" yes \
+		"$([ "$argv_tries" -lt 100 ] && echo yes || echo no)"
 	# ps flattens both to the same shape; only cmdline tells them apart.
 	assert_eq "a space-bearing path drops its option and keeps the tail" \
 		"--model opus" \
@@ -685,9 +716,14 @@ if [ -r "/proc/$$/cmdline" ]; then
 		"$(extract_cli_args claude \
 			"claude --dangerously-skip-permissions write a haiku --permission-mode plan" \
 			"$TAIL_RESTRICTED_PID")"
+	assert_eq "a bare -- before the prompt is dropped with it" \
+		"--append-system-prompt-file $SANDBOX/sp.md" \
+		"$(extract_cli_args claude \
+			"claude --append-system-prompt-file $SANDBOX/sp.md -- review the thing" \
+			"$SEPARATOR_PID")"
 	kill "$SPACED_PID" "$PROMPTED_PID" "$NEWLINE_PID" \
 		"$RESTRICTED_PID" "$VARIADIC_PID" "$EMPTY_PID" "$OPTIONAL_PID" \
-		"$TAIL_RESTRICTED_PID" 2>/dev/null
+		"$TAIL_RESTRICTED_PID" "$SEPARATOR_PID" 2>/dev/null
 else
 	printf '  [skip] claude exact argv from /proc (not available on this platform)\n'
 fi
