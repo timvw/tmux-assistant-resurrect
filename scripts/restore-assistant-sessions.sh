@@ -85,7 +85,11 @@ has_control_chars() {
 resolve_launch_prefix() {
 	local tool="$1" pane="$2" pane_shell="$3" candidate
 	LAUNCH_PREFIX=""
-	candidate=$(tmux show-option -gqv "@assistant-resurrect-${tool}-launch-prefix" 2>/dev/null || true)
+	# $(...) drops trailing newlines, which would hide one from the checks
+	# below. The sentinel keeps them; only tmux's own terminator is removed.
+	candidate=$(tmux show-option -gqv "@assistant-resurrect-${tool}-launch-prefix" 2>/dev/null && printf x) || true
+	candidate="${candidate%x}"
+	candidate="${candidate%$'\n'}"
 	[ -n "$candidate" ] || return 0
 	case "$candidate" in
 	/*) ;;

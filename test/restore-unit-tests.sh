@@ -1520,6 +1520,10 @@ for bad_prefix in relative-prefix "$SANDBOX/path with space" "$SANDBOX/not-execu
 	assert_contains "rejected prefix ($reason) falls back to the plain command" "$(cat "$TMUX_LOG")" "&& command claude --resume 'sid-prefix'"
 	assert_contains "rejected prefix ($reason) is logged" "$RESTORE_OUTPUT" "$reason"
 done
+# A valid path plus a newline: $(...) alone would trim it back to the valid path.
+export MOCK_CLAUDE_LAUNCH_PREFIX="$launch_prefix"$'\n'
+run_restore
+assert_contains 'a trailing newline is not trimmed into a valid prefix' "$(cat "$TMUX_LOG")" "&& command claude --resume 'sid-prefix'"
 
 export MOCK_CLAUDE_LAUNCH_PREFIX='' MOCK_CODEX_LAUNCH_PREFIX="$launch_prefix"
 launch_entry codex
