@@ -979,13 +979,13 @@ export MOCK_PANES='%1|0|0|cr-cwd
 %6|0|0|good'
 export MOCK_SHELLS=''
 export MOCK_CAPTURE_ENV='FOO'
-mkdir -p "$SANDBOX/ws-ok"
-jq -n --arg ok "$SANDBOX/ws-ok" '{sessions:[
+: >"$RESURRECT_DIR/assistant-restore.log"
+jq -n '{sessions:[
   {pane:"cr-cwd:0.0",tool:"claude",session_id:"sid-cr",cwd:"/tmp/x\rtouch /tmp/pwned"},
   {pane:"esc-env:0.0",tool:"claude",session_id:"sid-esc",cwd:"",env:{FOO:"a\u001b[2Jb"}},
   {pane:"ctl-key:0.0",tool:"claude",session_id:"sid-key",cwd:"",env:{"FOO\u0003":"v"}},
   {pane:"ctl-args:0.0",tool:"claude",session_id:"sid-args",cwd:"",cli_args:"--model\u0015 opus"},
-  {pane:"ws-args:0.0",tool:"claude",session_id:"sid-ws",cwd:$ok,cli_args:"--model\topus\n--debug"},
+  {pane:"ws-args:0.0",tool:"claude",session_id:"sid-ws",cwd:"",cli_args:"--model\topus\n--debug"},
   {pane:"good:0.0",tool:"claude",session_id:"sid-good",cwd:""}
 ]}' >"$RESURRECT_DIR/assistant-sessions.json"
 run_restore
@@ -1001,7 +1001,7 @@ for rejected in %1 %2 %3 %4; do
 done
 assert_not_contains "the injected text never reaches send-keys" "$tmux_log" "pwned"
 assert_contains "tab and newline in cli_args still split into arguments" "$tmux_log" \
-	"send-keys|%5|cd '$SANDBOX/ws-ok' && command claude '--model' 'opus' '--debug' --resume 'sid-ws'"
+	"send-keys|%5|command claude '--model' 'opus' '--debug' --resume 'sid-ws'"
 assert_contains "a clean entry after them is still replayed" "$tmux_log" "send-keys|%6|command claude --resume 'sid-good'"
 assert_contains "only the clean entries are counted" "$restore_log" "restored 2 of 6"
 export MOCK_CAPTURE_ENV=''
@@ -1044,6 +1044,8 @@ assert_contains "duplicate pane is reported" "$restore_log" "duplicate sidecar e
 assert_contains "duplicate pane is excluded from summary" "$restore_log" "restored 1 of 2"
 
 evil_tool=$(printf 'claude\nFORGED-LOG-LINE')
+# Start from an empty log: earlier blocks already wrote the rejection message.
+: >"$RESURRECT_DIR/assistant-restore.log"
 jq -n --arg tool "$evil_tool" '{sessions:[
   {pane:"duplicate:0.0",tool:$tool,session_id:"--invalid",cwd:""}
 ]}' >"$RESURRECT_DIR/assistant-sessions.json"
