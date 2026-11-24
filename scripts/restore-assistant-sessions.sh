@@ -222,6 +222,20 @@ while read -r entry; do
 		log "malformed sidecar entry $entry_number, skipping"
 		continue
 	fi
+	# Everything below is typed into the pane with send-keys, and quoting does
+	# not protect control characters there: they reach the line editor as
+	# keystrokes, where a CR submits the rest as a separate command and ^C or
+	# ^U discards the opening quote. No shell can quote that portably, so an
+	# entry carrying one in any value or key (a cwd from #{pane_current_path},
+	# a captured env value, ...) is not replayed. Tab and newline in cli_args
+	# are exempt: restore word-splits that field, so they never reach the pane.
+	if printf '%s\n' "$entry" | jq -e '
+		def has_ctl: test("[[:cntrl:]]");
+		(del(.cli_args) | [.. | (strings, (objects | keys[]))] | any(has_ctl))
+		or ((.cli_args // "") | gsub("[\t\n]"; "") | has_ctl)' >/dev/null 2>&1; then
+		log "sidecar entry $entry_number contains control characters, skipping"
+		continue
+	fi
 
 	pane=$(printf '%s\n' "$entry" | jq -r '.pane')
 	tool=$(printf '%s\n' "$entry" | jq -r '.tool')

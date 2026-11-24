@@ -72,6 +72,12 @@ fields are missing (old-format JSON), falls back to bare resume commands. For a
 `.relaunch` entry, it instead requires an exact current voucher match and builds
 the command from the matching voucher line.
 
+An entry with a control character in any value or key (cwd, captured env,
+session id, ...) is skipped and logged rather than replayed: `send-keys`
+delivers those bytes as keystrokes, where no quoting stops a CR or ^C from
+reaching the pane's line editor. Tab and newline inside `cli_args` are exempt,
+because that field is word-split before anything is typed.
+
 ## Repository structure
 
 ```
