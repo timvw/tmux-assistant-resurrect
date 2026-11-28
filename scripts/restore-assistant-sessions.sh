@@ -109,6 +109,12 @@ resolve_launch_prefix() {
 	case "$candidate" in
 	*=*) log "launch prefix for $tool in $pane contains '=', using plain command"; return 0 ;;
 	esac
+	# Quoting cannot be relied on for these two: bash 3.2 mangles the escaped
+	# apostrophe posix_quote emits, and fish reads a backslash as an escape
+	# inside single quotes. Either leaves the pane at an unbalanced line.
+	case "$candidate" in
+	*\'* | *\\*) log "launch prefix for $tool in $pane contains a quote or backslash, using plain command"; return 0 ;;
+	esac
 	# -x alone is also true for a directory, which would pass here and then
 	# fail in the pane.
 	if [ ! -f "$candidate" ] || [ ! -x "$candidate" ]; then

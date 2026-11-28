@@ -1513,12 +1513,17 @@ mkdir -p "$SANDBOX/prefix-dir"
 # A real executable again: env would read its path as an assignment.
 mkdir -p "$SANDBOX/a=b"
 cp "$launch_prefix" "$SANDBOX/a=b/wrapper"
-for bad_prefix in relative-prefix "$SANDBOX/path with space" "$SANDBOX/not-executable" "$SANDBOX/prefix-dir" "$SANDBOX/a=b/wrapper" "$SANDBOX/control$(printf '\001')prefix"; do
+# Real executables too: the pane shell, not the filesystem, trips on these.
+mkdir -p "$SANDBOX/it's" "$SANDBOX/back\\slash"
+cp "$launch_prefix" "$SANDBOX/it's/wrapper"
+cp "$launch_prefix" "$SANDBOX/back\\slash/wrapper"
+for bad_prefix in relative-prefix "$SANDBOX/path with space" "$SANDBOX/not-executable" "$SANDBOX/prefix-dir" "$SANDBOX/a=b/wrapper" "$SANDBOX/it's/wrapper" "$SANDBOX/back\\slash/wrapper" "$SANDBOX/control$(printf '\001')prefix"; do
 	case "$bad_prefix" in
 	relative-prefix) reason='must be an absolute path' ;;
 	*' with space') reason='contains whitespace' ;;
 	*not-executable | *prefix-dir) reason='is not an executable file' ;;
 	*a=b/wrapper) reason="contains '='" ;;
+	*"it's/wrapper" | *'back\slash/wrapper') reason='contains a quote or backslash' ;;
 	*) reason='contains control characters' ;;
 	esac
 	export MOCK_CLAUDE_LAUNCH_PREFIX="$bad_prefix"

@@ -284,11 +284,12 @@ launch-time document should not be replayed.
 
 To run one assistant through a wrapper on restore, set its per-tool option to
 the wrapper's absolute path. The path must contain no whitespace, control
-characters or `=`, and must name an executable file, not a directory. Restore
-shell-quotes it and places it before the normal resume command; it is read from
-the tmux option at restore time and is never stored in the sidecar. An invalid
-value is logged and restore falls back to the plain command. The prefix applies
-to session resumes only; vouched relaunch commands are sent as vouched.
+characters, `=`, `'` or `\`, and must name an executable file, not a directory.
+Restore shell-quotes it and places it before the normal resume command; it is
+read from the tmux option at restore time and is never stored in the sidecar.
+An invalid value is logged and restore falls back to the plain command. The
+prefix applies to session resumes only; vouched relaunch commands are sent as
+vouched.
 
 ```bash
 set -g @assistant-resurrect-claude-launch-prefix '/home/me/bin/claude-wrapper'
