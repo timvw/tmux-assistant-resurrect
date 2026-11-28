@@ -103,6 +103,12 @@ resolve_launch_prefix() {
 		log "launch prefix for $tool in $pane contains whitespace, using plain command"
 		return 0
 	fi
+	# The prefix often lands behind `env` (csh/tcsh, captured or dropped vars,
+	# a pinned state root), which reads any word with `=` as an assignment even
+	# when quoted: the wrapper would be skipped without an error.
+	case "$candidate" in
+	*=*) log "launch prefix for $tool in $pane contains '=', using plain command"; return 0 ;;
+	esac
 	# -x alone is also true for a directory, which would pass here and then
 	# fail in the pane.
 	if [ ! -f "$candidate" ] || [ ! -x "$candidate" ]; then
