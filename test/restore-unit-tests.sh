@@ -1505,6 +1505,33 @@ run_restore
 assert_contains 'prefix follows the csh env launcher' "$(cat "$TMUX_LOG")" "\\env '$launch_prefix' claude --resume 'sid-prefix'"
 export MOCK_SHELLS=''
 
+# Run the typed line in each real shell, bare and behind the env launcher. The
+# wrapper sets SAFE itself, so SAFE=wrapped also shows it runs after the
+# captured assignment and has the last word.
+for test_shell in bash zsh fish tcsh nu; do
+	export MOCK_SHELLS="%91|$test_shell" MOCK_EXEC_SHELL=''
+	if command -v "$test_shell" >/dev/null 2>&1; then
+		MOCK_EXEC_SHELL=$(command -v "$test_shell")
+	else
+		printf '  [skip] %s prefix execution (binary unavailable)\n' "$test_shell"
+		continue
+	fi
+	for prefix_form in bare env; do
+		case "$prefix_form" in
+		bare) export MOCK_CAPTURE_ENV='' MOCK_CLAUDE_DROP_ENV='' ;;
+		env) export MOCK_CAPTURE_ENV=SAFE MOCK_CLAUDE_DROP_ENV=ANTHROPIC_MODEL ;;
+		esac
+		run_restore
+		prefix_marker=$(cat "$ASSISTANT_MARKER" 2>/dev/null || true)
+		assert_contains "$test_shell runs the wrapper ($prefix_form form)" "$prefix_marker" 'SAFE=wrapped'
+		assert_contains "$test_shell wrapper passes the arguments through ($prefix_form form)" "$prefix_marker" 'arg=sid-prefix'
+		if [ "$prefix_form" = env ]; then
+			assert_contains "$test_shell keeps the dropped variable in front of the prefix" "$(cat "$TMUX_LOG")" "ANTHROPIC_MODEL"
+		fi
+	done
+done
+export MOCK_SHELLS='' MOCK_EXEC_SHELL='' MOCK_CAPTURE_ENV='' MOCK_CLAUDE_DROP_ENV=''
+
 # The whitespace case is a real executable, so only its own check rejects it.
 : >"$SANDBOX/not-executable"
 cp "$launch_prefix" "$SANDBOX/path with space"
@@ -1535,6 +1562,7 @@ done
 export MOCK_CLAUDE_LAUNCH_PREFIX="$launch_prefix"$'\n'
 run_restore
 assert_contains 'a trailing newline is not trimmed into a valid prefix' "$(cat "$TMUX_LOG")" "&& command claude --resume 'sid-prefix'"
+assert_contains 'a trailing newline is logged as a control character' "$RESTORE_OUTPUT" 'contains control characters'
 
 export MOCK_CLAUDE_LAUNCH_PREFIX='' MOCK_CODEX_LAUNCH_PREFIX="$launch_prefix"
 launch_entry codex
