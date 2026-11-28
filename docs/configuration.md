@@ -282,8 +282,8 @@ launch-time document should not be replayed.
 
 ## Restore launch prefix
 
-To run one assistant through a wrapper on restore, set its per-tool option to
-the wrapper's absolute path. The path must contain no whitespace, control
+To run one assistant through a wrapper on restore, set its per-tool option,
+`@assistant-resurrect-<tool>-launch-prefix`, to the wrapper's absolute path. The path must contain no whitespace, control
 characters, `=`, `'` or `\`, and must name an executable file, not a directory.
 Restore shell-quotes it and places it before the normal resume command; it is
 read from the tmux option at restore time and is never stored in the sidecar.
@@ -305,6 +305,19 @@ that reaches the real binary:
 # Set up the environment needed by Claude here.
 exec "$@"
 ```
+
+The wrapper is placed directly in front of the assistant, after everything
+else restore adds: `env`, the `-u` arguments from
+`@assistant-resurrect-drop-env`, captured variables and a pinned state root.
+On a pane with captured variables the line is, for example,
+`env VAR='value' '/home/me/bin/claude-wrapper' claude --resume '<id>'`. The
+wrapper therefore has the last word: a variable it sets overrides a captured
+one, and it can set again a variable that was dropped. Do not change a pinned
+state root there, or the saved session id no longer resolves.
+
+Restore chooses some flags by asking the assistant it finds on `PATH`, without
+going through the wrapper (see [Oh My Pi](#oh-my-pi-continuing-an-interrupted-turn) for `--restore`). A wrapper should
+not change which assistant binary runs.
 
 The option is named per tool, with the same tool names as the per-tool options
 in [Excluding replayed flags and environment variables](#excluding-replayed-flags-and-environment-variables).
