@@ -1508,11 +1508,13 @@ export MOCK_SHELLS=''
 # The whitespace case is a real executable, so only its own check rejects it.
 : >"$SANDBOX/not-executable"
 cp "$launch_prefix" "$SANDBOX/path with space"
-for bad_prefix in relative-prefix "$SANDBOX/path with space" "$SANDBOX/not-executable" "$SANDBOX/control$(printf '\001')prefix"; do
+# A directory passes -x, so it needs the regular-file check to be rejected.
+mkdir -p "$SANDBOX/prefix-dir"
+for bad_prefix in relative-prefix "$SANDBOX/path with space" "$SANDBOX/not-executable" "$SANDBOX/prefix-dir" "$SANDBOX/control$(printf '\001')prefix"; do
 	case "$bad_prefix" in
 	relative-prefix) reason='must be an absolute path' ;;
 	*' with space') reason='contains whitespace' ;;
-	*not-executable) reason='is not executable' ;;
+	*not-executable | *prefix-dir) reason='is not an executable file' ;;
 	*) reason='contains control characters' ;;
 	esac
 	export MOCK_CLAUDE_LAUNCH_PREFIX="$bad_prefix"

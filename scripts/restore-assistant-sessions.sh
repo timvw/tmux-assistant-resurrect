@@ -103,8 +103,10 @@ resolve_launch_prefix() {
 		log "launch prefix for $tool in $pane contains whitespace, using plain command"
 		return 0
 	fi
-	if [ ! -x "$candidate" ]; then
-		log "launch prefix for $tool in $pane is not executable, using plain command"
+	# -x alone is also true for a directory, which would pass here and then
+	# fail in the pane.
+	if [ ! -f "$candidate" ] || [ ! -x "$candidate" ]; then
+		log "launch prefix for $tool in $pane is not an executable file, using plain command"
 		return 0
 	fi
 	LAUNCH_PREFIX=$(shell_quote "$pane_shell" "$candidate")
